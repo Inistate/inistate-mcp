@@ -3,22 +3,126 @@ const BASE_URL =
   process.env.INISTATE_API_URL ||
   "https://api.inistate.com";
 
-const TOKEN =
+// API key auth (fsk prefix)
+const API_KEY =
   process.env.INISTATE_ACCESS_TOKEN || process.env.INISTATE_API_TOKEN;
 
-function headers(): Record<string, string> {
-  const h: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-  if (TOKEN) h["Authorization"] = `Bearer ${TOKEN}`;
+// Username/password auth (login → JWT)
+const USERNAME = process.env.INISTATE_USERNAME;
+const PASSWORD = process.env.INISTATE_PASSWORD;
+
+let jwt: string | null = null;
+let refreshToken: string | null = null;
+let storedUsername: string | null = USERNAME ?? null;
+let storedPassword: string | null = PASSWORD ?? null;
+let workspaceId: string | null = null;
+
+export function setWorkspaceId(wsid: string): void {
+  workspaceId = wsid;
+}
+
+export function getWorkspaceId(): string | null {
+  return workspaceId;
+}
+
+function extractTokens(data: Record<string, unknown>): void {
+  const token = data.token ?? data.access_token ?? data.jwt;
+  if (typeof token !== "string") {
+    throw new Error("Login response did not contain a token");
+  }
+  jwt = token;
+  const rt = data.refreshToken ?? data.refresh_token;
+  if (typeof rt === "string") refreshToken = rt;
+}
+
+/**
+ * Login with username/password to obtain a JWT + refresh token.
+ */
+export async function loginWithCredentials(
+  username: string,
+  password: string,
+): Promise<void> {
+  const params = new URLSearchParams();
+  params.set("grant_type", "password");
+  params.set("username", username);
+  params.set("password", password);
+  const res = await fetch(`${BASE_URL}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: params.toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Login failed (${res.status}): ${text}`);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  extractTokens(data);
+  // Store credentials for future re-login if refresh token is not available
+  storedUsername = username;
+  storedPassword = password;
+}
+
+/**
+ * Refresh the JWT using the refresh token.
+ * Falls back to full re-login if refresh fails or no refresh token exists.
+ */
+async function refreshAuth(): Promise<boolean> {
+  if (refreshToken) {
+    try {
+      const res = await fetch(`${BASE_URL}/token/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as Record<string, unknown>;
+        extractTokens(data);
+        return true;
+      }
+    } catch {
+      // refresh failed — fall through to re-login
+    }
+  }
+  // Fall back to re-login with stored credentials
+  if (storedUsername && storedPassword) {
+    try {
+      await loginWithCredentials(storedUsername, storedPassword);
+      return true;
+    } catch {
+      // re-login also failed
+    }
+  }
+  return false;
+}
+
+async function ensureAuth(): Promise<void> {
+  if (API_KEY || jwt) return;
+  if (storedUsername && storedPassword) {
+    await loginWithCredentials(storedUsername, storedPassword);
+  }
+}
+
+function authorizationValue(): string | null {
+  if (API_KEY) return `fsk ${API_KEY}`;
+  if (jwt) return `Bearer ${jwt}`;
+  return null;
+}
+
+function buildHeaders(contentType?: string): Record<string, string> {
+  const h: Record<string, string> = { Accept: "application/json" };
+  if (contentType) h["Content-Type"] = contentType;
+  const auth = authorizationValue();
+  if (auth) h["Authorization"] = auth;
+  if (workspaceId) h["wsid"] = workspaceId;
   return h;
 }
 
+function headers(): Record<string, string> {
+  return buildHeaders("application/json");
+}
+
 function authHeader(): Record<string, string> {
-  const h: Record<string, string> = { Accept: "application/json" };
-  if (TOKEN) h["Authorization"] = `Bearer ${TOKEN}`;
-  return h;
+  return buildHeaders();
 }
 
 function agentAction(status: number): string {
@@ -26,7 +130,7 @@ function agentAction(status: number): string {
     case 400:
       return "Check the error message, correct the input, and retry.";
     case 401:
-      return "Bearer token is invalid or expired. Cannot proceed.";
+      return "API key or token is invalid or expired. Check credentials and retry.";
     case 403:
       return "User lacks access to this resource. Inform the user.";
     case 404:
@@ -73,26 +177,56 @@ async function handleResponse(res: Response): Promise<unknown> {
   return data;
 }
 
+/** Can we attempt a token refresh? Only for JWT auth, not API key. */
+function canRefresh(): boolean {
+  return !API_KEY && (!!refreshToken || (!!storedUsername && !!storedPassword));
+}
+
+/**
+ * Core request function with automatic 401 refresh+retry.
+ */
+async function request(
+  url: string,
+  init: RequestInit,
+  getHeaders: () => Record<string, string>,
+): Promise<Response> {
+  await ensureAuth();
+  const res = await fetch(url, { ...init, headers: getHeaders() });
+  if (res.status === 401 && canRefresh()) {
+    const refreshed = await refreshAuth();
+    if (refreshed) {
+      return fetch(url, { ...init, headers: getHeaders() });
+    }
+  }
+  return res;
+}
+
 export async function get(path: string): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers: headers() });
+  const res = await request(`${BASE_URL}${path}`, {}, headers);
   return handleResponse(res);
 }
 
 export async function post(path: string, body?: unknown): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: "POST",
-    headers: headers(),
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  const res = await request(
+    `${BASE_URL}${path}`,
+    {
+      method: "POST",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    },
+    headers,
+  );
   return handleResponse(res);
 }
 
 export async function put(path: string, body?: unknown): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: "PUT",
-    headers: headers(),
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  const res = await request(
+    `${BASE_URL}${path}`,
+    {
+      method: "PUT",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    },
+    headers,
+  );
   return handleResponse(res);
 }
 
@@ -103,11 +237,11 @@ export async function uploadFormData(
   path: string,
   formData: FormData,
 ): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: "POST",
-    headers: authHeader(), // no Content-Type — FormData sets boundary
-    body: formData,
-  });
+  const res = await request(
+    `${BASE_URL}${path}`,
+    { method: "POST", body: formData },
+    authHeader,
+  );
   return handleResponse(res);
 }
 
@@ -117,10 +251,11 @@ export async function uploadFormData(
 export async function getRaw(
   path: string,
 ): Promise<{ redirectUrl: string | null; status: number; body: unknown }> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: authHeader(),
-    redirect: "manual",
-  });
+  const res = await request(
+    `${BASE_URL}${path}`,
+    { redirect: "manual" },
+    authHeader,
+  );
   if (res.status === 302 || res.status === 301) {
     return {
       redirectUrl: res.headers.get("Location"),

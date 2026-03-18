@@ -1,19 +1,10 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import "dotenv/config";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerTools } from "./tools.js";
-import { registerResources } from "./resources.js";
-import { registerPrompts } from "./prompts.js";
+import { createServer } from "./server.js";
 
-const server = new McpServer({
-  name: "inistate-mcp",
-  version: "1.0.0",
-});
-
-registerTools(server);
-registerResources(server);
-registerPrompts(server);
+const server = createServer();
 
 async function main() {
   const transport = new StdioServerTransport();

@@ -91,7 +91,7 @@ The MCP layer is the primary interface. A2A coordination is a future extension (
 
 ### 1.4 Intent Resolution — Agent-Driven
 
-> **AGENT INSTRUCTION:** Identify the user's intent from their request and follow the corresponding workflow sequence. The tool descriptions and prompts provide the necessary guidance. Always start with `list_workspaces` → `set_workspace` to bootstrap the session.
+> **AGENT INSTRUCTION:** Identify the user's intent from their request and follow the corresponding workflow sequence. The tool descriptions and prompts provide the necessary guidance. If no API key is configured, call `login` first. Then start with `list_workspaces` → `set_workspace` to bootstrap the session.
 
 | Mode | Example Request | Tool Chain |
 |---|---|---|
@@ -110,12 +110,13 @@ The MCP server exposes three types of MCP primitives:
 - **Resources** — background knowledge (§3)
 - **Prompts** — guided workflows (§4)
 
-All tools require a valid Bearer token in the `Authorization` header.
+All tools require valid authentication — either an API key (`fsk` prefix) or a JWT obtained via the `login` tool. See §5 for details.
 
 ### Tool Summary
 
 | # | Tool | Resolver | Mode | Purpose |
 |---|---|---|---|---|
+| 0 | `login` | `POST /token` | All | Authenticate with username/password to obtain a JWT |
 | 1 | `list_workspaces` | `GET /api/workspace` | All | List accessible workspaces |
 | 2 | `set_workspace` | `GET /api/workspace/{id}` | All | Set active workspace for session |
 | 3 | `list_modules` | `GET /api/mcp/` | All | List all modules in workspace |
@@ -132,6 +133,35 @@ All tools require a valid Bearer token in the `Authorization` header.
 | 14 | `validate_design` | Server-side | design, modify | Validate a module schema before submission |
 | 15 | `create_module` | `POST /api/configure/{name}` | design | Create a new module |
 | 16 | `update_module` | `PUT /api/configure/{name}` | modify | Update existing module schema |
+
+---
+
+### 2.0 login
+
+Authenticate with username and password to obtain a session token. Use this when no API key is configured and the user provides credentials. Subsequent API calls will use the obtained token automatically.
+
+**Resolver:** `POST /token` (form-encoded, `grant_type=password`)
+
+**Input Schema:**
+
+```json
+{
+  "type": "object",
+  "required": ["username", "password"],
+  "properties": {
+    "username": { "type": "string", "description": "Inistate account username or email" },
+    "password": { "type": "string", "description": "Account password" }
+  }
+}
+```
+
+**Response:**
+
+```json
+{ "message": "Login successful" }
+```
+
+> **Note:** The server stores the JWT and optional refresh token internally. Credentials are also retained in memory so the server can transparently re-authenticate on 401 responses. See §5 for the full authentication lifecycle.
 
 ---
 
@@ -163,7 +193,7 @@ List workspaces the current user has access to. Returns workspace IDs and names.
 
 ### 2.2 set_workspace
 
-Set the active workspace. Retrieves workspace details for the agent to store. The Inistate API associates the workspace with the bearer token session.
+Set the active workspace. Retrieves workspace details for the agent to store. The MCP server stores the workspace ID and sends it as a `wsid` header on all subsequent API requests.
 
 **Resolver:** `GET /api/workspace/{workspaceId}`
 
@@ -1356,17 +1386,48 @@ Rules:
 
 ## 5. Authentication and Authorization
 
-### 5.1 Bearer Token Authentication
+The MCP server supports two authentication methods. Only one is needed.
 
-All Inistate API calls require a bearer token in the Authorization header. The MCP server must be configured with a valid access token at startup.
+### 5.1 API Key Authentication
+
+When an API key (prefixed with `fsk`) is configured via environment variable, all requests use it directly:
 
 ```
-Authorization: Bearer <access_token>
+Authorization: fsk <api_key>
 ```
 
-### 5.2 Workspace Context
+**Configuration:**
 
-A workspace must be selected before calling any module or entry tools. The agent calls `set_workspace` to activate a workspace — the Inistate API associates the workspace with the bearer token. If no workspace has been set, the API returns HTTP 400:
+```
+INISTATE_ACCESS_TOKEN=<api_key>
+# or
+INISTATE_API_TOKEN=<api_key>
+```
+
+### 5.2 Username/Password Authentication (JWT)
+
+When no API key is configured, the server authenticates via username and password to obtain a JWT. This can happen two ways:
+
+1. **Environment variables at startup** — if `INISTATE_USERNAME` and `INISTATE_PASSWORD` are set, the server auto-authenticates on the first API call.
+2. **Interactive login** — the agent calls the `login` tool with user-provided credentials.
+
+**Token lifecycle:**
+
+```
+POST /token (grant_type=password) → JWT + refresh token
+  ↓
+All requests use: Authorization: Bearer <jwt>
+  ↓
+On 401 → POST /token/refresh (refresh token) → new JWT
+  ↓
+If refresh fails → re-login with stored credentials
+```
+
+The server automatically handles 401 responses by refreshing the JWT or re-authenticating, then retrying the failed request. This is transparent to the agent.
+
+### 5.3 Workspace Context
+
+A workspace must be selected before calling any module or entry tools. The agent calls `set_workspace` to activate a workspace. The MCP server stores the workspace ID and includes it as a `wsid` header on all subsequent API requests. If no workspace has been set, the API returns HTTP 400:
 
 ```json
 {
@@ -1375,10 +1436,11 @@ A workspace must be selected before calling any module or entry tools. The agent
 }
 ```
 
-### 5.3 Authorization Scopes
+### 5.4 Authorization Scopes
 
 | Operation | Required Role | Notes |
 |---|---|---|
+| `login` | Unauthenticated | Produces a JWT for subsequent calls |
 | `list_workspaces`, `set_workspace` | Any authenticated user | |
 | `list_modules`, `get_module_schema`, `get_module_canvas` | Any authenticated user | Respects module-level access |
 | `list_entries`, `get_entry`, `get_form` | Any authenticated user | Respects module-level access |
@@ -1416,7 +1478,7 @@ Every interaction with the FACTSOps MCP server falls into one of five modes, det
 > **AGENT INSTRUCTION:** Follow these rules in every interaction:
 
 1. **Identify the mode from the user request** (design/execute/modify/query/ambiguous) and follow the corresponding workflow sequence from tool descriptions
-2. **Always bootstrap the workspace first** — call `list_workspaces` → `set_workspace` before any module operations
+2. **Always bootstrap the session** — if no API key is configured, call `login` first. Then call `list_workspaces` → `set_workspace` before any module operations
 3. **All input/output keys use field DISPLAY NAMES** — never use internal IDs
 3. **State references use state NAMES** — never GUIDs
 4. **Activity references use activity NAMES** — resolved to IDs internally
@@ -1431,6 +1493,8 @@ Every interaction with the FACTSOps MCP server falls into one of five modes, det
 This is the most common mode. The agent finds an entry and performs an activity on it:
 
 ```
+[login(username, password)]  ← only if no API key configured
+
 list_workspaces() → set_workspace(workspaceId)
 
 list_modules()
@@ -2308,120 +2372,126 @@ These rules are enforced by `validate_design` (server-side) and by the Inistate 
 |---|---|---|
 | Runtime | Node.js 20+ / TypeScript | MCP SDK is TypeScript-first |
 | MCP SDK | `@modelcontextprotocol/sdk` | Official SDK; handles transport, protocol, serialization |
-| HTTP Client | `fetch` (native) or `axios` | For proxying to `api.inistate.com` |
-| Transport | stdio (default), SSE, Streamable HTTP | stdio for local; SSE/HTTP for remote deployment |
+| HTTP Client | `fetch` (native) | For proxying to `api.inistate.com` |
+| Transport | stdio (default), Streamable HTTP | stdio for local CLI; Streamable HTTP for remote/web deployment |
+| Env loader | `dotenv` | Loads `.env` files for configuration |
 | Package Registry | npm | For MCP registry submission |
 
 ### 14.2 Server Configuration
 
 ```
-INISTATE_API_BASE=https://api.inistate.com
-INISTATE_ACCESS_TOKEN=<bearer_token>
+# API base URL (optional, defaults to https://api.inistate.com)
+INISTATE_API_URL=https://api.inistate.com
+
+# Authentication — choose one method:
+
+# Method 1: API key (fsk prefix)
+INISTATE_ACCESS_TOKEN=<api_key>
+# or
+INISTATE_API_TOKEN=<api_key>
+
+# Method 2: Username/password (auto-login on first API call)
+INISTATE_USERNAME=<username>
+INISTATE_PASSWORD=<password>
+
+# HTTP transport port (only for http entry point)
+PORT=3000
 ```
 
 ### 14.3 Project Structure
 
 ```
-inistate-mcp-server/
+inistate-mcp/
 ├── src/
-│   ├── index.ts              # Server entry point
-│   ├── tools/
-│   │   ├── workspace.ts      # list_workspaces, set_workspace
-│   │   ├── modules.ts        # list_modules, get_module_schema, get_module_canvas
-│   │   ├── entries.ts        # list_entries, get_entry
-│   │   ├── forms.ts          # get_form
-│   │   ├── activities.ts     # submit_activity
-│   │   ├── files.ts          # upload_file, download_file
-│   │   ├── history.ts        # get_entry_history
-│   │   ├── design.ts         # design_workflow, validate_design
-│   │   └── configure.ts      # create_module, update_module
-│   ├── resources/
-│   │   └── modules.ts        # Resource URI handlers
-│   ├── prompts/
-│   │   └── workflows.ts      # Prompt template definitions
-│   ├── lib/
-│   │   ├── api-client.ts     # HTTP client wrapper for Inistate API
-│   │   ├── auth.ts           # Token management
-│   │   ├── errors.ts         # Error mapping
-│   │   └── schema-loader.ts  # Loads and caches inistate-schema.json at startup
-│   └── types/
-│       └── schema.ts         # TypeScript types for ModuleSchema, Entry, etc.
-├── schema/
-│   └── inistate-schema.json  # FACTSOps schema — runtime reference for validation, design, and agent context
+│   ├── index.ts        # stdio entry point (dotenv + StdioServerTransport)
+│   ├── http.ts         # Streamable HTTP entry point (dotenv + node:http + StreamableHTTPServerTransport)
+│   ├── server.ts       # createServer() factory — registers tools, resources, prompts
+│   ├── api.ts          # HTTP client: auth (API key / JWT / refresh), headers, wsid, request wrapper
+│   ├── tools.ts        # All 17 MCP tool registrations (login … update_module)
+│   ├── resources.ts    # MCP resource URI handlers
+│   ├── prompts.ts      # MCP prompt template definitions
+│   ├── schema.ts       # FACTSOps schema loading, design_workflow logic, validate_design logic
+│   └── schema.test.ts  # Schema validation tests
 ├── package.json
 ├── tsconfig.json
 └── README.md
 ```
 
+**Dual entry points:**
+
+| Entry point | Binary | Transport | Use case |
+|---|---|---|---|
+| `src/index.ts` | `inistate-mcp` | `StdioServerTransport` | Local CLI (Claude Code, etc.) |
+| `src/http.ts` | `inistate-mcp-http` | `StreamableHTTPServerTransport` | Remote/web deployment, Docker |
+
+Both entry points call `createServer()` from `server.ts`, which returns a fully configured `McpServer` instance. The HTTP entry point manages session-scoped transports keyed by `mcp-session-id` header, with a `/health` endpoint and CORS support.
+
 ### 14.4 Tool Registration Pattern
 
+The server uses the `McpServer` high-level API from `@modelcontextprotocol/sdk` with Zod schemas for input validation:
+
 ```typescript
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+// server.ts — factory function
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTools } from "./tools.js";
+import { registerResources } from "./resources.js";
+import { registerPrompts } from "./prompts.js";
+
+export function createServer(): McpServer {
+  const server = new McpServer({
+    name: "inistate-mcp",
+    version: "1.0.0",
+  });
+  registerTools(server);
+  registerResources(server);
+  registerPrompts(server);
+  return server;
+}
+```
+
+```typescript
+// tools.ts — tool registration example
+import { z } from "zod";
+import * as api from "./api.js";
+
+export function registerTools(server: McpServer) {
+  server.registerTool(
+    "login",
+    {
+      description: "Authenticate with username and password...",
+      inputSchema: {
+        username: z.string().describe("Inistate account username or email"),
+        password: z.string().describe("Account password"),
+      },
+    },
+    async ({ username, password }) => {
+      await api.loginWithCredentials(username, password);
+      return { content: [{ type: "text", text: JSON.stringify({ message: "Login successful" }) }] };
+    },
+  );
+
+  server.registerTool(
+    "list_workspaces",
+    {
+      description: "List workspaces the current user has access to...",
+      inputSchema: {},
+    },
+    async () => {
+      const data = await api.get("/api/workspace");
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    },
+  );
+  // ... remaining tools
+}
+```
+
+```typescript
+// index.ts — stdio entry point
+import "dotenv/config";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createServer } from "./server.js";
 
-const server = new Server(
-  { name: "inistate-mcp-server", version: "1.0.0" },
-  { capabilities: { tools: {}, resources: {}, prompts: {} } }
-);
-
-// Register tools
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "list_workspaces",
-      description: "List workspaces the current user has access to. This is typically the first tool to call in any session.",
-      inputSchema: { type: "object", properties: {} }
-    },
-    {
-      name: "list_modules",
-      description: "List all discoverable modules in the current workspace. Prerequisite: set_workspace.",
-      inputSchema: { type: "object", properties: {} }
-    },
-    // ... remaining tools
-  ]
-}));
-
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  switch (name) {
-    case "list_workspaces":
-      const workspaces = await apiClient.get("/api/workspace");
-      return { content: [{ type: "text", text: JSON.stringify(workspaces) }] };
-    case "list_modules":
-      const response = await apiClient.get("/api/mcp/");
-      return { content: [{ type: "text", text: JSON.stringify(response) }] };
-    // ... remaining handlers
-  }
-});
-
-// Register resources
-server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-  resources: [
-    {
-      uri: "inistate://modules",
-      name: "Available Modules",
-      description: "List of all FACTSOps modules in the workspace",
-      mimeType: "application/json"
-    }
-  ]
-}));
-
-// Register prompts
-server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-  prompts: [
-    {
-      name: "design_factsops_workflow",
-      description: "Guide through designing a complete FACTSOps workflow module",
-      arguments: [
-        { name: "entity", description: "What entity is this workflow about?", required: true },
-        { name: "industry", description: "Industry context", required: false }
-      ]
-    }
-  ]
-}));
-
+const server = createServer();
 const transport = new StdioServerTransport();
 await server.connect(transport);
 ```
@@ -2502,15 +2572,56 @@ Every tool that resolves to an Inistate API endpoint must construct the HTTP req
 **Base URL and headers:**
 
 ```typescript
-const BASE_URL = process.env.INISTATE_API_BASE || "https://api.inistate.com";
-const TOKEN = process.env.INISTATE_ACCESS_TOKEN;
+const BASE_URL = process.env.INISTATE_API_URL || "https://api.inistate.com";
 
-function getHeaders(): Record<string, string> {
-  return {
-    "Authorization": `Bearer ${TOKEN}`,
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-  };
+// API key auth (fsk prefix)
+const API_KEY = process.env.INISTATE_ACCESS_TOKEN || process.env.INISTATE_API_TOKEN;
+
+// JWT auth (populated after login)
+let jwt: string | null = null;
+let workspaceId: string | null = null;
+
+function authorizationValue(): string | null {
+  if (API_KEY) return `fsk ${API_KEY}`;
+  if (jwt) return `Bearer ${jwt}`;
+  return null;
+}
+
+function buildHeaders(contentType?: string): Record<string, string> {
+  const h: Record<string, string> = { Accept: "application/json" };
+  if (contentType) h["Content-Type"] = contentType;
+  const auth = authorizationValue();
+  if (auth) h["Authorization"] = auth;
+  if (workspaceId) h["wsid"] = workspaceId;
+  return h;
+}
+
+function headers(): Record<string, string> {
+  return buildHeaders("application/json");
+}
+```
+
+**Automatic 401 refresh+retry:**
+
+All requests go through a `request()` wrapper that intercepts 401 responses. For JWT auth, it attempts a token refresh (or re-login with stored credentials) and retries the original request once. This is transparent to tool handlers.
+
+```typescript
+// getHeaders is a callback (not a pre-built object) so that headers are
+// rebuilt with the fresh JWT after a refresh cycle.
+async function request(
+  url: string,
+  init: RequestInit,
+  getHeaders: () => Record<string, string>,
+): Promise<Response> {
+  await ensureAuth(); // auto-login if credentials are configured but no JWT yet
+  const res = await fetch(url, { ...init, headers: getHeaders() });
+  if (res.status === 401 && canRefresh()) {
+    const refreshed = await refreshAuth();
+    if (refreshed) {
+      return fetch(url, { ...init, headers: getHeaders() });
+    }
+  }
+  return res;
 }
 ```
 
@@ -2552,11 +2663,10 @@ async function listEntries(args: ListEntriesArgs) {
     pageSize: args.pageSize ?? 50
   };
 
-  const response = await fetch(`${BASE_URL}/api/mcp/list`, {
+  const response = await request(`${BASE_URL}/api/mcp/list`, {
     method: "POST",
-    headers: getHeaders(),
-    body: JSON.stringify(body)
-  });
+    body: JSON.stringify(body),
+  }, headers);
 
   return handleResponse(response);
 }
@@ -2571,13 +2681,13 @@ async function updateModule(args: UpdateModuleArgs) {
   const body = { ...args };
   delete body.module; // module is in the URL path, not the body
 
-  const response = await fetch(
+  const response = await request(
     `${BASE_URL}/api/configure/${encodeURIComponent(moduleName)}`,
     {
       method: "PUT",
-      headers: getHeaders(),
-      body: JSON.stringify(body)
-    }
+      body: JSON.stringify(body),
+    },
+    headers,
   );
 
   return handleResponse(response);
@@ -2588,6 +2698,7 @@ async function updateModule(args: UpdateModuleArgs) {
 
 | Tool | Method | URL | Body |
 |---|---|---|---|
+| `login` | POST | `/token` | Form-encoded: `grant_type=password&username=...&password=...` |
 | `list_workspaces` | GET | `/api/workspace` | — |
 | `set_workspace` | GET | `/api/workspace/{workspaceId}` | — |
 | `list_modules` | GET | `/api/mcp/` | — |
@@ -2651,7 +2762,7 @@ async function handleResponse(response: Response): Promise<ToolResponse> {
 function getAgentAction(status: number): string {
   switch (status) {
     case 400: return "Check the error message, correct the input, and retry.";
-    case 401: return "Bearer token is invalid or expired. Cannot proceed.";
+    case 401: return "API key or token is invalid or expired. Check credentials and retry.";
     case 403: return "User lacks access to this resource. Inform the user.";
     case 404: return "Resource not found. Verify the module name or entry ID.";
     case 422: return "Validation failed. Check details[].field and details[].message for specifics.";
@@ -2715,12 +2826,11 @@ async function uploadFile(args: { module?: string; file: Buffer; fileName: strin
   formData.append("file", new Blob([args.file], { type: args.mimeType }), args.fileName);
   if (args.module) formData.append("module", args.module);
 
-  const response = await fetch(`${BASE_URL}/api/mcp/upload`, {
+  // authHeader() omits Content-Type — FormData sets it with boundary automatically
+  const response = await request(`${BASE_URL}/api/mcp/upload`, {
     method: "POST",
-    headers: { "Authorization": `Bearer ${TOKEN}` },
-    // Do NOT set Content-Type — FormData sets it with boundary automatically
-    body: formData
-  });
+    body: formData,
+  }, authHeader);
 
   return handleResponse(response);
 }
@@ -2732,11 +2842,8 @@ async function uploadFile(args: { module?: string; file: Buffer; fileName: strin
 
 ```typescript
 async function downloadFile(args: { moduleName: string; guid: string; fileName: string }) {
-  const url = `${BASE_URL}/api/mcp/download/${encodeURIComponent(args.moduleName)}/s/${args.guid}/${encodeURIComponent(args.fileName)}`;
-  const response = await fetch(url, {
-    headers: getHeaders(),
-    redirect: "manual"  // Don't follow — return the URL
-  });
+  const url = `${BASE_URL}/api/mcp/download/${encodeURIComponent(args.moduleName)}/s/${encodeURIComponent(args.guid)}/${encodeURIComponent(args.fileName)}`;
+  const response = await request(url, { redirect: "manual" }, authHeader);
 
   if (response.status === 302) {
     const downloadUrl = response.headers.get("Location");
@@ -2749,54 +2856,33 @@ async function downloadFile(args: { moduleName: string; guid: string; fileName: 
 
 ---
 
-### 14.8 Stateless Server — Context Lives on the Agent
+### 14.8 Server State
 
-The MCP server is **completely stateless**. It stores nothing between tool calls — no workspace ID, no module name, no session objects. Every tool call is an independent request.
+The MCP server maintains minimal in-process state to manage authentication and workspace context:
 
-**Why stateless:** This means the server can be deployed as a pure proxy with no scaling concerns. Any transport (stdio, SSE, Streamable HTTP) works identically. No session cleanup, no memory leaks, no concurrency issues.
-
-**Where context lives:**
-
-| Context | Stored By | Passed How |
+| State | Stored In | Purpose |
 |---|---|---|
-| Workspace ID | AI agent (in conversation memory) | Agent includes `workspaceId` in tool calls that need it |
-| Current module name | AI agent | Agent includes `module` parameter in every module-scoped call |
-| Current entry ID | AI agent | Agent includes `entryId` parameter in every entry-scoped call |
-| Pagination position | AI agent | Agent tracks `currentPage` and `totalItems` from responses |
-| Bearer token | MCP server config (env var) | Server attaches to every API request as `Authorization` header |
+| JWT + refresh token | `api.ts` module scope | Authenticate API requests, auto-refresh on 401 |
+| Stored credentials | `api.ts` module scope | Re-login if refresh token is unavailable |
+| Workspace ID | `api.ts` module scope | Sent as `wsid` header on all API requests |
 
 **How workspace selection works:**
 
-1. Agent calls `list_workspaces` → server proxies `GET /api/workspace` → returns list of workspaces to the agent
-2. Agent calls `set_workspace(workspaceId)` → server proxies `GET /api/workspace/{workspaceId}` → returns workspace details (name, settings) to the agent
-3. Agent stores the workspace ID and name in its own conversation context
-4. For all subsequent tool calls, the Inistate API uses the bearer token's associated workspace context
+1. Agent calls `list_workspaces` → server proxies `GET /api/workspace` → returns list
+2. Agent calls `set_workspace(workspaceId)` → server stores the workspace ID via `setWorkspaceId()` and proxies `GET /api/workspace/{workspaceId}` → returns workspace details
+3. All subsequent API requests include the `wsid` header automatically
 
-The `set_workspace` call is a data retrieval call — it returns workspace information for the agent to use. The Inistate API session management is tied to the bearer token, not to the MCP server.
+**Where context lives (agent vs. server):**
 
-**Server implementation — pure pass-through:**
+| Context | Stored By | Notes |
+|---|---|---|
+| Auth credentials / JWT | MCP server (`api.ts`) | Managed automatically, transparent to agent |
+| Workspace ID | MCP server (`api.ts`) | Set once via `set_workspace`, sent as header |
+| Current module name | AI agent | Agent includes `module` parameter in every module-scoped call |
+| Current entry ID | AI agent | Agent includes `entryId` parameter in every entry-scoped call |
+| Pagination position | AI agent | Agent tracks `currentPage` and `totalItems` from responses |
 
-```typescript
-// set_workspace — just fetches and returns workspace data. Stores nothing.
-async function setWorkspace(args: { workspaceId: string }) {
-  const response = await fetch(
-    `${BASE_URL}/api/workspace/${args.workspaceId}`,
-    { headers: getHeaders() }
-  );
-  return handleResponse(response);
-}
-
-// Headers — only the bearer token, no workspace injection needed
-function getHeaders(): Record<string, string> {
-  return {
-    "Authorization": `Bearer ${TOKEN}`,
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-  };
-}
-```
-
-> **AGENT INSTRUCTION:** You are responsible for tracking workspace context across the conversation. After calling `set_workspace`, remember the workspace ID and name. You do not need to pass `workspaceId` to subsequent tools — the API session handles this. But you must call `set_workspace` at least once per conversation before calling module or entry tools.
+> **AGENT INSTRUCTION:** After calling `set_workspace`, the server remembers the workspace. You do not need to pass `workspaceId` to subsequent tools. But you must call `set_workspace` at least once per conversation before calling module or entry tools.
 
 ---
 

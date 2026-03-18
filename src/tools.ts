@@ -38,6 +38,29 @@ function err(e: unknown) {
 
 export function registerTools(server: McpServer) {
   // ═══════════════════════════════════════════
+  // 0. login
+  // ═══════════════════════════════════════════
+  server.registerTool(
+    "login",
+    {
+      description:
+        "Authenticate with username and password to obtain a session token. Use this when no API key is configured and the user provides credentials. Subsequent API calls will use the obtained token automatically.",
+      inputSchema: {
+        username: z.string().describe("Inistate account username or email"),
+        password: z.string().describe("Account password"),
+      },
+    },
+    async ({ username, password }) => {
+      try {
+        await api.loginWithCredentials(username, password);
+        return ok({ message: "Login successful" });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════
   // 1. list_workspaces
   // ═══════════════════════════════════════════
   server.registerTool(
@@ -78,6 +101,7 @@ Workflow sequences after workspace is set:
     },
     async ({ workspaceId }) => {
       try {
+        api.setWorkspaceId(workspaceId);
         const data = await api.get(`/api/workspace/${api.enc(workspaceId)}`);
         return ok(data);
       } catch (e) {
