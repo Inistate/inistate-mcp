@@ -1,0 +1,1063 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "INISTATE — Initial State Module Schema",
+  "description": "Subset of the FACTS schema for defining module structure without listings. All identifiers use display names — internal IDs, GUIDs, and numeric enums are resolved automatically by the MCP layer.",
+  "version": "1.0.0",
+
+  "definitions": {
+    "FieldType": {
+      "type": "string",
+      "description": "Human-readable field type. The MCP layer maps these to/from internal numeric enums automatically.",
+      "enum": [
+        "Text", "YesNo", "Integer", "Number", "Currency",
+        "Date", "DateTime", "DateRange",
+        "Selection", "Tag",
+        "Image", "Images", "File", "Files",
+        "Table",
+        "MultiText",
+        "Email", "Phone", "Link", "Signature", "Formula"
+      ]
+    },
+
+    "FieldDefinition": {
+      "type": "object",
+      "description": "A module field as seen through the MCP abstraction.",
+      "required": ["name", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable opaque identifier. Absent on create, present on read/update. Enables renaming — the MCP layer matches by id when present, falling back to name for new fields."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name. Used as the key in all MCP input/output payloads (e.g. 'Leave Type', not 'xKfLmNpQ')."
+        },
+        "type": { "$ref": "#/definitions/FieldType" },
+        "options": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Available option names for Selection/Tag fields. Shorthand: Selection(Option1/Option2/Option3)."
+        },
+        "fields": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SubFieldDefinition" },
+          "description": "Sub-field definitions for Table type. Each sub-field defines a column in the table."
+        },
+        "ai_hint": {
+          "type": "string",
+          "description": "Natural-language guidance for AI agents on how to interpret or populate this field."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SubFieldDefinition": {
+      "type": "object",
+      "description": "Sub-field (column) within a Table field.",
+      "required": ["name", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable opaque identifier. Absent on create, present on read/update."
+        },
+        "name": { "type": "string", "description": "Display name of the sub-field." },
+        "type": { "$ref": "#/definitions/FieldType" },
+        "options": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Options for Selection/Tag sub-fields."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "StateDefinition": {
+      "type": "object",
+      "description": "A workflow state. MCP resolves names to internal GUIDs automatically.",
+      "required": ["name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable opaque identifier. Absent on create, present on read/update. Enables renaming states without breaking flows."
+        },
+        "name": {
+          "type": "string",
+          "description": "State display name (e.g. 'Approved', not a GUID)."
+        },
+        "color": {
+          "type": "string",
+          "description": "Hex color code for the state badge (white text on colored background). Choose based on attention level and sentiment: #5A6070 (grey) = not started/idle, #2968A8 (blue) = waiting for action, #2A7B50 (green) = active work in progress, #A07828 (amber) = at risk/deadline approaching, #C0392B (red) = urgent/SLA breached, #6B4D91 (purple) = externally blocked, #1E6B45 (dark green) = terminal success, #8B2D2D (dark red) = terminal failure/rejected. Rules: terminal success states must use #1E6B45, terminal failure/rejection/cancellation must use #8B2D2D, only use #2A7B50 for states where work is actively being executed, use #2968A8 for approved/completed states still awaiting next action."
+        },
+        "initial": {
+          "type": "boolean",
+          "description": "When true, new entries default to this state. Only one state should be initial.",
+          "default": false
+        },
+        "ai_hint": {
+          "type": "string",
+          "description": "Guidance for AI agents on when an entry should be in this state."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ActivityDefinition": {
+      "type": "object",
+      "description": "A custom activity (e.g. Approve, Reject). Standard activities (create, edit, delete, etc.) are implicit.",
+      "required": ["name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable opaque identifier. Absent on create, present on read/update. Enables renaming activities without breaking flows."
+        },
+        "name": {
+          "type": "string",
+          "description": "Activity display name. MCP resolves to internal activity ID."
+        },
+        "fields": {
+          "type": "array",
+          "description": "Fields included in this activity's form. Each item is either a field name string (shorthand) or an ActivityFieldRef object with constraints.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "Field display name (shorthand — defaults to required=false, readOnly=false)."
+              },
+              { "$ref": "#/definitions/ActivityFieldRef" }
+            ]
+          }
+        },
+        "ai_hint": {
+          "type": "string",
+          "description": "Guidance for AI agents on when/how to perform this activity."
+        },
+        "actor": {
+          "type": "string",
+          "enum": ["human", "ai", "hybrid"],
+          "description": "Who is expected to perform this activity. 'human' = only a person can execute it, 'ai' = an AI agent performs it autonomously, 'hybrid' = either a person or AI agent may perform it. Defaults to 'human' when omitted."
+        },
+        "confidence_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum AI confidence required for this activity to proceed with a state transition. If ai_confidence < confidence_threshold, the state change is suppressed and the entry is flagged for human intervention. Omit or set to 0 to disable the gate."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ActivityFieldRef": {
+      "type": "object",
+      "description": "A field reference within an activity form, with per-field constraints.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Field display name. References FieldDefinition.name."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "When true, this field must be filled to submit the activity.",
+          "default": false
+        },
+        "readOnly": {
+          "type": "boolean",
+          "description": "When true, the field is visible but not editable in this activity.",
+          "default": false
+        },
+        "options": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Subset of allowed options for Selection/Tag fields in this activity. Omit to allow all options."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "FlowDefinition": {
+      "type": "object",
+      "description": "A state transition rule. All references use display names — MCP resolves to internal IDs.",
+      "required": ["from", "to", "activity"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Source state name (matches StateDefinition.name). Empty string = any state."
+        },
+        "to": {
+          "type": "string",
+          "description": "Target state name (matches StateDefinition.name)."
+        },
+        "activity": {
+          "type": "string",
+          "description": "Activity name that triggers this transition (matches ActivityDefinition.name)."
+        },
+        "ai_hint": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "ModuleSchema": {
+      "type": "object",
+      "description": "INISTATE module definition — the MCP-facing schema for creating and updating modules without listings. All internal complexity (GUIDs, numeric enums, design rows) is hidden. A module can be either a workflow module (with states, activities, and flows) or a record list module (master data, lookup tables, registries) that simply stores entries without any workflow. Record list modules omit states, activities, and flows entirely — entries are created, edited, and deleted using the standard activities without state transitions.",
+      "required": ["name"],
+      "properties": {
+        "moduleId": {
+          "type": "string",
+          "description": "Module identifier (numeric ID or name). Required for update operations to identify which module to update. Absent on create."
+        },
+        "name": {
+          "type": "string",
+          "description": "Module name. On create, this is the new module's name. On update, this can rename the module."
+        },
+        "icon": {
+          "type": "string",
+          "description": "Emoji identifier for the module."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable module description for discovery."
+        },
+        "information": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FieldDefinition" },
+          "description": "Field definitions. Order determines default display order."
+        },
+        "states": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/StateDefinition" },
+          "description": "Workflow states. First state with initial=true (or first state if none specified) is the default. Omit for record list modules that do not need workflow."
+        },
+        "activities": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ActivityDefinition" },
+          "description": "Custom activities (e.g. Approve, Reject). Standard activities (create, edit, delete, view, assign, comment, etc.) are always available. Omit for record list modules that only need standard activities."
+        },
+        "flows": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FlowDefinition" },
+          "description": "State transition rules linking activities to state changes. Omit for record list modules with no workflow."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "FileUploadResult": {
+      "type": "object",
+      "description": "Response from uploading a file via MCP.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Relative file path in /s/{shortId}/{fileName} format. To download, prepend /api/mcp/download/{moduleName} when the URL starts with /s/."
+        },
+        "filename": { "type": "string", "description": "Sanitized filename." },
+        "mimeType": { "type": "string", "description": "MIME type of the uploaded file." },
+        "size": { "type": "integer", "description": "File size in bytes." }
+      }
+    },
+
+    "FileFieldValue": {
+      "type": "object",
+      "description": "Value shape for File/Image fields as stored and returned by MCP.",
+      "properties": {
+        "name": { "type": "string", "description": "Original filename (e.g. 'report.pdf')." },
+        "path": { "type": "string", "description": "Relative download path in /s/{shortId}/{fileName} format. To download, prepend /api/mcp/download/{moduleName}." }
+      }
+    },
+
+    "FileFieldInput": {
+      "type": "object",
+      "description": "Input shape for File/Image fields when submitting an activity. Two modes: (1) base64 upload — include 'bytes' and the server uploads to S3, or (2) pre-uploaded — include 'path' from a prior upload_file() call.",
+      "properties": {
+        "name": { "type": "string", "description": "Filename (e.g. 'report.pdf'). Required." },
+        "bytes": { "type": "string", "description": "Base64-encoded file content. If present, the server uploads to S3 and replaces with 'path'. Omit when using a pre-uploaded path." },
+        "path": { "type": "string", "description": "Pre-uploaded file path from upload_file() (e.g. '/s/xK8m/report.pdf'). Use this instead of bytes for files already uploaded via POST /api/mcp/upload." },
+        "type": { "type": "string", "description": "MIME type (optional, e.g. 'application/pdf')." }
+      },
+      "_notes": [
+        "For File/Image (single): value is one FileFieldInput object",
+        "For Files/Images (multiple): value is an array of FileFieldInput objects",
+        "After server processing, 'bytes' is removed and 'path' is added — the stored/returned shape is always FileFieldValue"
+      ]
+    },
+
+    "EntryData": {
+      "type": "object",
+      "description": "Entry field values as returned by MCP. Keys are field display names, values are typed according to FieldType. For File/Image fields, values are FileFieldValue objects ({ name, path }). For Files/Images fields, values are arrays of FileFieldValue objects.",
+      "additionalProperties": true
+    },
+
+    "Entry": {
+      "type": "object",
+      "description": "A single module entry as seen through MCP. All field values use display names as keys.",
+      "properties": {
+        "module": { "type": "string", "description": "Module name." },
+        "entryId": {
+          "oneOf": [{ "type": "integer" }, { "type": "string" }],
+          "description": "Unique entry identifier."
+        },
+        "documentId": {
+          "type": "string",
+          "description": "Auto-generated document ID (e.g. LV-2026-0001)."
+        },
+        "state": {
+          "type": "string",
+          "description": "Current state display name."
+        },
+        "date": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Entry date (business date, distinct from audit timestamps)."
+        },
+        "data": {
+          "$ref": "#/definitions/EntryData",
+          "description": "Field values keyed by display name."
+        },
+        "createdBy": { "type": "string" },
+        "createdDate": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string" },
+        "updatedDate": { "type": "string", "format": "date-time" },
+        "assignees": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Assigned usernames."
+        },
+        "due": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Due date, if assigned."
+        },
+        "availableActivities": {
+          "$ref": "#/definitions/AvailableActivities",
+          "description": "Activities available on this entry based on current state and user authorization."
+        }
+      }
+    },
+
+    "EntryList": {
+      "type": "object",
+      "description": "Paginated list of entries.",
+      "properties": {
+        "moduleId": { "type": "string" },
+        "page": { "type": "integer" },
+        "pageSize": { "type": "integer" },
+        "totalItems": { "type": "integer" },
+        "list": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Entry" }
+        }
+      }
+    },
+
+    "ActivityForm": {
+      "type": "object",
+      "description": "Form definition returned when preparing to perform an activity.",
+      "properties": {
+        "module": { "type": "string" },
+        "activity": { "type": "string" },
+        "entryId": {
+          "oneOf": [{ "type": "integer" }, { "type": "string" }, { "type": "null" }],
+          "description": "Entry ID when editing an existing entry. Null for create."
+        },
+        "documentId": { "type": ["string", "null"], "description": "Document ID of the entry, if applicable." },
+        "form": {
+          "type": "array",
+          "description": "Form fields. Each item is an object keyed by field display name, containing field definition properties.",
+          "items": {
+            "type": "object",
+            "description": "Single field: { \"Field Name\": { type, required?, readOnly?, options?, module?, fields? } }",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "type": { "$ref": "#/definitions/FieldType" },
+                "required": { "type": "boolean" },
+                "readOnly": { "type": "boolean" },
+                "options": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Available options for Selection/Tag fields."
+                },
+                "module": {
+                  "type": "string",
+                  "description": "Referenced module name for Module/User field types."
+                },
+                "fields": {
+                  "type": "array",
+                  "description": "Sub-fields for Table/List types. Same keyed-by-name structure.",
+                  "items": { "type": "object", "additionalProperties": true }
+                }
+              }
+            }
+          },
+          "_example": [
+            { "Leave Type": { "type": "Selection", "required": true, "options": ["Annual", "Sick", "Unpaid"] } },
+            { "Start Date": { "type": "Date", "required": true } },
+            { "Reason": { "type": "MultiText" } },
+            { "Approver": { "type": "User", "module": "Employees" } }
+          ]
+        },
+        "defaults": {
+          "$ref": "#/definitions/EntryData",
+          "description": "Current/default values for pre-populating the form, keyed by display name."
+        },
+        "states": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Available target states for this activity."
+        },
+        "confidence_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The activity's confidence threshold for AI-driven state transitions. Present only when the activity has a threshold configured (> 0). AI agents should compare their confidence against this value before submitting."
+        },
+        "availableActivities": {
+          "$ref": "#/definitions/AvailableActivities",
+          "description": "Activities available on the entry in its current state."
+        }
+      }
+    },
+
+    "ActivitySubmission": {
+      "type": "object",
+      "description": "Payload for performing an activity on an entry. All keys use display names.",
+      "required": ["module"],
+      "properties": {
+        "module": { "type": "string", "description": "Module name." },
+        "activity": {
+          "type": "string",
+          "default": "create",
+          "description": "Activity name: create, edit, delete, or any custom activity name."
+        },
+        "entryId": {
+          "oneOf": [{ "type": "integer" }, { "type": "string" }],
+          "description": "Required for edit/delete/custom activities. Omit for create."
+        },
+        "entryIds": {
+          "type": "array",
+          "items": { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
+          "description": "Multiple entry IDs for bulk operations."
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Field values keyed by display name. For File/Image fields, use FileFieldInput objects ({ name, bytes } for base64 upload or { name, path } for pre-uploaded). For Files/Images fields, use arrays of FileFieldInput objects."
+        },
+        "state": {
+          "type": "string",
+          "description": "Target state name (resolved to internal ID automatically)."
+        },
+        "comment": { "type": "string" },
+        "assignees": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Usernames to assign."
+        },
+        "due": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Due date for assignment."
+        },
+        "ai": {
+          "type": "object",
+          "description": "AI agent traceability context. Include when the submission is made by an AI agent.",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "Natural language explanation of the AI's decision."
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string", "description": "Source type (e.g. 'field', 'document', 'policy')." },
+                  "reference": { "type": "string", "description": "Identifier or location of the source." },
+                  "excerpt": { "type": "string", "description": "Relevant excerpt from the source." }
+                }
+              },
+              "description": "What data the AI used and from where."
+            },
+            "model": {
+              "type": "string",
+              "description": "Which model made this decision (e.g. claude-sonnet-4-20250514)."
+            },
+            "model_version": {
+              "type": "string",
+              "description": "Model version / checkpoint for reproducibility."
+            },
+            "prompt_hash": {
+              "type": "string",
+              "description": "Hash of the system prompt used, for version tracking."
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Confidence score (0–1). If below the activity's confidence_threshold, the state transition is suppressed and the entry is flagged for human intervention."
+            }
+          }
+        }
+      }
+    },
+
+    "AvailableActivities": {
+      "type": "object",
+      "description": "Activities the current user can perform on the entry, based on authorization and current state.",
+      "properties": {
+        "standard": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Standard activities available (e.g. create, edit, delete, changeState, duplicate, comment, manage)."
+        },
+        "custom": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Custom activities available based on current state and flows."
+        },
+        "stateFlow": {
+          "type": "object",
+          "description": "Current state and possible transitions. Present only when the module has states.",
+          "properties": {
+            "currentState": { "type": "string", "description": "Current state name of the entry." },
+            "transitions": {
+              "type": "object",
+              "description": "Per-activity target state names. Keys are activity names, values are arrays of possible target state names.",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "ActivityResult": {
+      "type": "object",
+      "description": "Response after performing an activity.",
+      "properties": {
+        "module": { "type": "string" },
+        "activity": { "type": "string" },
+        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
+        "documentId": { "type": "string" },
+        "state": { "type": ["string", "null"] },
+        "message": { "type": ["string", "null"] },
+        "flagged": {
+          "type": "boolean",
+          "description": "True when AI confidence was below the activity's confidence_threshold. State transition was suppressed and the entry is flagged for human intervention (collaboration flags: WithIntention + LastIntention, history type: intention). Only present when true."
+        },
+        "availableActivities": {
+          "$ref": "#/definitions/AvailableActivities",
+          "description": "Activities available on the entry after this activity was performed."
+        }
+      }
+    },
+
+    "HistoryEvent": {
+      "type": "object",
+      "description": "A single audit trail event.",
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["create", "edit", "activity", "changeStatus", "delete", "duplicate", "assign", "import", "intention", "comment", "clone", "manage"],
+          "description": "Event type."
+        },
+        "by": { "type": "string", "description": "Username who performed the action." },
+        "on": { "type": "string", "format": "date-time" },
+        "activity": { "type": ["string", "null"], "description": "Custom activity name, if applicable." },
+        "state": { "type": ["string", "null"], "description": "Resulting state name." },
+        "comment": { "type": ["string", "null"] },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "field": { "type": "string", "description": "Field display name." },
+              "from": {},
+              "to": {}
+            }
+          }
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "by": { "type": "string" },
+              "on": { "type": "string", "format": "date-time" },
+              "comment": { "type": "string" }
+            }
+          }
+        },
+        "ai": {
+          "type": "object",
+          "description": "AI agent traceability context captured at submission time. Present only on events submitted by an AI agent.",
+          "properties": {
+            "reasoning": { "type": "string", "description": "Natural language explanation of the AI's decision." },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string" },
+                  "reference": { "type": "string" },
+                  "excerpt": { "type": "string" }
+                }
+              }
+            },
+            "model": { "type": "string" },
+            "model_version": { "type": "string" },
+            "prompt_hash": { "type": "string" },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
+
+    "EntryHistory": {
+      "type": "object",
+      "description": "Paginated audit trail for an entry.",
+      "properties": {
+        "moduleId": { "type": "string" },
+        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
+        "histories": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/HistoryEvent" }
+        },
+        "hasMore": { "type": "boolean" },
+        "page": { "type": "integer" }
+      }
+    },
+
+    "FilterOperators": {
+      "type": "object",
+      "description": "Available filter operators for list_entries. Keys are field display names. Simple value = equality match.",
+      "properties": {
+        "_string": {
+          "type": "object",
+          "description": "String field operators",
+          "properties": {
+            "contains": { "type": "string" },
+            "startsWith": { "type": "string" },
+            "endsWith": { "type": "string" },
+            "is": { "type": "string" },
+            "not": { "type": "string" },
+            "excludes": { "type": "string" }
+          }
+        },
+        "_numeric": {
+          "type": "object",
+          "description": "Numeric/currency field operators",
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" },
+            "above": { "type": "number" },
+            "below": { "type": "number" },
+            "between": {
+              "type": "object",
+              "properties": {
+                "min": { "type": "number" },
+                "max": { "type": "number" }
+              }
+            }
+          }
+        },
+        "_date": {
+          "type": "object",
+          "description": "Date/DateTime field operators",
+          "properties": {
+            "after": { "type": "string", "format": "date" },
+            "before": { "type": "string", "format": "date" }
+          }
+        },
+        "_existence": {
+          "type": "object",
+          "description": "Presence/absence operators (any field type)",
+          "properties": {
+            "empty": { "type": "boolean" },
+            "exists": { "type": "boolean" }
+          }
+        },
+        "_boolean": {
+          "type": "object",
+          "description": "YesNo field operators",
+          "properties": {
+            "yes": { "type": "boolean" },
+            "no": { "type": "boolean" }
+          }
+        }
+      }
+    },
+
+    "ErrorResponse": {
+      "type": "object",
+      "description": "Standard error shape returned by all MCP endpoints.",
+      "properties": {
+        "error": { "type": "string", "description": "Short error code." },
+        "message": { "type": "string", "description": "Human-readable description." },
+        "details": {
+          "type": "array",
+          "description": "Validation details (422 only).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "field": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "operations": {
+    "_description": "INISTATE operations map to MCP endpoints. Each operation uses display names exclusively — the MCP layer handles all internal ID resolution.",
+
+    "discover_modules": {
+      "description": "List all available modules in the workspace.",
+      "returns": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "emoji": { "type": "string" }
+          }
+        }
+      },
+      "_maps_to": "GET /api/mcp/"
+    },
+
+    "get_module": {
+      "description": "Get module definition including fields, states, and activities.",
+      "parameters": {
+        "module": { "type": "string", "description": "Module name from discover_modules." },
+        "tier": {
+          "type": "string",
+          "enum": ["basic", "extended"],
+          "default": "basic",
+          "description": "basic = fields + states only. extended = + activities, flows."
+        }
+      },
+      "returns": { "$ref": "#/definitions/ModuleSchema" },
+      "_maps_to": "GET /api/mcp/{moduleName}"
+    },
+
+    "list_entries": {
+      "description": "Query entries with filters, pagination, and sorting.",
+      "parameters": {
+        "module": { "type": "string" },
+        "filters": {
+          "type": "object",
+          "description": "Field display names as keys. Simple value = equality. Object value = operator(s).",
+          "additionalProperties": true
+        },
+        "state": { "type": "string", "description": "Filter by state name." },
+        "search": { "type": "string", "description": "Search by document ID." },
+        "sortBy": { "type": "string", "description": "Field display name to sort by." },
+        "sortDirection": { "type": "string", "enum": ["asc", "desc"] },
+        "currentPage": { "type": "integer" },
+        "pageSize": { "type": "integer", "description": "Default 50, max 500." }
+      },
+      "returns": { "$ref": "#/definitions/EntryList" },
+      "_maps_to": "POST /api/mcp/list"
+    },
+
+    "get_entry": {
+      "description": "Read a single entry by ID.",
+      "parameters": {
+        "module": { "type": "string" },
+        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }] }
+      },
+      "returns": { "$ref": "#/definitions/Entry" },
+      "_maps_to": "POST /api/mcp/entry"
+    },
+
+    "get_form": {
+      "description": "Get the form definition for an activity, including required fields, types, options, and current values.",
+      "parameters": {
+        "module": { "type": "string" },
+        "activity": { "type": "string", "default": "create" },
+        "entryId": { "description": "Required for edit/view activities." }
+      },
+      "returns": { "$ref": "#/definitions/ActivityForm" },
+      "_maps_to": "POST /api/mcp/form"
+    },
+
+    "submit_activity": {
+      "description": "Perform an activity: create, edit, delete, or any custom activity.",
+      "parameters": { "$ref": "#/definitions/ActivitySubmission" },
+      "returns": { "$ref": "#/definitions/ActivityResult" },
+      "_maps_to": "POST /api/mcp/activity"
+    },
+
+    "get_history": {
+      "description": "Get audit trail and comments for an entry.",
+      "parameters": {
+        "module": { "type": "string" },
+        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
+        "page": { "type": "integer", "default": 0 }
+      },
+      "returns": { "$ref": "#/definitions/EntryHistory" },
+      "_maps_to": "POST /api/mcp/history"
+    },
+
+    "upload_file": {
+      "description": "Upload a file to S3. Returns a /s/ URL that can be used as a File/Image field value in submit_activity. To download, the agent prepends /api/mcp/download/{moduleName} to the returned URL.",
+      "parameters": {
+        "module": { "type": "string", "description": "Module name (optional, for scoping the file to a module)." },
+        "file": { "type": "string", "format": "binary", "description": "The file to upload (multipart/form-data)." }
+      },
+      "returns": { "$ref": "#/definitions/FileUploadResult" },
+      "_maps_to": "POST /api/mcp/upload",
+      "_notes": [
+        "Request must be multipart/form-data with the file as a form part",
+        "Optional 'module' form field scopes the file to a module's S3 folder",
+        "Maximum file size: 50MB",
+        "Blocked extensions: .exe, .bat, .cmd, .dll, .msi, and other executable types",
+        "Filenames are sanitized (path traversal characters stripped)"
+      ]
+    },
+
+    "download_file": {
+      "description": "Download a file by module name. AI agents construct this URL by prepending /api/mcp/download/{moduleName} to a /s/{shortId}/{fileName} URL.",
+      "parameters": {
+        "moduleName": { "type": "string", "description": "Module name (resolved to vectorId internally)." },
+        "guid": { "type": "string", "description": "Short ID from the file URL." },
+        "fileName": { "type": "string", "description": "Original filename." }
+      },
+      "returns": { "type": "string", "description": "Redirects to a pre-signed S3 URL (1hr TTL) or streams the file directly for Office applications." },
+      "_maps_to": "GET /api/mcp/download/{moduleName}/s/{guid}/{fileName}",
+      "_notes": [
+        "Returns 404 with MCP error format if file not found in S3",
+        "Office user-agents receive direct stream; all others get a 302 redirect to a pre-signed URL"
+      ]
+    },
+
+    "get_module_schema": {
+      "description": "Get an existing module definition in full INISTATE ModuleSchema format with stable IDs. The output is round-trippable — it can be modified and sent back via update_module.",
+      "parameters": {
+        "module": { "type": "string", "description": "Module name or numeric ID." }
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "icon": { "type": "string" },
+          "description": { "type": "string" },
+          "published": { "type": "boolean" },
+          "information": { "type": "array", "items": { "$ref": "#/definitions/FieldDefinition" } },
+          "states": { "type": "array", "items": { "$ref": "#/definitions/StateDefinition" } },
+          "activities": { "type": "array", "items": { "$ref": "#/definitions/ActivityDefinition" } },
+          "flows": { "type": "array", "items": { "$ref": "#/definitions/FlowDefinition" } }
+        }
+      },
+      "_maps_to": "GET /api/configure/{moduleName}"
+    },
+
+    "create_module": {
+      "description": "Create a new module from an INISTATE ModuleSchema definition.",
+      "parameters": { "$ref": "#/definitions/ModuleSchema" },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "emoji": { "type": "string" }
+        }
+      },
+      "_maps_to": "POST /api/configure"
+    },
+
+    "update_module": {
+      "description": "Update an existing module. The moduleId identifies which module to update; name can be changed to rename. Omitted sections are left unchanged.",
+      "parameters": { "$ref": "#/definitions/ModuleSchema" },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "emoji": { "type": "string" }
+        }
+      },
+      "_maps_to": "PUT /api/configure"
+    }
+  },
+
+  "workflow_guide": {
+    "_description": "Recommended sequence for AI agents interacting through INISTATE.",
+    "steps": [
+      "1. discover_modules() → find available module names",
+      "2. get_module(module, tier='basic') → understand fields and states",
+      "3. get_module(module, tier='extended') → understand activities (only when needed)",
+      "4. get_form(module, activity) → get required fields, types, options, defaults, and confidence_threshold before submitting",
+      "5. upload_file(module, file) → upload files for File/Image fields, returns /s/ URL",
+      "6. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ URLs from upload_file for File/Image fields.",
+      "7. list_entries(module, filters) → query and browse entries",
+      "8. get_entry(module, entryId) → read a specific entry",
+      "9. get_history(module, entryId) → audit trail and comments",
+      "10. download_file(moduleName, guid, fileName) → download a file. Construct URL: /api/mcp/download/{moduleName}/s/{guid}/{fileName} from any /s/{guid}/{fileName} value",
+      "--- Module Configuration (via /api/configure/ endpoints, uses INISTATE ModuleSchema format) ---",
+      "11. get_module_schema(moduleName) → GET /api/configure/{moduleName} — get the module's current definition as ModuleSchema with stable IDs. Round-trippable: modify and send back via update_module.",
+      "12. create_module(ModuleSchema) → POST /api/configure — create a new module using the ModuleSchema definition from this schema",
+      "13. update_module(ModuleSchema) → PUT /api/configure — update an existing module. Use get_module_schema() first, modify, then send back."
+    ],
+    "key_rules": [
+      "All input/output keys use field DISPLAY NAMES, never internal IDs",
+      "State references use state NAMES, never GUIDs",
+      "Activity references use activity NAMES, resolved to IDs internally",
+      "Always call get_form() before submit_activity() to discover required fields and valid options",
+      "Use tier='basic' by default; only request 'extended' when activity details are needed",
+      "Not all modules have workflows — record list modules (master data, lookup tables) have no states, activities, or flows. Use standard create/edit/delete activities directly.",
+      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, bytes } (base64 inline) or { name, path } (pre-uploaded via upload_file). Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path."
+    ],
+    "module_types": {
+      "_description": "Modules fall into two categories based on their purpose.",
+      "workflow_module": {
+        "description": "Modules with states, custom activities, and flows that define a process lifecycle (e.g. Leave Request, Purchase Order, Support Ticket). Entries move through states via activities and transition rules.",
+        "has_states": true,
+        "has_activities": true,
+        "has_flows": true
+      },
+      "record_list_module": {
+        "description": "Modules used purely to maintain a list of entries — master data, lookup tables, registries, catalogs (e.g. Employee Directory, Department List, Product Catalog, Holiday Calendar). No workflow, no state transitions, no custom activities. Entries are managed with standard create/edit/delete operations only.",
+        "has_states": false,
+        "has_activities": false,
+        "has_flows": false,
+        "examples": [
+          "Employee Directory — master list of employees and their details",
+          "Department List — organizational departments for reference",
+          "Product Catalog — items available for selection in other modules",
+          "Holiday Calendar — list of holiday dates used by leave/attendance modules",
+          "Cost Centers — finance lookup table referenced by expense and budget modules"
+        ]
+      }
+    },
+
+    "confidence_gate": {
+      "_description": "When an AI agent submits an activity with ai.confidence below the activity's confidence_threshold:",
+      "behavior": [
+        "State transition is suppressed — the entry stays in its current state",
+        "The history event is recorded with type 'intention' instead of the normal activity type",
+        "The entry's collaboration flags are set to WithIntention + LastIntention",
+        "The response includes flagged: true so the AI agent knows the action requires human review",
+        "Entries flagged for intervention can be filtered using the collaboration filter: 'intention' or 'lastIntention'",
+        "get_form() returns confidence_threshold when configured, so agents can check the threshold before submitting"
+      ]
+    },
+    "ai_audit_trail": {
+      "_description": "AI agent traceability in history events:",
+      "behavior": [
+        "Every history event submitted by an AI agent includes the full 'ai' object (reasoning, sources, model, model_version, prompt_hash, confidence)",
+        "get_history() returns the ai context on each event, enabling full chain-of-reasoning reconstruction",
+        "The ai object is only present on events that were submitted with AI context — human actions have no ai field"
+      ]
+    },
+    "state_color_system": {
+      "_description": "Color assignment rules for states based on attention level and sentiment. Use hex codes.",
+      "palette": {
+        "#5A6070": "Grey — not started, idle, queued, no action expected",
+        "#2968A8": "Blue — waiting for an actor to take next action, no urgency",
+        "#2A7B50": "Green — work is actively being executed by an actor right now",
+        "#A07828": "Amber — deadline approaching, condition flagged, action needed soon",
+        "#C0392B": "Red — SLA breached, escalation required, process stuck",
+        "#6B4D91": "Purple — blocked by external dependency outside this workflow",
+        "#1E6B45": "Dark green — terminal success (approved, completed, closed)",
+        "#8B2D2D": "Dark red — terminal failure (rejected, cancelled, failed)"
+      },
+      "_note": "All colors are designed for white text on colored background (WCAG AA 4.5:1+ contrast).",
+      "decision_order": [
+        "1. Terminal success → #1E6B45",
+        "2. Terminal failure/rejection/cancellation → #8B2D2D",
+        "3. Active work being executed → #2A7B50",
+        "4. SLA breached or escalation required → #C0392B",
+        "5. Deadline approaching or flagged → #A07828",
+        "6. Blocked by external dependency → #6B4D91",
+        "7. Waiting for next action, no urgency → #2968A8",
+        "8. Not started, queued, idle → #5A6070"
+      ],
+      "rules": [
+        "Never use #2A7B50 (green) for states where no actor is actively working — use #2968A8 (blue) for approved/completed states awaiting next action",
+        "Terminal states must always be #1E6B45 or #8B2D2D — never grey, blue, or green",
+        "Never use #C0392B (red) unless a real SLA breach or escalation condition exists",
+        "Only one state in a linear workflow should typically be green — the active work state",
+        "When unsure, default to #2968A8 (blue) — it is the safest general-purpose color",
+        "In parallel/branching workflows, multiple states may use #2A7B50 (green) if each represents genuinely concurrent active work by different actors"
+      ],
+      "default_when_unsure": "#2968A8",
+      "examples": {
+        "_description": "Reference examples showing correct color assignment across common workflow patterns.",
+        "approval_workflow": {
+          "_pattern": "Linear: submit → wait → approve/reject",
+          "Draft": "#5A6070",
+          "Submitted": "#2968A8",
+          "Under Review": "#2A7B50",
+          "Approved": "#1E6B45",
+          "Rejected": "#8B2D2D"
+        },
+        "support_ticket": {
+          "_pattern": "Service desk with external dependency and escalation",
+          "New": "#5A6070",
+          "Triaged": "#2968A8",
+          "In Progress": "#2A7B50",
+          "Awaiting Customer": "#6B4D91",
+          "Escalated": "#C0392B",
+          "Resolved": "#1E6B45",
+          "Closed": "#1E6B45"
+        },
+        "procurement": {
+          "_pattern": "Multi-stage with handoffs between teams",
+          "Requested": "#5A6070",
+          "Budget Review": "#2968A8",
+          "Approved": "#2968A8",
+          "Ordering": "#2A7B50",
+          "Shipped": "#2968A8",
+          "Delivered": "#1E6B45",
+          "Cancelled": "#8B2D2D"
+        },
+        "inspection_checklist": {
+          "_pattern": "Deadline-sensitive with overdue escalation",
+          "Scheduled": "#5A6070",
+          "Due Soon": "#A07828",
+          "In Progress": "#2A7B50",
+          "Overdue": "#C0392B",
+          "Completed": "#1E6B45",
+          "Waived": "#8B2D2D"
+        },
+        "onboarding": {
+          "_pattern": "Parallel tasks with external blockers",
+          "Not Started": "#5A6070",
+          "Documents Pending": "#6B4D91",
+          "Training": "#2A7B50",
+          "IT Setup": "#2A7B50",
+          "Ready": "#1E6B45"
+        },
+        "record_list": {
+          "_pattern": "No workflow — master data / lookup table",
+          "_note": "Record list modules have no states, activities, or flows. Only standard create/edit/delete operations apply. No state colors needed."
+        }
+      },
+      "common_mistakes": [
+        "Using green (#2A7B50) for 'Approved' — approval is a decision, not active work. Use blue (#2968A8) if awaiting next step, or dark green (#1E6B45) if terminal.",
+        "Using grey (#5A6070) for 'Closed' or 'Cancelled' — these are terminal states and must use #1E6B45 or #8B2D2D.",
+        "Using red (#C0392B) for 'Rejected' — rejection is a terminal outcome, not an escalation. Use dark red (#8B2D2D).",
+        "Using green (#2A7B50) for 'Pending' or 'Waiting' — no one is actively working. Use blue (#2968A8)."
+      ],
+      "strict_palette": "Only use the 8 hex codes listed in the palette. Never generate custom hex values.",
+      "keyword_hints": {
+        "_description": "When a state name contains these keywords, use the mapped color. Always check terminal rules first — a state named 'Completed' is terminal success even if it contains 'complete' from the green list.",
+        "#5A6070": ["draft", "new", "open", "backlog", "queued", "not started", "inactive", "parked", "unassigned"],
+        "#2968A8": ["pending", "submitted", "awaiting", "assigned", "ready", "scheduled", "planned", "under review", "to do"],
+        "#2A7B50": ["in progress", "processing", "working", "executing", "building", "running", "reviewing", "implementing", "testing"],
+        "#A07828": ["due soon", "at risk", "warning", "expiring", "needs attention", "follow up", "reminder"],
+        "#C0392B": ["overdue", "escalated", "breached", "stuck", "critical", "urgent", "sla"],
+        "#6B4D91": ["blocked", "waiting on", "on hold", "external", "vendor", "third party", "dependency"],
+        "#1E6B45": ["approved", "completed", "done", "resolved", "closed", "delivered", "passed", "accepted", "verified", "fulfilled", "signed off"],
+        "#8B2D2D": ["rejected", "cancelled", "failed", "denied", "expired", "voided", "abandoned", "withdrawn", "terminated", "declined"]
+      }
+    }
+  }
+}

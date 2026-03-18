@@ -1,0 +1,500 @@
+{
+  "_description": "INISTATE sample — a 'Leave Requests' module expressed through the INISTATE abstraction (no listings or connection-based field types). IDs are opaque stable identifiers: absent on create, present on read/update to support renaming.",
+
+  "module_schema": {
+    "_note": "This represents the READ response (get_module_schema). IDs are present because the module already exists.",
+    "name": "Leave Requests",
+    "icon": "🏖️",
+    "description": "Employee leave request management with approval workflow",
+
+    "information": [
+      {
+        "id": "xKfLmNpQ",
+        "name": "Leave Type",
+        "type": "Selection",
+        "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"]
+      },
+      {
+        "id": "yRsTuVwX",
+        "name": "Start Date",
+        "type": "Date"
+      },
+      {
+        "id": "zAbCdEfG",
+        "name": "End Date",
+        "type": "Date"
+      },
+      {
+        "id": "hIjKlMnO",
+        "name": "Remarks",
+        "type": "Text"
+      },
+      {
+        "id": "pQrStUvW",
+        "name": "Days Requested",
+        "type": "Number"
+      },
+      {
+        "id": "iJkLmNoP",
+        "name": "Attachments",
+        "type": "File"
+      },
+      {
+        "id": "tGhIjKlM",
+        "name": "Is Urgent",
+        "type": "YesNo",
+        "ai_hint": "Set to true if leave is requested within 24 hours"
+      }
+    ],
+
+    "states": [
+      { "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Draft", "color": "#5A6070", "initial": true },
+      { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8" },
+      { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45" },
+      { "id": "550e8400-e29b-41d4-a716-446655440003", "name": "Rejected", "color": "#8B2D2D" },
+      { "id": "550e8400-e29b-41d4-a716-446655440004", "name": "Cancelled", "color": "#8B2D2D" }
+    ],
+
+    "activities": [
+      {
+        "id": "d4e5f6a7-b8c9-0123-defg-456789abcdef",
+        "name": "Approve",
+        "actor": "human",
+        "fields": [
+          { "name": "Leave Type", "readOnly": true },
+          { "name": "Days Requested", "readOnly": true },
+          { "name": "Remarks", "required": true }
+        ],
+        "ai_hint": "Manager approves the leave request"
+      },
+      {
+        "id": "e5f6a7b8-c9d0-1234-efgh-56789abcdef0",
+        "name": "Reject",
+        "actor": "human",
+        "fields": [
+          { "name": "Remarks", "required": true }
+        ]
+      },
+      {
+        "id": "a1b2c3d4-e5f6-7890-ijkl-mnopqrstuvwx",
+        "name": "Cancel",
+        "actor": "human"
+      },
+      {
+        "id": "b2c3d4e5-f6a7-8901-jklm-nopqrstuvwxy",
+        "name": "Submit",
+        "actor": "hybrid",
+        "ai_hint": "Employee submits the leave request for approval"
+      }
+    ],
+
+    "flows": [
+      { "from": "Draft", "to": "Pending Approval", "activity": "Submit" },
+      { "from": "Pending Approval", "to": "Approved", "activity": "Approve" },
+      { "from": "Pending Approval", "to": "Rejected", "activity": "Reject" },
+      { "from": "Pending Approval", "to": "Cancelled", "activity": "Cancel" }
+    ]
+  },
+
+  "sample_operations": {
+    "_description": "Example INISTATE operation payloads and responses for the Leave Requests module.",
+
+    "discover_modules": {
+      "_step": "1. Find available modules",
+      "response": [
+        { "name": "Leave Requests", "emoji": "🏖️" },
+        { "name": "Purchase Orders", "emoji": "🛒" },
+        { "name": "Department List", "emoji": "🏢" }
+      ]
+    },
+
+    "get_module_schema_basic": {
+      "_step": "2. Get fields and states (ids included for update/rename support)",
+      "request": { "module": "Leave Requests", "tier": "basic" },
+      "response": {
+        "name": "Leave Requests",
+        "information": [
+          { "id": "xKfLmNpQ", "name": "Leave Type", "type": "Selection", "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"] },
+          { "id": "yRsTuVwX", "name": "Start Date", "type": "Date" },
+          { "id": "zAbCdEfG", "name": "End Date", "type": "Date" },
+          { "id": "hIjKlMnO", "name": "Remarks", "type": "Text" },
+          { "id": "pQrStUvW", "name": "Days Requested", "type": "Number" },
+          { "id": "iJkLmNoP", "name": "Attachments", "type": "File" },
+          { "id": "tGhIjKlM", "name": "Is Urgent", "type": "YesNo", "ai_hint": "Set to true if leave is requested within 24 hours" }
+        ],
+        "states": [
+          { "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Draft", "color": "#5A6070" },
+          { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8" },
+          { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45" },
+          { "id": "550e8400-e29b-41d4-a716-446655440003", "name": "Rejected", "color": "#8B2D2D" },
+          { "id": "550e8400-e29b-41d4-a716-446655440004", "name": "Cancelled", "color": "#8B2D2D" }
+        ]
+      }
+    },
+
+    "get_form_create": {
+      "_step": "3. Get create form to know required fields",
+      "request": { "module": "Leave Requests", "activity": "create" },
+      "response": {
+        "module": "Leave Requests",
+        "activity": "create",
+        "fields": [
+          { "name": "Leave Type", "type": "Selection", "required": true, "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"] },
+          { "name": "Start Date", "type": "Date", "required": true },
+          { "name": "End Date", "type": "Date", "required": true },
+          { "name": "Remarks", "type": "Text", "required": false },
+          { "name": "Days Requested", "type": "Number", "required": true },
+          { "name": "Attachments", "type": "File", "required": false },
+          { "name": "Is Urgent", "type": "YesNo", "required": false }
+        ],
+        "defaults": {},
+        "states": ["Draft", "Pending Approval"]
+      }
+    },
+
+    "submit_create": {
+      "_step": "4. Create a new leave request",
+      "request": {
+        "module": "Leave Requests",
+        "activity": "create",
+        "input": {
+          "Leave Type": "Annual Leave",
+          "Start Date": "2026-03-20",
+          "End Date": "2026-03-25",
+          "Days Requested": 4,
+          "Remarks": "Family vacation",
+          "Is Urgent": false
+        },
+        "state": "Pending Approval"
+      },
+      "response": {
+        "module": "Leave Requests",
+        "activity": "create",
+        "entryId": 1042,
+        "documentId": "LV-2026-0042",
+        "state": "Pending Approval",
+        "message": null
+      }
+    },
+
+    "list_entries_filtered": {
+      "_step": "5. List pending leave requests",
+      "request": {
+        "module": "Leave Requests",
+        "filters": {
+          "Leave Type": "Annual Leave",
+          "Start Date": { "after": "2026-03-01" }
+        },
+        "state": "Pending Approval",
+        "sortBy": "Start Date",
+        "sortDirection": "asc",
+        "pageSize": 10
+      },
+      "response": {
+        "moduleId": "Leave Requests",
+        "page": 0,
+        "pageSize": 10,
+        "totalItems": 2,
+        "list": [
+          {
+            "entryId": 1042,
+            "documentId": "LV-2026-0042",
+            "state": "Pending Approval",
+            "data": {
+              "Leave Type": "Annual Leave",
+              "Start Date": "2026-03-20",
+              "End Date": "2026-03-25",
+              "Days Requested": 4,
+              "Remarks": "Family vacation",
+              "Is Urgent": false
+            },
+            "createdBy": "jane.smith",
+            "createdDate": "2026-03-12T09:15:00Z",
+            "updatedBy": "jane.smith",
+            "updatedDate": "2026-03-12T09:15:00Z",
+            "assignees": [],
+            "due": null
+          },
+          {
+            "entryId": 1038,
+            "documentId": "LV-2026-0038",
+            "state": "Pending Approval",
+            "data": {
+              "Leave Type": "Annual Leave",
+              "Start Date": "2026-03-28",
+              "End Date": "2026-04-01",
+              "Days Requested": 3,
+              "Remarks": "Spring break",
+              "Is Urgent": false
+            },
+            "createdBy": "bob.jones",
+            "createdDate": "2026-03-10T14:30:00Z",
+            "updatedBy": "bob.jones",
+            "updatedDate": "2026-03-10T14:30:00Z",
+            "assignees": ["john.doe"],
+            "due": "2026-03-15T17:00:00Z"
+          }
+        ]
+      }
+    },
+
+    "get_entry": {
+      "_step": "6. Read a single entry",
+      "request": { "module": "Leave Requests", "entryId": 1042 },
+      "response": {
+        "entryId": 1042,
+        "documentId": "LV-2026-0042",
+        "state": "Pending Approval",
+        "data": {
+          "Leave Type": "Annual Leave",
+          "Start Date": "2026-03-20",
+          "End Date": "2026-03-25",
+          "Days Requested": 4,
+          "Remarks": "Family vacation",
+          "Attachments": null,
+          "Is Urgent": false
+        },
+        "createdBy": "jane.smith",
+        "createdDate": "2026-03-12T09:15:00Z",
+        "updatedBy": "jane.smith",
+        "updatedDate": "2026-03-12T09:15:00Z",
+        "assignees": [],
+        "due": null
+      }
+    },
+
+    "get_form_approve": {
+      "_step": "7. Get the Approve activity form",
+      "request": { "module": "Leave Requests", "activity": "Approve", "entryId": 1042 },
+      "response": {
+        "module": "Leave Requests",
+        "activity": "Approve",
+        "fields": [
+          { "name": "Leave Type", "type": "Selection", "required": false, "readOnly": true },
+          { "name": "Days Requested", "type": "Number", "required": false, "readOnly": true },
+          { "name": "Remarks", "type": "Text", "required": true }
+        ],
+        "defaults": {
+          "Leave Type": "Annual Leave",
+          "Days Requested": 4,
+          "Remarks": "Family vacation"
+        },
+        "states": ["Approved"]
+      }
+    },
+
+    "submit_approve": {
+      "_step": "8. Approve the leave request",
+      "request": {
+        "module": "Leave Requests",
+        "activity": "Approve",
+        "entryId": 1042,
+        "input": {
+          "Remarks": "Approved — enjoy your vacation"
+        },
+        "comment": "Approved by manager"
+      },
+      "response": {
+        "module": "Leave Requests",
+        "activity": "Approve",
+        "entryId": 1042,
+        "documentId": "LV-2026-0042",
+        "state": "Approved",
+        "message": null
+      }
+    },
+
+    "submit_bulk_approve": {
+      "_step": "Bulk approve multiple entries",
+      "request": {
+        "module": "Leave Requests",
+        "activity": "Approve",
+        "entryIds": [1038, 1039, 1040],
+        "comment": "Batch approved"
+      }
+    },
+
+    "submit_assign": {
+      "_step": "Assign an entry to a user with due date",
+      "request": {
+        "module": "Leave Requests",
+        "activity": "Assign",
+        "entryId": 1042,
+        "assignees": ["john.doe"],
+        "due": "2026-03-15T17:00:00Z"
+      }
+    },
+
+    "get_history": {
+      "_step": "9. Check audit trail",
+      "request": { "module": "Leave Requests", "entryId": 1042 },
+      "response": {
+        "moduleId": "Leave Requests",
+        "entryId": 1042,
+        "histories": [
+          {
+            "id": "h-001",
+            "type": "create",
+            "by": "jane.smith",
+            "on": "2026-03-12T09:15:00Z",
+            "activity": null,
+            "state": "Pending Approval",
+            "comment": null,
+            "changes": [
+              { "field": "Leave Type", "from": null, "to": "Annual Leave" },
+              { "field": "Start Date", "from": null, "to": "2026-03-20" },
+              { "field": "End Date", "from": null, "to": "2026-03-25" },
+              { "field": "Days Requested", "from": null, "to": 4 },
+              { "field": "Remarks", "from": null, "to": "Family vacation" }
+            ],
+            "replies": []
+          },
+          {
+            "id": "h-002",
+            "type": "activity",
+            "by": "john.doe",
+            "on": "2026-03-12T14:30:00Z",
+            "activity": "Approve",
+            "state": "Approved",
+            "comment": "Approved by manager",
+            "changes": [
+              { "field": "Remarks", "from": "Family vacation", "to": "Approved — enjoy your vacation" }
+            ],
+            "replies": [
+              {
+                "id": "r-001",
+                "by": "jane.smith",
+                "on": "2026-03-12T15:00:00Z",
+                "comment": "Thank you!"
+              }
+            ]
+          }
+        ],
+        "hasMore": false,
+        "page": 0
+      }
+    },
+
+    "create_module": {
+      "_step": "Create the module from scratch using INISTATE",
+      "request": {
+        "name": "Leave Requests",
+        "icon": "🏖️",
+        "description": "Employee leave request management with approval workflow",
+        "published": true,
+        "information": [
+          { "name": "Leave Type", "type": "Selection", "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"] },
+          { "name": "Start Date", "type": "Date" },
+          { "name": "End Date", "type": "Date" },
+          { "name": "Remarks", "type": "Text" },
+          { "name": "Days Requested", "type": "Number" },
+          { "name": "Attachments", "type": "File" },
+          { "name": "Is Urgent", "type": "YesNo", "ai_hint": "Set to true if leave is requested within 24 hours" }
+        ],
+        "states": [
+          { "name": "Draft", "color": "#5A6070", "initial": true },
+          { "name": "Pending Approval", "color": "#2968A8" },
+          { "name": "Approved", "color": "#1E6B45" },
+          { "name": "Rejected", "color": "#8B2D2D" },
+          { "name": "Cancelled", "color": "#8B2D2D" }
+        ],
+        "activities": [
+          {
+            "name": "Approve",
+            "actor": "human",
+            "fields": [
+              { "name": "Leave Type", "readOnly": true },
+              { "name": "Days Requested", "readOnly": true },
+              { "name": "Remarks", "required": true }
+            ],
+            "ai_hint": "Manager approves the leave request"
+          },
+          { "name": "Reject", "actor": "human", "fields": [{ "name": "Remarks", "required": true }] },
+          { "name": "Cancel", "actor": "human" },
+          { "name": "Submit", "actor": "hybrid", "ai_hint": "Employee submits the leave request for approval" }
+        ],
+        "flows": [
+          { "from": "Draft", "to": "Pending Approval", "activity": "Submit" },
+          { "from": "Pending Approval", "to": "Approved", "activity": "Approve" },
+          { "from": "Pending Approval", "to": "Rejected", "activity": "Reject" },
+          { "from": "Pending Approval", "to": "Cancelled", "activity": "Cancel" }
+        ]
+      },
+      "response": {
+        "id": 9001,
+        "name": "Leave Requests",
+        "emoji": "🏖️",
+        "updatedDate": "2026-03-12T10:00:00Z"
+      },
+      "_note": "The MCP layer converts this to internal format automatically: generates stable IDs for fields, GUIDs for states/activities, and resolves type enums."
+    },
+
+    "create_module_record_list": {
+      "_step": "Create a record list module — no workflow, just master data",
+      "request": {
+        "name": "Department List",
+        "icon": "🏢",
+        "description": "Master list of organizational departments",
+        "published": true,
+        "information": [
+          { "name": "Department Name", "type": "Text" },
+          { "name": "Department Code", "type": "Text" },
+          { "name": "Head of Department", "type": "Text" },
+          { "name": "Location", "type": "Text" },
+          { "name": "Active", "type": "YesNo" }
+        ]
+      },
+      "response": {
+        "id": 9010,
+        "name": "Department List",
+        "emoji": "🏢",
+        "updatedDate": "2026-03-12T12:00:00Z"
+      },
+      "_note": "No states, activities, or flows — entries are managed with standard create/edit/delete only."
+    },
+
+    "update_module_rename": {
+      "_step": "Rename fields, states, and activities using ids for stable matching",
+      "_note": "Without ids, renaming 'Leave Type' would delete the old field and create a new one, losing all existing entry data. With ids, MCP matches by id and updates only the displayName. moduleId identifies the target module; name can rename it.",
+      "request": {
+        "moduleId": "9001",
+        "name": "Leave Requests",
+        "information": [
+          { "id": "xKfLmNpQ", "name": "Leave Category", "type": "Selection", "options": ["Annual Leave", "Sick Leave", "Unpaid Leave", "Compassionate Leave"] },
+          { "id": "hIjKlMnO", "name": "Notes", "type": "Text" },
+          { "name": "Priority", "type": "Selection", "options": ["Low", "Medium", "High"] }
+        ],
+        "states": [
+          { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Awaiting Review", "color": "#2968A8" },
+          { "name": "On Hold", "color": "#6B4D91" }
+        ],
+        "activities": [
+          {
+            "id": "d4e5f6a7-b8c9-0123-defg-456789abcdef",
+            "name": "Review",
+            "actor": "human",
+            "fields": [
+              { "name": "Leave Category", "readOnly": true },
+              { "name": "Notes", "required": true },
+              { "name": "Priority", "required": true, "options": ["Medium", "High"] }
+            ]
+          }
+        ]
+      },
+      "response": {
+        "id": 9001,
+        "name": "Leave Requests",
+        "emoji": "🏖️",
+        "updatedDate": "2026-03-12T11:00:00Z"
+      },
+      "_what_happens": {
+        "Leave Type → Leave Category": "id=xKfLmNpQ matched → displayName updated, storage key unchanged, existing data preserved",
+        "Remarks → Notes": "id=hIjKlMnO matched → displayName updated",
+        "Priority (new)": "No id → new field created with generated ShortId",
+        "Pending Approval → Awaiting Review": "id matched → state name updated, existing entries in this state now show 'Awaiting Review'",
+        "On Hold (new)": "No id → new state created with generated GUID",
+        "Approve → Review": "id matched → activity name updated"
+      }
+    }
+  }
+}
