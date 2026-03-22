@@ -12,7 +12,7 @@
         "id": "xKfLmNpQ",
         "name": "Leave Type",
         "type": "Selection",
-        "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"]
+        "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"]
       },
       {
         "id": "yRsTuVwX",
@@ -37,7 +37,7 @@
       {
         "id": "iJkLmNoP",
         "name": "Attachments",
-        "type": "File"
+        "type": "Files"
       },
       {
         "id": "tGhIjKlM",
@@ -49,8 +49,8 @@
 
     "states": [
       { "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Draft", "color": "#5A6070", "initial": true },
-      { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8" },
-      { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45" },
+      { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8", "ai_instruction": "Notify the assigned manager to review and approve or reject this leave request within 2 business days" },
+      { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45", "ai_instruction": "Update the team calendar and notify the employee that their leave has been approved" },
       { "id": "550e8400-e29b-41d4-a716-446655440003", "name": "Rejected", "color": "#8B2D2D" },
       { "id": "550e8400-e29b-41d4-a716-446655440004", "name": "Cancelled", "color": "#8B2D2D" }
     ],
@@ -65,7 +65,8 @@
           { "name": "Days Requested", "readOnly": true },
           { "name": "Remarks", "required": true }
         ],
-        "ai_hint": "Manager approves the leave request"
+        "ai_hint": "Manager approves the leave request",
+        "ai_instruction": "Verify the employee has sufficient leave balance before approving"
       },
       {
         "id": "e5f6a7b8-c9d0-1234-efgh-56789abcdef0",
@@ -73,7 +74,8 @@
         "actor": "human",
         "fields": [
           { "name": "Remarks", "required": true }
-        ]
+        ],
+        "ai_instruction": "Ensure a rejection reason is provided in Remarks"
       },
       {
         "id": "a1b2c3d4-e5f6-7890-ijkl-mnopqrstuvwx",
@@ -114,18 +116,18 @@
       "response": {
         "name": "Leave Requests",
         "information": [
-          { "id": "xKfLmNpQ", "name": "Leave Type", "type": "Selection", "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"] },
+          { "id": "xKfLmNpQ", "name": "Leave Type", "type": "Selection", "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] },
           { "id": "yRsTuVwX", "name": "Start Date", "type": "Date" },
           { "id": "zAbCdEfG", "name": "End Date", "type": "Date" },
           { "id": "hIjKlMnO", "name": "Remarks", "type": "Text" },
           { "id": "pQrStUvW", "name": "Days Requested", "type": "Number" },
-          { "id": "iJkLmNoP", "name": "Attachments", "type": "File" },
+          { "id": "iJkLmNoP", "name": "Attachments", "type": "Files" },
           { "id": "tGhIjKlM", "name": "Is Urgent", "type": "YesNo", "ai_hint": "Set to true if leave is requested within 24 hours" }
         ],
         "states": [
           { "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Draft", "color": "#5A6070" },
-          { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8" },
-          { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45" },
+          { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8", "ai_instruction": "Notify the assigned manager to review and approve or reject this leave request within 2 business days" },
+          { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45", "ai_instruction": "Update the team calendar and notify the employee that their leave has been approved" },
           { "id": "550e8400-e29b-41d4-a716-446655440003", "name": "Rejected", "color": "#8B2D2D" },
           { "id": "550e8400-e29b-41d4-a716-446655440004", "name": "Cancelled", "color": "#8B2D2D" }
         ]
@@ -139,12 +141,12 @@
         "module": "Leave Requests",
         "activity": "create",
         "fields": [
-          { "name": "Leave Type", "type": "Selection", "required": true, "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"] },
+          { "name": "Leave Type", "type": "Selection", "required": true, "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] },
           { "name": "Start Date", "type": "Date", "required": true },
           { "name": "End Date", "type": "Date", "required": true },
           { "name": "Remarks", "type": "Text", "required": false },
           { "name": "Days Requested", "type": "Number", "required": true },
-          { "name": "Attachments", "type": "File", "required": false },
+          { "name": "Attachments", "type": "Files", "required": false },
           { "name": "Is Urgent", "type": "YesNo", "required": false }
         ],
         "defaults": {},
@@ -158,13 +160,24 @@
         "module": "Leave Requests",
         "activity": "create",
         "input": {
-          "Leave Type": "Annual Leave",
+          "Leave Type": "🏖️ Annual Leave",
           "Start Date": "2026-03-20",
           "End Date": "2026-03-25",
           "Days Requested": 4,
           "Remarks": "Family vacation",
+          "Attachments": [
+            {
+              "name": "medical-cert.pdf",
+              "path": "https://inistate.com/uploads/medical-cert.pdf"
+            },
+            {
+              "name": "leave-form.pdf",
+              "path": "https://inistate.com/uploads/leave-form.pdf"
+            }
+          ],
           "Is Urgent": false
         },
+        "_file_field_note": "File/Image (single) accepts one {name, path} object. Files/Images (plural) accepts an array of {name, path} objects. The 'path' can be a direct URL or the path returned from upload_file.",
         "state": "Pending Approval"
       },
       "response": {
@@ -173,6 +186,7 @@
         "entryId": 1042,
         "documentId": "LV-2026-0042",
         "state": "Pending Approval",
+        "ai_instruction": "Notify the assigned manager to review and approve or reject this leave request within 2 business days",
         "message": null
       }
     },
@@ -182,7 +196,7 @@
       "request": {
         "module": "Leave Requests",
         "filters": {
-          "Leave Type": "Annual Leave",
+          "Leave Type": "🏖️ Annual Leave",
           "Start Date": { "after": "2026-03-01" }
         },
         "state": "Pending Approval",
@@ -201,7 +215,7 @@
             "documentId": "LV-2026-0042",
             "state": "Pending Approval",
             "data": {
-              "Leave Type": "Annual Leave",
+              "Leave Type": "🏖️ Annual Leave",
               "Start Date": "2026-03-20",
               "End Date": "2026-03-25",
               "Days Requested": 4,
@@ -220,7 +234,7 @@
             "documentId": "LV-2026-0038",
             "state": "Pending Approval",
             "data": {
-              "Leave Type": "Annual Leave",
+              "Leave Type": "🏖️ Annual Leave",
               "Start Date": "2026-03-28",
               "End Date": "2026-04-01",
               "Days Requested": 3,
@@ -246,12 +260,21 @@
         "documentId": "LV-2026-0042",
         "state": "Pending Approval",
         "data": {
-          "Leave Type": "Annual Leave",
+          "Leave Type": "🏖️ Annual Leave",
           "Start Date": "2026-03-20",
           "End Date": "2026-03-25",
           "Days Requested": 4,
           "Remarks": "Family vacation",
-          "Attachments": null,
+          "Attachments": [
+            {
+              "name": "medical-cert.pdf",
+              "path": "https://inistate.com/uploads/medical-cert.pdf"
+            },
+            {
+              "name": "leave-form.pdf",
+              "path": "https://inistate.com/uploads/leave-form.pdf"
+            }
+          ],
           "Is Urgent": false
         },
         "createdBy": "jane.smith",
@@ -275,7 +298,7 @@
           { "name": "Remarks", "type": "Text", "required": true }
         ],
         "defaults": {
-          "Leave Type": "Annual Leave",
+          "Leave Type": "🏖️ Annual Leave",
           "Days Requested": 4,
           "Remarks": "Family vacation"
         },
@@ -300,6 +323,7 @@
         "entryId": 1042,
         "documentId": "LV-2026-0042",
         "state": "Approved",
+        "ai_instruction": "Update the team calendar and notify the employee that their leave has been approved",
         "message": null
       }
     },
@@ -341,7 +365,7 @@
             "state": "Pending Approval",
             "comment": null,
             "changes": [
-              { "field": "Leave Type", "from": null, "to": "Annual Leave" },
+              { "field": "Leave Type", "from": null, "to": "🏖️ Annual Leave" },
               { "field": "Start Date", "from": null, "to": "2026-03-20" },
               { "field": "End Date", "from": null, "to": "2026-03-25" },
               { "field": "Days Requested", "from": null, "to": 4 },
@@ -383,7 +407,7 @@
         "description": "Employee leave request management with approval workflow",
         "published": true,
         "information": [
-          { "name": "Leave Type", "type": "Selection", "options": ["Annual Leave", "Sick Leave", "Unpaid Leave"] },
+          { "name": "Leave Type", "type": "Selection", "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] },
           { "name": "Start Date", "type": "Date" },
           { "name": "End Date", "type": "Date" },
           { "name": "Remarks", "type": "Text" },
@@ -393,8 +417,8 @@
         ],
         "states": [
           { "name": "Draft", "color": "#5A6070", "initial": true },
-          { "name": "Pending Approval", "color": "#2968A8" },
-          { "name": "Approved", "color": "#1E6B45" },
+          { "name": "Pending Approval", "color": "#2968A8", "ai_instruction": "Notify the assigned manager to review and approve or reject this leave request within 2 business days" },
+          { "name": "Approved", "color": "#1E6B45", "ai_instruction": "Update the team calendar and notify the employee that their leave has been approved" },
           { "name": "Rejected", "color": "#8B2D2D" },
           { "name": "Cancelled", "color": "#8B2D2D" }
         ],
@@ -407,9 +431,10 @@
               { "name": "Days Requested", "readOnly": true },
               { "name": "Remarks", "required": true }
             ],
-            "ai_hint": "Manager approves the leave request"
+            "ai_hint": "Manager approves the leave request",
+            "ai_instruction": "Verify the employee has sufficient leave balance before approving"
           },
-          { "name": "Reject", "actor": "human", "fields": [{ "name": "Remarks", "required": true }] },
+          { "name": "Reject", "actor": "human", "fields": [{ "name": "Remarks", "required": true }], "ai_instruction": "Ensure a rejection reason is provided in Remarks" },
           { "name": "Cancel", "actor": "human" },
           { "name": "Submit", "actor": "hybrid", "ai_hint": "Employee submits the leave request for approval" }
         ],
@@ -460,7 +485,7 @@
         "moduleId": "9001",
         "name": "Leave Requests",
         "information": [
-          { "id": "xKfLmNpQ", "name": "Leave Category", "type": "Selection", "options": ["Annual Leave", "Sick Leave", "Unpaid Leave", "Compassionate Leave"] },
+          { "id": "xKfLmNpQ", "name": "Leave Category", "type": "Selection", "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave", "💐 Compassionate Leave"] },
           { "id": "hIjKlMnO", "name": "Notes", "type": "Text" },
           { "name": "Priority", "type": "Selection", "options": ["Low", "Medium", "High"] }
         ],

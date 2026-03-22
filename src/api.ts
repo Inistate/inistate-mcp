@@ -1,11 +1,26 @@
 const BASE_URL =
   process.env.INISTATE_API_BASE ||
   process.env.INISTATE_API_URL ||
+  process.env.INISTATE_BASE_URL ||
   "https://api.inistate.com";
+
+const LOG_ENABLED = process.env.INISTATE_LOG !== "0";
+
+function log(message: string, data?: Record<string, unknown>): void {
+  if (!LOG_ENABLED) return;
+  const entry: Record<string, unknown> = {
+    ts: new Date().toISOString(),
+    msg: message,
+    ...data,
+  };
+  console.error(JSON.stringify(entry));
+}
 
 // API key auth (fsk prefix)
 const API_KEY =
-  process.env.INISTATE_ACCESS_TOKEN || process.env.INISTATE_API_TOKEN;
+  process.env.INISTATE_ACCESS_TOKEN ||
+  process.env.INISTATE_API_TOKEN ||
+  process.env.INISTATE_API_KEY;
 
 // Username/password auth (login → JWT)
 const USERNAME = process.env.INISTATE_USERNAME;
@@ -46,6 +61,7 @@ export async function loginWithCredentials(
   params.set("grant_type", "password");
   params.set("username", username);
   params.set("password", password);
+  log("login", { username });
   const res = await fetch(`${BASE_URL}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
@@ -53,8 +69,10 @@ export async function loginWithCredentials(
   });
   if (!res.ok) {
     const text = await res.text();
+    log("login_failed", { status: res.status, body: text });
     throw new Error(`Login failed (${res.status}): ${text}`);
   }
+  log("login_success", { username });
   const data = (await res.json()) as Record<string, unknown>;
   extractTokens(data);
   // Store credentials for future re-login if refresh token is not available
@@ -157,6 +175,7 @@ async function handleResponse(res: Response): Promise<unknown> {
       details: body.details || null,
       agent_action: agentAction(res.status),
     };
+    log("api_error", { status: res.status, url: res.url, error: error.error, message: error.message, details: error.details });
     throw Object.assign(new Error(String(error.message)), { structured: error });
   }
   if (!text) return null;
@@ -191,11 +210,20 @@ async function request(
   getHeaders: () => Record<string, string>,
 ): Promise<Response> {
   await ensureAuth();
+  const method = init.method || "GET";
+  log("request", { method, url });
+  const start = Date.now();
   const res = await fetch(url, { ...init, headers: getHeaders() });
+  log("response", { method, url, status: res.status, ms: Date.now() - start });
   if (res.status === 401 && canRefresh()) {
+    log("auth_refresh", { url });
     const refreshed = await refreshAuth();
     if (refreshed) {
-      return fetch(url, { ...init, headers: getHeaders() });
+      log("request_retry", { method, url });
+      const retryStart = Date.now();
+      const retryRes = await fetch(url, { ...init, headers: getHeaders() });
+      log("response_retry", { method, url, status: retryRes.status, ms: Date.now() - retryStart });
+      return retryRes;
     }
   }
   return res;

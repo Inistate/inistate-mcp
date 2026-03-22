@@ -36,7 +36,7 @@
         "options": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Available option names for Selection/Tag fields. Shorthand: Selection(Option1/Option2/Option3)."
+          "description": "Available option names for Selection/Tag fields. Each option may optionally start with an emoji prefix (e.g. '🏖️ Annual Leave', '🏥 Sick Leave', '💰 Cash'). Shorthand: Selection(Option1/Option2/Option3)."
         },
         "fields": {
           "type": "array",
@@ -65,7 +65,7 @@
         "options": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Options for Selection/Tag sub-fields."
+          "description": "Options for Selection/Tag sub-fields. Each option may optionally start with an emoji prefix (e.g. '🏖️ Annual Leave')."
         }
       },
       "additionalProperties": false
@@ -96,6 +96,10 @@
         "ai_hint": {
           "type": "string",
           "description": "Guidance for AI agents on when an entry should be in this state."
+        },
+        "ai_instruction": {
+          "type": "string",
+          "description": "Instruction for AI agents to execute when an entry reaches this state. Describes what the AI should do automatically (e.g. 'Notify the approver via email', 'Generate a summary report', 'Check inventory levels and flag if below threshold'). Unlike ai_hint (which describes the state), ai_instruction prescribes an action."
         }
       },
       "additionalProperties": false
@@ -130,6 +134,10 @@
         "ai_hint": {
           "type": "string",
           "description": "Guidance for AI agents on when/how to perform this activity."
+        },
+        "ai_instruction": {
+          "type": "string",
+          "description": "Instruction for AI agents to execute when this activity is performed (e.g. 'Validate all required documents are attached before approving', 'Send notification to the finance team'). Unlike ai_hint (which guides when/how to trigger the activity), ai_instruction prescribes what to do when executing it."
         },
         "actor": {
           "type": "string",
@@ -168,7 +176,7 @@
         "options": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Subset of allowed options for Selection/Tag fields in this activity. Omit to allow all options."
+          "description": "Subset of allowed options for Selection/Tag fields in this activity. Options may include emoji prefixes. Omit to allow all options."
         }
       },
       "additionalProperties": false
@@ -374,7 +382,7 @@
                 "options": {
                   "type": "array",
                   "items": { "type": "string" },
-                  "description": "Available options for Selection/Tag fields."
+                  "description": "Available options for Selection/Tag fields. Options may include emoji prefixes (e.g. '🏖️ Annual Leave')."
                 },
                 "module": {
                   "type": "string",
@@ -389,7 +397,7 @@
             }
           },
           "_example": [
-            { "Leave Type": { "type": "Selection", "required": true, "options": ["Annual", "Sick", "Unpaid"] } },
+            { "Leave Type": { "type": "Selection", "required": true, "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] } },
             { "Start Date": { "type": "Date", "required": true } },
             { "Reason": { "type": "MultiText" } },
             { "Approver": { "type": "User", "module": "Employees" } }
@@ -545,6 +553,10 @@
         "flagged": {
           "type": "boolean",
           "description": "True when AI confidence was below the activity's confidence_threshold. State transition was suppressed and the entry is flagged for human intervention (collaboration flags: WithIntention + LastIntention, history type: intention). Only present when true."
+        },
+        "ai_instruction": {
+          "type": "string",
+          "description": "Instruction for AI agents to execute, from the new state's ai_instruction field. Only present when the activity caused a state change and the target state has an ai_instruction defined."
         },
         "availableActivities": {
           "$ref": "#/definitions/AvailableActivities",
@@ -715,6 +727,61 @@
   "operations": {
     "_description": "INISTATE operations map to MCP endpoints. Each operation uses display names exclusively — the MCP layer handles all internal ID resolution.",
 
+    "list_workspaces": {
+      "description": "List accessible workspaces. Optionally filter by name with ?search= query parameter.",
+      "parameters": {
+        "search": { "type": "string", "description": "Optional name filter (case-insensitive)." }
+      },
+      "returns": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "integer" },
+            "name": { "type": "string" }
+          }
+        }
+      },
+      "_maps_to": "GET /api/mcp/workspace"
+    },
+
+    "get_workspace": {
+      "description": "Get workspace details including its modules, states, and company info.",
+      "parameters": {
+        "id": { "type": "string", "description": "Workspace ID." }
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "company": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "logo": { "type": "string" },
+              "phone": { "type": "string" }
+            }
+          },
+          "modules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "integer" },
+                "emoji": { "type": "string" },
+                "name": { "type": "string" },
+                "states": { "type": "array" }
+              }
+            }
+          },
+          "states": { "type": "array" },
+          "country": { "type": "string" }
+        }
+      },
+      "_maps_to": "GET /api/mcp/workspace/{id}"
+    },
+
     "discover_modules": {
       "description": "List all available modules in the workspace.",
       "returns": {
@@ -807,14 +874,15 @@
     "upload_file": {
       "description": "Upload a file to S3. Returns a /s/ URL that can be used as a File/Image field value in submit_activity. To download, the agent prepends /api/mcp/download/{moduleName} to the returned URL.",
       "parameters": {
-        "module": { "type": "string", "description": "Module name (optional, for scoping the file to a module)." },
-        "file": { "type": "string", "format": "binary", "description": "The file to upload (multipart/form-data)." }
+        "required": ["module", "file"],
+        "module": { "type": "string", "description": "Module name. Required — scopes the file to the module's storage folder." },
+        "file": { "type": "string", "format": "binary", "description": "The file to upload. Must be sent as multipart/form-data." }
       },
       "returns": { "$ref": "#/definitions/FileUploadResult" },
       "_maps_to": "POST /api/mcp/upload",
       "_notes": [
-        "Request must be multipart/form-data with the file as a form part",
-        "Optional 'module' form field scopes the file to a module's S3 folder",
+        "Request must be multipart/form-data — no other content types are supported",
+        "Required 'module' form field scopes the file to the module's S3 folder",
         "Maximum file size: 50MB",
         "Blocked extensions: .exe, .bat, .cmd, .dll, .msi, and other executable types",
         "Filenames are sanitized (path traversal characters stripped)"
@@ -890,20 +958,22 @@
   "workflow_guide": {
     "_description": "Recommended sequence for AI agents interacting through INISTATE.",
     "steps": [
-      "1. discover_modules() → find available module names",
-      "2. get_module(module, tier='basic') → understand fields and states",
-      "3. get_module(module, tier='extended') → understand activities (only when needed)",
-      "4. get_form(module, activity) → get required fields, types, options, defaults, and confidence_threshold before submitting",
-      "5. upload_file(module, file) → upload files for File/Image fields, returns /s/ URL",
-      "6. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ URLs from upload_file for File/Image fields.",
-      "7. list_entries(module, filters) → query and browse entries",
-      "8. get_entry(module, entryId) → read a specific entry",
-      "9. get_history(module, entryId) → audit trail and comments",
-      "10. download_file(moduleName, guid, fileName) → download a file. Construct URL: /api/mcp/download/{moduleName}/s/{guid}/{fileName} from any /s/{guid}/{fileName} value",
+      "1. list_workspaces(?search=) → find accessible workspaces (id and name)",
+      "2. get_workspace(id) → get workspace details with modules and states",
+      "3. discover_modules() → find available module names",
+      "4. get_module(module, tier='basic') → understand fields and states",
+      "5. get_module(module, tier='extended') → understand activities (only when needed)",
+      "6. get_form(module, activity) → get required fields, types, options, defaults, and confidence_threshold before submitting",
+      "7. upload_file(module, file) → upload files for File/Image fields, returns /s/ URL",
+      "8. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ URLs from upload_file for File/Image fields.",
+      "9. list_entries(module, filters) → query and browse entries",
+      "10. get_entry(module, entryId) → read a specific entry",
+      "11. get_history(module, entryId) → audit trail and comments",
+      "12. download_file(moduleName, guid, fileName) → download a file. Construct URL: /api/mcp/download/{moduleName}/s/{guid}/{fileName} from any /s/{guid}/{fileName} value",
       "--- Module Configuration (via /api/configure/ endpoints, uses INISTATE ModuleSchema format) ---",
-      "11. get_module_schema(moduleName) → GET /api/configure/{moduleName} — get the module's current definition as ModuleSchema with stable IDs. Round-trippable: modify and send back via update_module.",
-      "12. create_module(ModuleSchema) → POST /api/configure — create a new module using the ModuleSchema definition from this schema",
-      "13. update_module(ModuleSchema) → PUT /api/configure — update an existing module. Use get_module_schema() first, modify, then send back."
+      "13. get_module_schema(moduleName) → GET /api/configure/{moduleName} — get the module's current definition as ModuleSchema with stable IDs. Round-trippable: modify and send back via update_module.",
+      "14. create_module(ModuleSchema) → POST /api/configure — create a new module using the ModuleSchema definition from this schema",
+      "15. update_module(ModuleSchema) → PUT /api/configure — update an existing module. Use get_module_schema() first, modify, then send back."
     ],
     "key_rules": [
       "All input/output keys use field DISPLAY NAMES, never internal IDs",

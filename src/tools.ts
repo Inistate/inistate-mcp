@@ -68,11 +68,17 @@ export function registerTools(server: McpServer) {
     {
       description:
         "List workspaces the current user has access to. Call set_workspace to select one before any module or entry tools. This is typically the first tool to call in any session.",
-      inputSchema: {},
+      inputSchema: {
+        search: z
+          .string()
+          .optional()
+          .describe("Optional name filter (case-insensitive)"),
+      },
     },
-    async () => {
+    async ({ search }) => {
       try {
-        const data = await api.get("/api/workspace");
+        const query = search ? `?search=${encodeURIComponent(search)}` : "";
+        const data = await api.get(`/api/workspace${query}`);
         return ok(data);
       } catch (e) {
         return err(e);
@@ -457,8 +463,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
       inputSchema: {
         module: z
           .string()
-          .optional()
-          .describe("Module name (optional, for scoping the file to a module)"),
+          .describe("Module name. Required — scopes the file to the module's storage folder."),
         name: z.string().describe("Original filename (e.g. 'report.pdf')"),
         file: z.string().describe("Base64-encoded file content"),
         mimeType: z
@@ -473,7 +478,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         const blob = new Blob([buffer], { type: mimeType });
         const formData = new FormData();
         formData.append("file", blob, fileName);
-        if (moduleName) formData.append("module", moduleName);
+        formData.append("module", moduleName);
         const data = await api.uploadFormData("/api/mcp/upload", formData);
         return ok(data);
       } catch (e) {
@@ -618,6 +623,7 @@ Always call validate_design before this tool.`,
               color: z.string().optional(),
               initial: z.boolean().optional(),
               ai_hint: z.string().optional(),
+              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when an entry reaches this state"),
             }),
           )
           .optional()
@@ -641,6 +647,7 @@ Always call validate_design before this tool.`,
                 )
                 .optional(),
               ai_hint: z.string().optional(),
+              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when this activity is performed"),
               confidence_threshold: z.number().min(0).max(1).optional(),
             }),
           )
@@ -740,6 +747,7 @@ Always call get_module_canvas first (not get_module_schema) to get stable IDs. A
               color: z.string().optional(),
               initial: z.boolean().optional(),
               ai_hint: z.string().optional(),
+              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when an entry reaches this state"),
             }),
           )
           .optional(),
@@ -763,6 +771,7 @@ Always call get_module_canvas first (not get_module_schema) to get stable IDs. A
                 )
                 .optional(),
               ai_hint: z.string().optional(),
+              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when this activity is performed"),
               confidence_threshold: z.number().min(0).max(1).optional(),
             }),
           )
