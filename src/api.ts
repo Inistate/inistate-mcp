@@ -1,3 +1,5 @@
+import { requestContext, isHttpRequest } from "./context.js";
+
 const BASE_URL =
   process.env.INISTATE_API_BASE ||
   process.env.INISTATE_API_URL ||
@@ -16,13 +18,13 @@ function log(message: string, data?: Record<string, unknown>): void {
   console.error(JSON.stringify(entry));
 }
 
-// API key auth (fsk prefix)
-const API_KEY =
+// Fallback auth from env vars (used when no per-request auth is provided)
+const ENV_API_KEY =
   process.env.INISTATE_ACCESS_TOKEN ||
   process.env.INISTATE_API_TOKEN ||
   process.env.INISTATE_API_KEY;
 
-// Username/password auth (login → JWT)
+// Username/password auth (login → JWT) — only for stdio/session mode
 const USERNAME = process.env.INISTATE_USERNAME;
 const PASSWORD = process.env.INISTATE_PASSWORD;
 
@@ -30,14 +32,42 @@ let jwt: string | null = null;
 let refreshToken: string | null = null;
 let storedUsername: string | null = USERNAME ?? null;
 let storedPassword: string | null = PASSWORD ?? null;
-let workspaceId: string | null = null;
+let workspaceId: string | null = process.env.INISTATE_WORKSPACE_ID ?? null;
 
 export function setWorkspaceId(wsid: string): void {
-  workspaceId = wsid;
+  const ctx = requestContext.getStore();
+  if (ctx) {
+    // HTTP mode: write to per-request context, not the global
+    ctx.workspaceId = wsid;
+  } else {
+    // stdio/session mode: write to the global
+    workspaceId = wsid;
+  }
 }
 
 export function getWorkspaceId(): string | null {
   return workspaceId;
+}
+
+/**
+ * Resolve the effective workspace ID.
+ * Priority: per-request context header > tool param (via setWorkspaceId) > env var
+ */
+function effectiveWorkspaceId(): string | null {
+  const ctx = requestContext.getStore();
+  return ctx?.workspaceId || workspaceId;
+}
+
+/**
+ * Resolve the effective Authorization header value.
+ * Priority: per-request context header > env API key > JWT from login
+ */
+function effectiveAuthorization(): string | null {
+  const ctx = requestContext.getStore();
+  if (ctx?.authorization) return ctx.authorization;
+  if (ENV_API_KEY) return `fsk ${ENV_API_KEY}`;
+  if (jwt) return `Bearer ${jwt}`;
+  return null;
 }
 
 function extractTokens(data: Record<string, unknown>): void {
@@ -52,11 +82,18 @@ function extractTokens(data: Record<string, unknown>): void {
 
 /**
  * Login with username/password to obtain a JWT + refresh token.
+ * Only available in stdio/session mode — in HTTP mode, clients must
+ * pass their own Authorization header.
  */
 export async function loginWithCredentials(
   username: string,
   password: string,
 ): Promise<void> {
+  if (isHttpRequest()) {
+    throw new Error(
+      "Login is not supported in remote/HTTP mode. Pass your API key or JWT via the Authorization header instead."
+    );
+  }
   const params = new URLSearchParams();
   params.set("grant_type", "password");
   params.set("username", username);
@@ -114,24 +151,22 @@ async function refreshAuth(): Promise<boolean> {
 }
 
 async function ensureAuth(): Promise<void> {
-  if (API_KEY || jwt) return;
+  // Per-request auth from HTTP header takes priority — no login needed
+  const ctx = requestContext.getStore();
+  if (ctx?.authorization) return;
+  if (ENV_API_KEY || jwt) return;
   if (storedUsername && storedPassword) {
     await loginWithCredentials(storedUsername, storedPassword);
   }
 }
 
-function authorizationValue(): string | null {
-  if (API_KEY) return `fsk ${API_KEY}`;
-  if (jwt) return `Bearer ${jwt}`;
-  return null;
-}
-
 function buildHeaders(contentType?: string): Record<string, string> {
   const h: Record<string, string> = { Accept: "application/json" };
   if (contentType) h["Content-Type"] = contentType;
-  const auth = authorizationValue();
+  const auth = effectiveAuthorization();
   if (auth) h["Authorization"] = auth;
-  if (workspaceId) h["wsid"] = workspaceId;
+  const wsid = effectiveWorkspaceId();
+  if (wsid) h["wsid"] = wsid;
   return h;
 }
 
@@ -196,9 +231,11 @@ async function handleResponse(res: Response): Promise<unknown> {
   return data;
 }
 
-/** Can we attempt a token refresh? Only for JWT auth, not API key. */
+/** Can we attempt a token refresh? Only for JWT auth, not API key or pass-through. */
 function canRefresh(): boolean {
-  return !API_KEY && (!!refreshToken || (!!storedUsername && !!storedPassword));
+  const ctx = requestContext.getStore();
+  if (ctx?.authorization) return false; // pass-through auth — server can't refresh client's token
+  return !ENV_API_KEY && (!!refreshToken || (!!storedUsername && !!storedPassword));
 }
 
 /**

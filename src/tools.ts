@@ -46,6 +46,18 @@ function err(e: unknown) {
   };
 }
 
+// ---------- Workspace helper ----------
+
+/** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
+function applyWorkspace(workspaceId?: string): void {
+  if (workspaceId) api.setWorkspaceId(workspaceId);
+}
+
+const wsParam = z
+  .string()
+  .optional()
+  .describe("Workspace ID. Required in stateless/remote mode. If set via env INISTATE_WORKSPACE_ID or prior set_workspace call, can be omitted.");
+
 // ---------- Tool registration ----------
 
 export function registerTools(server: McpServer) {
@@ -104,7 +116,7 @@ export function registerTools(server: McpServer) {
   server.registerTool(
     "set_workspace",
     {
-      description: `Set the active workspace. Retrieves workspace details for the agent to store. Must be called before any module or entry tools.
+      description: `Set the active workspace for the current session. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
 
 Workflow sequences after workspace is set:
 - Design: design_workflow → validate_design → create_module
@@ -135,11 +147,14 @@ Workflow sequences after workspace is set:
     "list_modules",
     {
       description:
-        "List all discoverable modules in the current workspace. Prerequisite: set_workspace. Call this to find module names for execute, modify, and query operations.",
-      inputSchema: {},
+        "List all discoverable modules in the current workspace. Call this to find module names for execute, modify, and query operations.",
+      inputSchema: {
+        workspaceId: wsParam,
+      },
     },
-    async () => {
+    async ({ workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const data = await api.get("/api/mcp/");
         return ok(data);
       } catch (e) {
@@ -164,10 +179,12 @@ Workflow sequences after workspace is set:
           .describe(
             "basic = fields + states. extended = + activities and flows.",
           ),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName, tier }) => {
+    async ({ module: moduleName, tier, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const data = await api.get(
           `/api/mcp/${api.enc(moduleName)}?tier=${tier}`,
         );
@@ -190,10 +207,12 @@ Modify workflow: list_modules → get_module_canvas → (apply changes) → vali
 Load resource inistate://schema before modifying to know valid field types, colors, and actors.`,
       inputSchema: {
         module: z.string().describe("Module name or numeric ID"),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName }) => {
+    async ({ module: moduleName, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const data = await api.get(
           `/api/configure/${api.enc(moduleName)}`,
         );
@@ -235,10 +254,12 @@ Multiple filters are AND-ed. Use state parameter for state filtering.`,
         sortDirection: z.enum(["asc", "desc"]).default("asc").optional(),
         currentPage: z.number().int().default(0).optional().describe("Zero-based page index"),
         pageSize: z.number().int().default(50).optional().describe("Items per page (max 500)"),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize }) => {
+    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const body: Record<string, unknown> = { module: moduleName };
         if (state) body.state = state;
         if (search) body.search = search;
@@ -268,10 +289,12 @@ Multiple filters are AND-ed. Use state parameter for state filtering.`,
         entryId: z
           .union([z.string(), z.number()])
           .describe("Entry ID"),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName, entryId }) => {
+    async ({ module: moduleName, entryId, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const data = await api.post("/api/mcp/entry", {
           module: moduleName,
           entryId,
@@ -303,10 +326,12 @@ Multiple filters are AND-ed. Use state parameter for state filtering.`,
           .union([z.string(), z.number(), z.null()])
           .optional()
           .describe("Entry ID for edit/view/custom activities. Omit for create."),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName, activity, entryId }) => {
+    async ({ module: moduleName, activity, entryId, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const body: Record<string, unknown> = {
           module: moduleName,
           activity,
@@ -393,6 +418,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
           })
           .optional()
           .describe("AI agent traceability context"),
+        workspaceId: wsParam,
       },
     },
     async ({
@@ -406,8 +432,10 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
       assignees,
       due,
       ai,
+      workspaceId,
     }) => {
       try {
+        applyWorkspace(workspaceId);
         // Normalize file field inputs: remap 'url' → 'path' if client sent { name, url } instead of { name, path }
         if (input) {
           for (const key of Object.keys(input)) {
@@ -475,10 +503,12 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
           .default(0)
           .optional()
           .describe("Page number (0-based, 50 items per page)"),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName, entryId, page }) => {
+    async ({ module: moduleName, entryId, page, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const body: Record<string, unknown> = {
           module: moduleName,
           entryId,
@@ -510,10 +540,12 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
           .string()
           .default("application/octet-stream")
           .describe("MIME type of the file"),
+        workspaceId: wsParam,
       },
     },
-    async ({ module: moduleName, name: fileName, file: fileContent, mimeType }) => {
+    async ({ module: moduleName, name: fileName, file: fileContent, mimeType, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         log("upload_file", `module=${moduleName} file=${fileName} mime=${mimeType}`);
         const buffer = Buffer.from(fileContent, "base64");
         const blob = new Blob([buffer], { type: mimeType });
@@ -547,10 +579,12 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         moduleName: z.string().describe("Module name (resolved to vectorId internally)"),
         guid: z.string().describe("Short ID from the file URL"),
         fileName: z.string().describe("Original filename"),
+        workspaceId: wsParam,
       },
     },
-    async ({ moduleName, guid, fileName }) => {
+    async ({ moduleName, guid, fileName, workspaceId }) => {
       try {
+        applyWorkspace(workspaceId);
         const result = await api.getRaw(
           `/api/mcp/download/${api.enc(moduleName)}/s/${api.enc(guid)}/${api.enc(fileName)}`,
         );
@@ -711,6 +745,7 @@ Always call validate_design before this tool.`,
           )
           .optional()
           .describe("State transition rules. Omit for record list modules."),
+        workspaceId: wsParam,
       },
     },
     async ({
@@ -721,8 +756,10 @@ Always call validate_design before this tool.`,
       states,
       activities,
       flows,
+      workspaceId,
     }) => {
       try {
+        applyWorkspace(workspaceId);
         const body: Record<string, unknown> = { name };
         if (icon) body.icon = icon;
         if (desc) body.description = desc;
@@ -829,6 +866,7 @@ Always call get_module_canvas first (not get_module_schema) to get stable IDs. A
             }),
           )
           .optional(),
+        workspaceId: wsParam,
       },
     },
     async ({
@@ -840,8 +878,10 @@ Always call get_module_canvas first (not get_module_schema) to get stable IDs. A
       states,
       activities,
       flows,
+      workspaceId,
     }) => {
       try {
+        applyWorkspace(workspaceId);
         const body: Record<string, unknown> = { id };
         if (name) body.name = name;
         if (icon) body.icon = icon;
