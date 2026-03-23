@@ -412,7 +412,7 @@ export function designWorkflow(
         name: "",
         icon: "",
         description: "",
-        published: true,
+
         information: [
           { name: "Name", type: "Text", ai_hint: "" },
           { name: "", type: "", ai_hint: "" },

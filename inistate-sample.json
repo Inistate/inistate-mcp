@@ -3,6 +3,7 @@
 
   "module_schema": {
     "_note": "This represents the READ response (get_module_schema). IDs are present because the module already exists.",
+    "id": 9001,
     "name": "Leave Requests",
     "icon": "🏖️",
     "description": "Employee leave request management with approval workflow",
@@ -405,7 +406,6 @@
         "name": "Leave Requests",
         "icon": "🏖️",
         "description": "Employee leave request management with approval workflow",
-        "published": true,
         "information": [
           { "name": "Leave Type", "type": "Selection", "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] },
           { "name": "Start Date", "type": "Date" },
@@ -448,8 +448,44 @@
       "response": {
         "id": 9001,
         "name": "Leave Requests",
-        "emoji": "🏖️",
-        "updatedDate": "2026-03-12T10:00:00Z"
+        "icon": "🏖️",
+        "description": "Employee leave request management with approval workflow",
+        "information": [
+          { "id": "xKfLmNpQ", "name": "Leave Type", "type": "Selection", "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] },
+          { "id": "yRsTuVwX", "name": "Start Date", "type": "Date" },
+          { "id": "zAbCdEfG", "name": "End Date", "type": "Date" },
+          { "id": "hIjKlMnO", "name": "Remarks", "type": "Text" },
+          { "id": "pQrStUvW", "name": "Days Requested", "type": "Number" },
+          { "id": "iJkLmNoP", "name": "Attachments", "type": "File" },
+          { "id": "tGhIjKlM", "name": "Is Urgent", "type": "YesNo", "ai_hint": "Set to true if leave is requested within 24 hours" }
+        ],
+        "states": [
+          { "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Draft", "color": "#5A6070", "initial": true },
+          { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Pending Approval", "color": "#2968A8", "ai_instruction": "Notify the assigned manager to review and approve or reject this leave request within 2 business days" },
+          { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45", "ai_instruction": "Update the team calendar and notify the employee that their leave has been approved" },
+          { "id": "550e8400-e29b-41d4-a716-446655440003", "name": "Rejected", "color": "#8B2D2D" },
+          { "id": "550e8400-e29b-41d4-a716-446655440004", "name": "Cancelled", "color": "#8B2D2D" }
+        ],
+        "activities": [
+          { "id": "d4e5f6a7-b8c9-0123-defg-456789abcdef", "name": "Approve", "actor": "human", "fields": [{ "name": "Leave Type", "readOnly": true }, { "name": "Days Requested", "readOnly": true }, { "name": "Remarks", "required": true }], "ai_hint": "Manager approves the leave request", "ai_instruction": "Verify the employee has sufficient leave balance before approving" },
+          { "id": "e5f6a7b8-c9d0-1234-efgh-56789abcdef0", "name": "Reject", "actor": "human", "fields": [{ "name": "Remarks", "required": true }], "ai_instruction": "Ensure a rejection reason is provided in Remarks" },
+          { "id": "a1b2c3d4-e5f6-7890-ijkl-mnopqrstuvwx", "name": "Cancel", "actor": "human" },
+          { "id": "b2c3d4e5-f6a7-8901-jklm-nopqrstuvwxy", "name": "Submit", "actor": "hybrid", "ai_hint": "Employee submits the leave request for approval" }
+        ],
+        "flows": [
+          { "from": "Draft", "to": "Pending Approval", "activity": "Submit" },
+          { "from": "Pending Approval", "to": "Approved", "activity": "Approve" },
+          { "from": "Pending Approval", "to": "Rejected", "activity": "Reject" },
+          { "from": "Pending Approval", "to": "Cancelled", "activity": "Cancel" }
+        ],
+        "updatedDate": "2026-03-12T10:00:00Z",
+        "version": "1",
+        "summary": {
+          "fields": 7,
+          "states": ["Draft", "Pending Approval", "Approved", "Rejected", "Cancelled"],
+          "activities": ["Approve", "Reject", "Cancel", "Submit"],
+          "flows": 4
+        }
       },
       "_note": "The MCP layer converts this to internal format automatically: generates stable IDs for fields, GUIDs for states/activities, and resolves type enums."
     },
@@ -460,7 +496,6 @@
         "name": "Department List",
         "icon": "🏢",
         "description": "Master list of organizational departments",
-        "published": true,
         "information": [
           { "name": "Department Name", "type": "Text" },
           { "name": "Department Code", "type": "Text" },
@@ -472,8 +507,23 @@
       "response": {
         "id": 9010,
         "name": "Department List",
-        "emoji": "🏢",
-        "updatedDate": "2026-03-12T12:00:00Z"
+        "icon": "🏢",
+        "description": "Master list of organizational departments",
+        "information": [
+          { "id": "aBcDeFgH", "name": "Department Name", "type": "Text" },
+          { "id": "iJkLmNoP", "name": "Department Code", "type": "Text" },
+          { "id": "qRsTuVwX", "name": "Head of Department", "type": "Text" },
+          { "id": "yZaBcDeF", "name": "Location", "type": "Text" },
+          { "id": "gHiJkLmN", "name": "Active", "type": "YesNo" }
+        ],
+        "updatedDate": "2026-03-12T12:00:00Z",
+        "version": "1",
+        "summary": {
+          "fields": 5,
+          "states": [],
+          "activities": [],
+          "flows": 0
+        }
       },
       "_note": "No states, activities, or flows — entries are managed with standard create/edit/delete only."
     },
@@ -509,8 +559,53 @@
       "response": {
         "id": 9001,
         "name": "Leave Requests",
-        "emoji": "🏖️",
-        "updatedDate": "2026-03-12T11:00:00Z"
+        "icon": "🏖️",
+        "description": "Employee leave request management with approval workflow",
+        "information": [
+          { "id": "xKfLmNpQ", "name": "Leave Category", "type": "Selection", "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave", "💐 Compassionate Leave"] },
+          { "id": "yRsTuVwX", "name": "Start Date", "type": "Date" },
+          { "id": "zAbCdEfG", "name": "End Date", "type": "Date" },
+          { "id": "hIjKlMnO", "name": "Notes", "type": "Text" },
+          { "id": "pQrStUvW", "name": "Days Requested", "type": "Number" },
+          { "id": "iJkLmNoP", "name": "Attachments", "type": "File" },
+          { "id": "tGhIjKlM", "name": "Is Urgent", "type": "YesNo", "ai_hint": "Set to true if leave is requested within 24 hours" },
+          { "id": "uVwXyZaB", "name": "Priority", "type": "Selection", "options": ["Low", "Medium", "High"] }
+        ],
+        "states": [
+          { "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Draft", "color": "#5A6070", "initial": true },
+          { "id": "550e8400-e29b-41d4-a716-446655440001", "name": "Awaiting Review", "color": "#2968A8", "ai_instruction": "Notify the assigned manager to review and approve or reject this leave request within 2 business days" },
+          { "id": "550e8400-e29b-41d4-a716-446655440002", "name": "Approved", "color": "#1E6B45", "ai_instruction": "Update the team calendar and notify the employee that their leave has been approved" },
+          { "id": "550e8400-e29b-41d4-a716-446655440003", "name": "Rejected", "color": "#8B2D2D" },
+          { "id": "550e8400-e29b-41d4-a716-446655440004", "name": "Cancelled", "color": "#8B2D2D" },
+          { "id": "660e8400-e29b-41d4-a716-446655440005", "name": "On Hold", "color": "#6B4D91" }
+        ],
+        "activities": [
+          { "id": "d4e5f6a7-b8c9-0123-defg-456789abcdef", "name": "Review", "actor": "human", "fields": [{ "name": "Leave Category", "readOnly": true }, { "name": "Notes", "required": true }, { "name": "Priority", "required": true, "options": ["Medium", "High"] }] },
+          { "id": "e5f6a7b8-c9d0-1234-efgh-56789abcdef0", "name": "Reject", "actor": "human", "fields": [{ "name": "Notes", "required": true }], "ai_instruction": "Ensure a rejection reason is provided in Remarks" },
+          { "id": "a1b2c3d4-e5f6-7890-ijkl-mnopqrstuvwx", "name": "Cancel", "actor": "human" },
+          { "id": "b2c3d4e5-f6a7-8901-jklm-nopqrstuvwxy", "name": "Submit", "actor": "hybrid", "ai_hint": "Employee submits the leave request for approval" }
+        ],
+        "flows": [
+          { "from": "Draft", "to": "Awaiting Review", "activity": "Submit" },
+          { "from": "Awaiting Review", "to": "Approved", "activity": "Review" },
+          { "from": "Awaiting Review", "to": "Rejected", "activity": "Reject" },
+          { "from": "Awaiting Review", "to": "Cancelled", "activity": "Cancel" }
+        ],
+        "updatedDate": "2026-03-12T11:00:00Z",
+        "version": "2",
+        "changes": {
+          "renamed": [
+            { "type": "field", "from": "Leave Type", "to": "Leave Category", "id": "xKfLmNpQ" },
+            { "type": "field", "from": "Remarks", "to": "Notes", "id": "hIjKlMnO" },
+            { "type": "state", "from": "Pending Approval", "to": "Awaiting Review", "id": "550e8400-e29b-41d4-a716-446655440001" },
+            { "type": "activity", "from": "Approve", "to": "Review", "id": "d4e5f6a7-b8c9-0123-defg-456789abcdef" }
+          ],
+          "added": [
+            { "type": "field", "name": "Priority" },
+            { "type": "state", "name": "On Hold" }
+          ],
+          "updated": []
+        }
       },
       "_what_happens": {
         "Leave Type → Leave Category": "id=xKfLmNpQ matched → displayName updated, storage key unchanged, existing data preserved",

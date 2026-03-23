@@ -206,12 +206,12 @@
 
     "ModuleSchema": {
       "type": "object",
-      "description": "INISTATE module definition — the MCP-facing schema for creating and updating modules without listings. All internal complexity (GUIDs, numeric enums, design rows) is hidden. A module can be either a workflow module (with states, activities, and flows) or a record list module (master data, lookup tables, registries) that simply stores entries without any workflow. Record list modules omit states, activities, and flows entirely — entries are created, edited, and deleted using the standard activities without state transitions.",
+      "description": "INISTATE module definition — used for both input (create/update) and output (GET/POST/PUT responses). The configure endpoints accept and return this same shape. On output, 'id' is added and all elements include stable IDs for round-tripping. A module can be either a workflow module (with states, activities, and flows) or a record list module (master data, lookup tables, registries) that simply stores entries without any workflow. Record list modules omit states, activities, and flows entirely.",
       "required": ["name"],
       "properties": {
-        "moduleId": {
-          "type": "string",
-          "description": "Module identifier (numeric ID or name). Required for update operations to identify which module to update. Absent on create."
+        "id": {
+          "type": "integer",
+          "description": "Module ID. Present on responses, absent on create input. Required for update operations to identify which module to update."
         },
         "name": {
           "type": "string",
@@ -246,7 +246,7 @@
           "description": "State transition rules linking activities to state changes. Omit for record list modules with no workflow."
         }
       },
-      "additionalProperties": false
+      "_note": "Responses may include additional properties (updatedDate, version, summary, changes) beyond these base fields."
     },
 
     "FileUploadResult": {
@@ -274,17 +274,16 @@
 
     "FileFieldInput": {
       "type": "object",
-      "description": "Input shape for File/Image fields when submitting an activity. Two modes: (1) base64 upload — include 'bytes' and the server uploads to S3, or (2) pre-uploaded — include 'path' from a prior upload_file() call.",
+      "description": "Input shape for File/Image fields when submitting an activity. Provide a path from upload_file() or an external URL.",
+      "required": ["name", "path"],
       "properties": {
         "name": { "type": "string", "description": "Filename (e.g. 'report.pdf'). Required." },
-        "bytes": { "type": "string", "description": "Base64-encoded file content. If present, the server uploads to S3 and replaces with 'path'. Omit when using a pre-uploaded path." },
-        "path": { "type": "string", "description": "Pre-uploaded file path from upload_file() (e.g. '/s/xK8m/report.pdf'). Use this instead of bytes for files already uploaded via POST /api/mcp/upload." },
+        "path": { "type": "string", "description": "Either a path from upload_file() (e.g. '/s/xK8m/report.pdf') or an external URL (e.g. 'https://example.com/report.pdf')." },
         "type": { "type": "string", "description": "MIME type (optional, e.g. 'application/pdf')." }
       },
       "_notes": [
         "For File/Image (single): value is one FileFieldInput object",
-        "For Files/Images (multiple): value is an array of FileFieldInput objects",
-        "After server processing, 'bytes' is removed and 'path' is added — the stored/returned shape is always FileFieldValue"
+        "For Files/Images (multiple): value is an array of FileFieldInput objects"
       ]
     },
 
@@ -400,7 +399,7 @@
             { "Leave Type": { "type": "Selection", "required": true, "options": ["🏖️ Annual Leave", "🏥 Sick Leave", "📋 Unpaid Leave"] } },
             { "Start Date": { "type": "Date", "required": true } },
             { "Reason": { "type": "MultiText" } },
-            { "Approver": { "type": "User", "module": "Employees" } }
+            { "Approver": { "type": "Text" } }
           ]
         },
         "defaults": {
@@ -448,7 +447,7 @@
         "input": {
           "type": "object",
           "additionalProperties": true,
-          "description": "Field values keyed by display name. For File/Image fields, use FileFieldInput objects ({ name, bytes } for base64 upload or { name, path } for pre-uploaded). For Files/Images fields, use arrays of FileFieldInput objects."
+          "description": "Field values keyed by display name. For File/Image fields, use FileFieldInput objects ({ name, path }). For Files/Images fields, use arrays of FileFieldInput objects."
         },
         "state": {
           "type": "string",
@@ -905,51 +904,65 @@
     },
 
     "get_module_schema": {
-      "description": "Get an existing module definition in full INISTATE ModuleSchema format with stable IDs. The output is round-trippable — it can be modified and sent back via update_module.",
+      "description": "Get an existing module definition as a ModuleSchema with stable IDs. The output is round-trippable — modify and send back via update_module.",
       "parameters": {
         "module": { "type": "string", "description": "Module name or numeric ID." }
       },
-      "returns": {
-        "type": "object",
-        "properties": {
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "icon": { "type": "string" },
-          "description": { "type": "string" },
-          "published": { "type": "boolean" },
-          "information": { "type": "array", "items": { "$ref": "#/definitions/FieldDefinition" } },
-          "states": { "type": "array", "items": { "$ref": "#/definitions/StateDefinition" } },
-          "activities": { "type": "array", "items": { "$ref": "#/definitions/ActivityDefinition" } },
-          "flows": { "type": "array", "items": { "$ref": "#/definitions/FlowDefinition" } }
-        }
-      },
+      "returns": { "$ref": "#/definitions/ModuleSchema" },
       "_maps_to": "GET /api/configure/{moduleName}"
     },
 
     "create_module": {
-      "description": "Create a new module from an INISTATE ModuleSchema definition.",
+      "description": "Create a new module from a ModuleSchema definition. Returns the created module as a ModuleSchema with generated IDs.",
       "parameters": { "$ref": "#/definitions/ModuleSchema" },
       "returns": {
-        "type": "object",
-        "properties": {
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "emoji": { "type": "string" }
-        }
+        "allOf": [
+          { "$ref": "#/definitions/ModuleSchema" },
+          {
+            "type": "object",
+            "properties": {
+              "updatedDate": { "type": "string", "format": "date-time" },
+              "version": { "type": "string" },
+              "summary": {
+                "type": "object",
+                "description": "Summary of what was created.",
+                "properties": {
+                  "fields": { "type": "integer" },
+                  "states": { "type": "array", "items": { "type": "string" } },
+                  "activities": { "type": "array", "items": { "type": "string" } },
+                  "flows": { "type": "integer" }
+                }
+              }
+            }
+          }
+        ]
       },
       "_maps_to": "POST /api/configure"
     },
 
     "update_module": {
-      "description": "Update an existing module. The moduleId identifies which module to update; name can be changed to rename. Omitted sections are left unchanged.",
+      "description": "Update an existing module. Send a ModuleSchema with id. Returns the full updated ModuleSchema.",
       "parameters": { "$ref": "#/definitions/ModuleSchema" },
       "returns": {
-        "type": "object",
-        "properties": {
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "emoji": { "type": "string" }
-        }
+        "allOf": [
+          { "$ref": "#/definitions/ModuleSchema" },
+          {
+            "type": "object",
+            "properties": {
+              "updatedDate": { "type": "string", "format": "date-time" },
+              "version": { "type": "string" },
+              "changes": {
+                "type": "object",
+                "description": "What the update changed.",
+                "properties": {
+                  "renamed": { "type": "array", "items": { "type": "object" } },
+                  "added": { "type": "array", "items": { "type": "object" } },
+                  "updated": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        ]
       },
       "_maps_to": "PUT /api/configure"
     }
@@ -982,7 +995,7 @@
       "Always call get_form() before submit_activity() to discover required fields and valid options",
       "Use tier='basic' by default; only request 'extended' when activity details are needed",
       "Not all modules have workflows — record list modules (master data, lookup tables) have no states, activities, or flows. Use standard create/edit/delete activities directly.",
-      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, bytes } (base64 inline) or { name, path } (pre-uploaded via upload_file). Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path."
+      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, path } where path is from upload_file() or an external URL. Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path."
     ],
     "module_types": {
       "_description": "Modules fall into two categories based on their purpose.",

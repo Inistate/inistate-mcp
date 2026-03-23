@@ -1,10 +1,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { appendFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import * as api from "./api.js";
 import {
   designWorkflow,
   validateDesign,
 } from "./schema.js";
+
+// ---------- Logging ----------
+
+const LOG_PATH = resolve(process.cwd(), "debug.log");
+
+function log(tool: string, detail: string) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${tool}: ${detail}\n`;
+  try { appendFileSync(LOG_PATH, line); } catch { /* ignore */ }
+}
 
 // ---------- Response helpers ----------
 
@@ -319,7 +331,7 @@ Multiple filters are AND-ed. Use state parameter for state filtering.`,
 Standard activities: create (no entryId), edit, delete, changeStatus, comment, duplicate, manage.
 Custom activities: use the activity name from get_module_schema.
 Bulk operations: use entryIds array instead of entryId.
-File/Image fields: use { name, bytes } for base64 inline or { name, path } for pre-uploaded via upload_file.
+File/Image fields: use { name, path } where path is from upload_file() or an external URL.
 Files/Images (plural): use arrays of file objects.
 AI audit: always include the ai object with reasoning, sources, model, and confidence for traceability.`,
       inputSchema: {
@@ -339,7 +351,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         input: z
           .record(z.unknown())
           .optional()
-          .describe("Field values keyed by display name"),
+          .describe("Field values keyed by display name. For File/Image fields, use { name, path } objects. For Files/Images fields, use arrays of { name, path } objects."),
         state: z
           .string()
           .optional()
@@ -396,6 +408,29 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
       ai,
     }) => {
       try {
+        // Normalize file field inputs: remap 'url' → 'path' if client sent { name, url } instead of { name, path }
+        if (input) {
+          for (const key of Object.keys(input)) {
+            const val = input[key];
+            if (val && typeof val === "object" && !Array.isArray(val)) {
+              const obj = val as Record<string, unknown>;
+              if (obj.url && !obj.path) {
+                obj.path = obj.url;
+                delete obj.url;
+              }
+            } else if (Array.isArray(val)) {
+              for (const item of val) {
+                if (item && typeof item === "object") {
+                  const obj = item as Record<string, unknown>;
+                  if (obj.url && !obj.path) {
+                    obj.path = obj.url;
+                    delete obj.url;
+                  }
+                }
+              }
+            }
+          }
+        }
         const body: Record<string, unknown> = {
           module: moduleName,
           activity,
@@ -408,9 +443,14 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         if (assignees) body.assignees = assignees;
         if (due) body.due = due;
         if (ai) body.ai = ai;
+        const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target}`);
         const data = await api.post("/api/mcp/activity", body);
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ok`);
         return ok(data);
       } catch (e) {
+        const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }
     },
@@ -459,7 +499,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
     "upload_file",
     {
       description:
-        "Upload a file to S3 storage. Returns a /s/ URL that can be used as a File/Image field value in submit_activity. Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi. The agent provides file content as base64 which the server converts to multipart/form-data for the API.",
+        "Upload a file to S3 storage. Returns { path, filename, mimeType, size }. Use the returned path directly as the 'path' value in File/Image fields for submit_activity (e.g. { name: 'photo.jpg', path: result.path }). Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi. The agent provides file content as base64 which the server converts to multipart/form-data for the API.",
       inputSchema: {
         module: z
           .string()
@@ -474,14 +514,22 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
     },
     async ({ module: moduleName, name: fileName, file: fileContent, mimeType }) => {
       try {
+        log("upload_file", `module=${moduleName} file=${fileName} mime=${mimeType}`);
         const buffer = Buffer.from(fileContent, "base64");
         const blob = new Blob([buffer], { type: mimeType });
         const formData = new FormData();
         formData.append("file", blob, fileName);
         formData.append("module", moduleName);
-        const data = await api.uploadFormData("/api/mcp/upload", formData);
-        return ok(data);
+        const raw = await api.uploadFormData("/api/mcp/upload", formData) as Record<string, unknown>;
+        // Remap 'url' → 'path' so response aligns with FileFieldInput / submit_activity
+        if (raw.url && !raw.path) {
+          raw.path = raw.url;
+          delete raw.url;
+        }
+        log("upload_file", `module=${moduleName} file=${fileName} → ok`);
+        return ok(raw);
       } catch (e) {
+        log("upload_file", `module=${moduleName} file=${fileName} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }
     },
@@ -594,7 +642,6 @@ Always call validate_design before this tool.`,
         name: z.string().describe("Module name"),
         icon: z.string().optional().describe("Emoji identifier"),
         description: z.string().optional().describe("Human-readable module description"),
-        published: z.boolean().default(true).optional(),
         information: z
           .array(
             z.object({
@@ -670,7 +717,6 @@ Always call validate_design before this tool.`,
       name,
       icon,
       description: desc,
-      published,
       information,
       states,
       activities,
@@ -680,17 +726,19 @@ Always call validate_design before this tool.`,
         const body: Record<string, unknown> = { name };
         if (icon) body.icon = icon;
         if (desc) body.description = desc;
-        if (published !== undefined) body.published = published;
         if (information) body.information = information;
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        log("create_module", `name=${name}`);
         const data = await api.post(
-          `/api/configure/${api.enc(name)}`,
+          `/api/configure/`,
           body,
         );
+        log("create_module", `name=${name} → ok`);
         return ok(data);
       } catch (e) {
+        log("create_module", `name=${name} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }
     },
@@ -707,17 +755,12 @@ Always call validate_design before this tool.`,
 Modify workflow: list_modules → get_module_canvas → (apply changes) → validate_design → update_module.
 Always call get_module_canvas first (not get_module_schema) to get stable IDs. Always call validate_design before this tool.`,
       inputSchema: {
-        module: z
+        id: z
           .string()
-          .describe("Current module name (used in URL path)"),
-        moduleId: z
-          .string()
-          .optional()
-          .describe("Module ID for identification (use if renaming)"),
+          .describe("Module ID from get_module_canvas (identifies which module to update)"),
         name: z.string().optional().describe("New module name (for renaming)"),
         icon: z.string().optional(),
         description: z.string().optional(),
-        published: z.boolean().optional(),
         information: z
           .array(
             z.object({
@@ -789,34 +832,33 @@ Always call get_module_canvas first (not get_module_schema) to get stable IDs. A
       },
     },
     async ({
-      module: moduleName,
-      moduleId,
+      id,
       name,
       icon,
       description: desc,
-      published,
       information,
       states,
       activities,
       flows,
     }) => {
       try {
-        const body: Record<string, unknown> = {};
-        if (moduleId) body.moduleId = moduleId;
+        const body: Record<string, unknown> = { id };
         if (name) body.name = name;
         if (icon) body.icon = icon;
         if (desc) body.description = desc;
-        if (published !== undefined) body.published = published;
         if (information) body.information = information;
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        log("update_module", `id=${id}${name ? ` name=${name}` : ""}`);
         const data = await api.put(
-          `/api/configure/${api.enc(moduleName)}`,
+          `/api/configure/`,
           body,
         );
+        log("update_module", `id=${id} → ok`);
         return ok(data);
       } catch (e) {
+        log("update_module", `id=${id} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }
     },
