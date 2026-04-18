@@ -53,6 +53,8 @@ describe("server discovery", () => {
     expect(names).toContain("get_entry_history");
     expect(names).toContain("upload_file");
     expect(names).toContain("download_file");
+    expect(names).toContain("request_upload_url");
+    expect(names).toContain("confirm_upload");
     expect(names).toContain("design_workflow");
     expect(names).toContain("validate_design");
     expect(names).toContain("create_module");
@@ -64,6 +66,8 @@ describe("server discovery", () => {
     const uris = resources.map((r) => r.uri);
     expect(uris).toContain("inistate://modules");
     expect(uris).toContain("inistate://schema");
+    expect(uris).toContain("inistate://schema/runtime");
+    expect(uris).toContain("inistate://schema/configure");
     expect(uris).toContain("inistate://design-guide");
   });
 

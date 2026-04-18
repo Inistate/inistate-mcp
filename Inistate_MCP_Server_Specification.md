@@ -133,6 +133,8 @@ All tools require valid authentication — either an API key (`fsk` prefix) or a
 | 14 | `validate_design` | Server-side | design, modify | Validate a module schema before submission |
 | 15 | `create_module` | `POST /api/configure/{name}` | design | Create a new module |
 | 16 | `update_module` | `PUT /api/configure/{name}` | modify | Update existing module schema |
+| 17 | `request_upload_url` | `POST /api/mcp/request-upload-url` | execute | Request a presigned S3 PUT URL for direct large-file upload (up to 500MB) |
+| 18 | `confirm_upload` | `POST /api/mcp/confirm-upload` | execute | Finalize a presigned upload after the client PUTs the file to S3 |
 
 ---
 
@@ -647,7 +649,7 @@ Perform an activity on a module entry.
     "activity":  { "type": "string", "description": "create, edit, delete, or custom activity name" },
     "entryId":   { "type": ["string", "integer"], "description": "Required for edit/delete/custom. Omit for create." },
     "entryIds":  { "type": "array", "items": { "type": ["string", "integer"] }, "description": "Multiple entry IDs for bulk operations" },
-    "input":     { "type": "object", "description": "Field values keyed by display name. For File/Image fields, use { name, bytes } for base64 or { name, path } for pre-uploaded. For Files/Images (plural), use arrays. See §8.7." },
+    "input":     { "type": "object", "description": "Field values keyed by display name. For File/Image fields, use { name, path } where path is from upload_file() or an external URL (see §8.7). For Module fields, use { value, id }; for User fields, use { value, id, username } (see §8.8). Plural variants (Files/Images/Modules/Users) use arrays of these objects." },
     "state":     { "type": "string", "description": "Target state name (resolved to internal ID automatically)" },
     "comment":   { "type": "string", "description": "Comment to attach to the activity" },
     "assignees": { "type": "array", "items": { "type": "string" }, "description": "Usernames to assign" },
@@ -816,14 +818,14 @@ Get the audit trail and comments for an entry. Returns chronological list of act
 
 ### 2.11 upload_file
 
-Upload a file to S3 storage. Returns a `/s/` URL that can be used as a File/Image field value in `submit_activity`.
+Upload a file to S3 storage. Returns a `/s/` URL that can be used as a File/Image field value in `submit_activity`. For files larger than 50MB, use `request_upload_url` + `confirm_upload` (§2.17, §2.18) instead.
 
 **Resolver:** `POST /api/mcp/upload`
 
 **Input:** Multipart form-data with the file as a form part. Optional `module` form field scopes the file to a module's S3 folder.
 
 **Constraints:**
-- Maximum file size: 50MB
+- Maximum file size: 50MB (use `request_upload_url` for larger files)
 - Blocked extensions: `.exe`, `.bat`, `.cmd`, `.dll`, `.msi`, and other executable types
 - Filenames are sanitized (path traversal characters stripped)
 
@@ -839,18 +841,18 @@ Upload a file to S3 storage. Returns a `/s/` URL that can be used as a File/Imag
 }
 ```
 
-**Response:**
+**Response (`FileUploadResult`):**
 
 ```json
 {
-  "url": "/s/xK8m/report.pdf",
+  "path": "/s/xK8m/report.pdf",
   "filename": "report.pdf",
   "mimeType": "application/pdf",
   "size": 245760
 }
 ```
 
-**Usage in submit_activity:** After uploading, use the returned `/s/` URL as the `path` in a File/Image field value:
+**Usage in submit_activity:** After uploading, pass the returned `path` directly as the File/Image field value:
 
 ```json
 {
@@ -862,12 +864,12 @@ Upload a file to S3 storage. Returns a `/s/` URL that can be used as a File/Imag
 }
 ```
 
-Alternatively, skip `upload_file` and use inline base64 in `submit_activity`:
+An external URL can be used directly as `path` without calling `upload_file` first:
 
 ```json
 {
   "input": {
-    "Attachments": { "name": "report.pdf", "bytes": "JVBERi0xLjQK..." }
+    "Attachments": { "name": "report.pdf", "path": "https://example.com/report.pdf" }
   }
 }
 ```
@@ -879,7 +881,7 @@ For `Files`/`Images` (plural) fields, use arrays:
   "input": {
     "Photos": [
       { "name": "before.jpg", "path": "/s/xK8m/before.jpg" },
-      { "name": "after.jpg", "bytes": "/9j/4AAQSkZJRg..." }
+      { "name": "after.jpg", "path": "/s/xK8m/after.jpg" }
     ]
   }
 }
@@ -1187,6 +1189,104 @@ Update an existing module's schema. Merges changes into the existing canvas, pre
 
 ---
 
+### 2.17 request_upload_url
+
+Request a presigned S3 `PUT` URL so the client uploads the file bytes directly to S3 — the file never transits the MCP server. Use this for files above ~50MB or when you want to avoid base64/JSON encoding overhead.
+
+**Resolver:** `POST /api/mcp/request-upload-url`
+
+**Constraints:**
+- Maximum file size: 500MB
+- Blocked extensions: `.exe`, `.bat`, `.cmd`, `.dll`, `.msi`, and other executable types
+- Filenames are sanitized (path traversal characters stripped)
+- Presigned URL TTL: 3600 seconds (1 hour) — cannot be renewed; call this tool again on expiry
+
+**Input Schema:**
+
+```json
+{
+  "type": "object",
+  "required": ["module", "fileName", "fileSize"],
+  "properties": {
+    "module":      { "type": "string",  "description": "Module name — scopes the file to the module's storage folder" },
+    "fileName":    { "type": "string",  "description": "Original filename including extension" },
+    "contentType": { "type": "string",  "description": "MIME type (default: application/octet-stream)" },
+    "fileSize":    { "type": "integer", "description": "File size in bytes. Must be > 0 and ≤ 500MB" }
+  }
+}
+```
+
+**Response (`PresignedUploadResult`):**
+
+```json
+{
+  "uploadUrl": "https://s3.amazonaws.com/.../xK8m/report.pdf?X-Amz-Signature=...",
+  "s3Key": "workspaces/42/modules/leave-requests/xK8m/report.pdf",
+  "path": "/s/xK8m/report.pdf",
+  "filename": "report.pdf",
+  "contentType": "application/pdf",
+  "expiresIn": 3600
+}
+```
+
+**Three-step flow:**
+
+1. Call `request_upload_url` — get `{ uploadUrl, s3Key, path, contentType, ... }`.
+2. Client uploads directly to S3:
+   ```http
+   PUT <uploadUrl>
+   Content-Type: <contentType>   ← MUST exactly match the response contentType
+   Body: <raw file bytes>
+   ```
+   **IMPORTANT:** The `Content-Type` header on the PUT must equal the `contentType` returned here. S3 presigned URLs sign headers — a mismatch returns `403 SignatureDoesNotMatch` with no useful diagnostic.
+3. Call `confirm_upload({ s3Key })` — §2.18.
+4. Pass `{ name: filename, path }` as the File/Image field value in `submit_activity`.
+
+**Error handling:**
+- `400` — `fileSize` out of range or `fileName` has a blocked extension. Do not retry.
+- `403` on the S3 PUT — typically a Content-Type mismatch or expired URL. Call `request_upload_url` again to get a fresh URL.
+
+**Orphan handling:** If the client PUTs the file but never calls `confirm_upload`, the S3 object is orphaned. The backend must have an S3 lifecycle policy to expire unconfirmed uploads (recommended: 24h).
+
+---
+
+### 2.18 confirm_upload
+
+Finalize a presigned upload after the client PUTs the file bytes to S3. Verifies the file exists in S3, reads its metadata, and tracks workspace storage quota. Only `s3Key` is required — all other fields (filename, size, MIME type) are resolved from the S3 object.
+
+**Resolver:** `POST /api/mcp/confirm-upload`
+
+**Input Schema:**
+
+```json
+{
+  "type": "object",
+  "required": ["s3Key"],
+  "properties": {
+    "s3Key": { "type": "string", "description": "The s3Key returned from request_upload_url" }
+  }
+}
+```
+
+**Response (`FileUploadResult`):**
+
+```json
+{
+  "path": "/s/xK8m/report.pdf",
+  "filename": "report.pdf",
+  "mimeType": "application/pdf",
+  "size": 52428800
+}
+```
+
+The `path` field matches `FileFieldValue.path` / `PresignedUploadResult.path`, so it can be dropped directly into a File/Image field value in `submit_activity`.
+
+**Error handling:**
+- `400 "File not found in S3"` — the PUT upload didn't complete, or `s3Key` is wrong. Re-PUT the file, then retry.
+- `403` from the preceding S3 PUT means the presigned URL expired. Call `request_upload_url` again before retrying the whole flow.
+
+---
+
 ## 3. MCP Resources
 
 Resources are read-only data sources that agents can load for background context without making tool calls. They provide ambient knowledge about the workspace and its modules.
@@ -1196,29 +1296,37 @@ Resources are read-only data sources that agents can load for background context
 | `inistate://modules` | `GET /api/mcp/` | List of all modules — quick capability indexing |
 | `inistate://modules/{name}/canvas` | `GET /api/mcp/{name}?tier=basic` | Base schema (fields, states) |
 | `inistate://modules/{name}/canvas/extended` | `GET /api/mcp/{name}?tier=extended` | Full schema with activities and flows |
-| `inistate://schema` | Bundled file (read from disk) | The FACTSOps schema definition — field types, color palette, validation rules, workflow guide |
+| `inistate://schema/runtime` | Bundled file (filtered view) | **Default schema for runtime ops** — use-mode tools, entry/filter types, field value shapes |
+| `inistate://schema/configure` | Bundled file (filtered view) | **Design-mode schema** — ModuleSchema write format, state color palette, module_types, configure tools |
+| `inistate://schema` | Bundled file (read from disk) | Full schema (both modes). Prefer the filtered variants above. |
 | `inistate://design-guide` | Bundled file (read from disk) | FACTS Module Design Guide — requirements questions, state color system, SVG workflow diagrams, design rules |
 
-> **AGENT INSTRUCTION:** Load resources based on your current mode:
-> - **Design mode:** Load `inistate://schema` and `inistate://design-guide` for field types, colors, and design rules
-> - **Modify mode:** Load `inistate://schema` for valid field types, colors, and actors
-> - **Execute/Query mode:** Load `inistate://modules` for module discovery
+> **AGENT INSTRUCTION:** Load resources based on your current mode. Only load ONE schema variant — loading both doubles context cost without adding information.
+> - **Runtime / Execute / Query mode (default, most sessions):** Load `inistate://schema/runtime` + `inistate://modules`. This gives you the tool specs, entry/filter types, and file/module/user value shapes needed for listing, reading, and submitting. Do NOT load the configure variant unless the user asks to design/update a module.
+> - **Design / Modify mode:** Load `inistate://schema/configure` + `inistate://design-guide`. This gives you ModuleSchema, field/state/activity definitions, state color palette, and design rules.
+> - **Mixed session** (rare — runtime that escalates to design mid-conversation): load `inistate://schema/runtime` first; load `inistate://schema/configure` on demand when the user pivots, not pre-emptively.
 >
-> This gives you the module vocabulary (field names, state names, activity names) needed to construct correct tool calls.
+> This gives you the module vocabulary (field names, state names, activity names) needed to construct correct tool calls at the lowest context cost.
 
-### 3.1 The Schema Resource
+### 3.1 The Schema Resources
 
-The `inistate://schema` resource returns the contents of `inistate-schema.json` — the same file the MCP server uses at runtime for validation. This gives agents direct access to:
+The schema is served as three resources with different scopes, all sourced from the same `inistate-schema.json` file:
 
-- **Valid field types** (`definitions.FieldType.enum`) — so the agent knows all available types when designing modules
-- **State color palette** (`workflow_guide.state_color_system.palette`) — hex codes with meanings
-- **Color keyword hints** (`workflow_guide.state_color_system.keyword_hints`) — auto-assign colors from state names
-- **Color decision order and rules** — so the agent assigns colors correctly on first try
-- **Confidence gate behavior** (`workflow_guide.confidence_gate`) — what happens when gated
-- **AI audit trail expectations** (`workflow_guide.ai_audit_trail`) — what to include in the `ai` object
-- **Key rules** (`workflow_guide.key_rules`) — agent execution rules
+| Resource | Approx size | Contents |
+|---|---|---|
+| `inistate://schema/runtime` | ~40 KB | Runtime tools (list/get/submit/upload/download/history), shared types (FieldType, FieldDefinition, StateDefinition, File/Module/User value shapes), entry types, filter operators, `confidence_gate` and `ai_audit_trail` workflow notes |
+| `inistate://schema/configure` | ~25 KB | Configure tools (get_module_schema, create_module, update_module), shared types, ActivityDefinition, FlowDefinition, ModuleSchema write format, `module_types` and `state_color_system` workflow notes |
+| `inistate://schema` | ~66 KB | Full file, both modes. Backward compat; prefer the filtered variants. |
 
-> **AGENT INSTRUCTION:** Load `inistate://schema` when entering `design` or `modify` mode. This gives you the complete vocabulary for constructing valid module schemas without trial-and-error against `validate_design`. You do NOT need to load this resource for `execute` or `query` modes — it's only needed when creating or modifying module definitions.
+The filtered variants contain:
+
+- **Valid field types** (`definitions.FieldType.enum`) — both variants
+- **State color palette** (`workflow_guide.state_color_system`) — **configure only**
+- **Confidence gate behavior** (`workflow_guide.confidence_gate`) — **runtime only**
+- **AI audit trail expectations** (`workflow_guide.ai_audit_trail`) — **runtime only**
+- **Key rules** (`workflow_guide.key_rules`) — both variants
+
+> **AGENT INSTRUCTION:** Load exactly one schema variant per session based on the user's intent. Most sessions are runtime — default to `inistate://schema/runtime`. Escalate to `inistate://schema/configure` (plus `inistate://design-guide`) only when the user explicitly asks to design or modify a module. Loading the full `inistate://schema` is only appropriate when a single session spans both modes and you cannot reload resources mid-task.
 
 **Implementation:**
 
@@ -1671,7 +1779,9 @@ Record list modules omit `states`, `activities`, and `flows` entirely from their
 | `Link` | URL | Must be well-formed absolute URL |
 | `Image` / `Images` | Single/multiple images | Value: `FileFieldValue` object or array. See §8.7. |
 | `File` / `Files` | Single/multiple files | Value: `FileFieldValue` object or array. See §8.7. |
-| `Table` | Sub-fields (columns) with rows | Must be an array. Sub-fields validated recursively. See §8.8. |
+| `Module` / `Modules` | Reference to entries in another module | Value: `ModuleFieldValue` object or array (`{ value, id }`). See §8.8. |
+| `User` / `Users` | Reference to platform user(s) | Value: `UserFieldValue` object or array (`{ value, id, username }`). See §8.8. |
+| `Table` | Sub-fields (columns) with rows | Must be an array. Sub-fields validated recursively. See §8.9. |
 | `Signature` | Digital signature | None |
 | `Formula` | Computed field | None |
 
@@ -1699,7 +1809,7 @@ Record list modules omit `states`, `activities`, and `flows` entirely from their
 | `name` | string | Yes | Display name. Used as the key in all input/output payloads. |
 | `type` | FieldType | Yes | See §8.1 |
 | `options` | string[] | No | Option names for Selection/Tag fields |
-| `fields` | SubFieldDefinition[] | No | Sub-field definitions for `Table` type. Each sub-field defines a column. See §8.8. |
+| `fields` | SubFieldDefinition[] | No | Sub-field definitions for `Table` type. Each sub-field defines a column. See §8.9. |
 | `ai_hint` | string | No | Natural-language guidance for AI agents |
 
 ### 8.3 State Definition
@@ -1829,19 +1939,62 @@ File and Image fields use object values, not plain strings.
 { "name": "report.pdf", "path": "/s/xK8m/report.pdf" }
 ```
 
-**Submission format (`FileFieldInput`) — two modes:**
+**Submission format (`FileFieldInput`):**
 
-| Mode | Format | When to Use |
-|---|---|---|
-| Base64 inline | `{ "name": "report.pdf", "bytes": "JVBERi0xLjQK..." }` | Small files, no pre-upload needed |
-| Pre-uploaded | `{ "name": "report.pdf", "path": "/s/xK8m/report.pdf" }` | Large files, uploaded via `upload_file` first |
+```json
+{ "name": "report.pdf", "path": "/s/xK8m/report.pdf" }
+```
+
+`path` must be either a path returned by `upload_file()` / `confirm_upload()` (e.g. `/s/xK8m/report.pdf`) or an external URL (e.g. `https://example.com/report.pdf`). Inline base64 bytes are not supported — pre-upload via `upload_file` or `request_upload_url`, or provide a URL.
 
 For singular fields (`File`, `Image`): value is one object.
 For plural fields (`Files`, `Images`): value is an array of objects.
 
+**Upload path selection:**
+
+| File size | Tool | Data flow |
+|---|---|---|
+| ≤ 50MB | `upload_file` (§2.11) | Agent base64 → MCP server → multipart POST → S3 |
+| > 50MB (up to 500MB) | `request_upload_url` + `confirm_upload` (§2.17, §2.18) | Agent PUT → S3 directly; MCP server never sees the bytes |
+| Already hosted at a URL | skip upload | Pass the URL as `path` directly |
+
 **Download:** To download a file, prepend `/api/mcp/download/{moduleName}` to any `/s/` path. See §2.12.
 
-### 8.8 Table Sub-fields
+### 8.8 Module/User Field Values
+
+`Module`, `Modules`, `User`, and `Users` fields reference entries in other modules or platform users. They use object values and are round-trippable — output from `get_entry`/`list_entries` and input to `submit_activity` use the same shape.
+
+**Module / Modules (`ModuleFieldValue`):**
+
+```json
+{ "value": "PO-2024-0042", "id": 187 }
+```
+
+| Property | Type | Description |
+|---|---|---|
+| `value` | string | Display value of the referenced entry |
+| `id` | integer \| string | Entry ID of the referenced entry |
+
+**User / Users (`UserFieldValue`):**
+
+```json
+{ "value": "Alice Tan", "id": 42, "username": "alice.tan" }
+```
+
+| Property | Type | Description |
+|---|---|---|
+| `value` | string | Display name of the user |
+| `id` | integer \| string | Entry ID of the user entry |
+| `username` | string | Username of the user |
+
+For singular fields (`Module`, `User`): value is one object.
+For plural fields (`Modules`, `Users`): value is an array of objects.
+
+The MCP layer decomposes these objects into the internal storage format on submission, so agents only need to pass the object shape shown above.
+
+**Discovering referenced module:** When a field's type is `Module`/`Modules` or `User`/`Users`, `get_form` includes a `module` property on the field entry identifying which module the reference points at. Use `list_entries` on that module to find valid `id` values.
+
+### 8.9 Table Sub-fields
 
 `Table` type fields contain rows with sub-fields (columns). Each sub-field is a `SubFieldDefinition`:
 
@@ -2950,9 +3103,15 @@ After implementation, submit to these registries for maximum discoverability:
 - [ ] `submit_activity` response includes `availableActivities`
 - [ ] `upload_file` accepts multipart form-data and returns `/s/` URL
 - [ ] `upload_file` rejects blocked extensions (.exe, .bat, etc.) and files > 50MB
+- [ ] `request_upload_url` returns `PresignedUploadResult` (`uploadUrl`, `s3Key`, `path`, `contentType`, `expiresIn`) for files ≤ 500MB
+- [ ] `request_upload_url` rejects blocked extensions and `fileSize` out of range
+- [ ] `confirm_upload` requires only `s3Key` and resolves filename/size/MIME from S3
+- [ ] `confirm_upload` returns `FileUploadResult` (`path`, `filename`, `mimeType`, `size`)
 - [ ] `download_file` constructs correct URL from module name + `/s/` path
-- [ ] `submit_activity` accepts `FileFieldInput` objects (`{ name, bytes }` and `{ name, path }`) for File/Image fields
+- [ ] `submit_activity` accepts `FileFieldInput` objects (`{ name, path }`) for File/Image fields, where `path` is a `/s/` upload or external URL
+- [ ] `submit_activity` accepts `ModuleFieldValue` (`{ value, id }`) and `UserFieldValue` (`{ value, id, username }`) objects for Module/User fields
 - [ ] File/Image field values in responses use `FileFieldValue` format (`{ name, path }`)
+- [ ] Module/User field values in responses use `ModuleFieldValue`/`UserFieldValue` format; plural variants return arrays
 - [ ] Confidence gating suppresses state transition when below threshold
 - [ ] Flagged response includes `flagged: true` and records `intention` history type
 - [ ] AI audit trail (`ai` object) is passed through and persisted

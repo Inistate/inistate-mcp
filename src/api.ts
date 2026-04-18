@@ -1,10 +1,11 @@
 import { requestContext, isHttpRequest } from "./context.js";
 
-const BASE_URL =
+const BASE_URL = (
   process.env.INISTATE_API_BASE ||
   process.env.INISTATE_API_URL ||
   process.env.INISTATE_BASE_URL ||
-  "https://api.inistate.com";
+  "https://api.inistate.com"
+).replace(/\/+$/, "");
 
 const LOG_ENABLED = process.env.INISTATE_LOG !== "0";
 

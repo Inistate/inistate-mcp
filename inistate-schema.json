@@ -12,6 +12,7 @@
         "Text", "YesNo", "Integer", "Number", "Currency",
         "Date", "DateTime", "DateRange",
         "Selection", "Tag",
+        "User", "Users", "Module", "Modules",
         "Image", "Images", "File", "Files",
         "Table",
         "MultiText",
@@ -253,13 +254,26 @@
       "type": "object",
       "description": "Response from uploading a file via MCP.",
       "properties": {
-        "url": {
+        "path": {
           "type": "string",
-          "description": "Relative file path in /s/{shortId}/{fileName} format. To download, prepend /api/mcp/download/{moduleName} when the URL starts with /s/."
+          "description": "Relative file path in /s/{shortId}/{fileName} format. Same key as FileFieldValue.path. To download, prepend /api/mcp/download/{moduleName}."
         },
         "filename": { "type": "string", "description": "Sanitized filename." },
         "mimeType": { "type": "string", "description": "MIME type of the uploaded file." },
         "size": { "type": "integer", "description": "File size in bytes." }
+      }
+    },
+
+    "PresignedUploadResult": {
+      "type": "object",
+      "description": "Response from requesting a presigned upload URL.",
+      "properties": {
+        "uploadUrl": { "type": "string", "description": "Presigned S3 PUT URL. Upload the file with HTTP PUT to this URL. Content-Type MUST match contentType exactly or S3 returns 403." },
+        "s3Key": { "type": "string", "description": "Internal S3 object key. Pass this to confirm_upload after uploading." },
+        "path": { "type": "string", "description": "Relative file path in /s/{shortId}/{fileName} format. Use this as the File/Image field value in submit_activity (same key as FileFieldValue.path)." },
+        "filename": { "type": "string", "description": "Sanitized filename." },
+        "contentType": { "type": "string", "description": "MIME type — use this exact value as the Content-Type header in the PUT request." },
+        "expiresIn": { "type": "integer", "description": "Seconds until the presigned URL expires (3600 = 1 hour)." }
       }
     },
 
@@ -287,9 +301,36 @@
       ]
     },
 
+    "ModuleFieldValue": {
+      "type": "object",
+      "description": "Value shape for Module (singular) fields. Round-trippable: output and input use the same shape.",
+      "properties": {
+        "value": { "type": "string", "description": "Display value of the referenced entry." },
+        "id": { "oneOf": [{ "type": "integer" }, { "type": "string" }], "description": "Entry ID of the referenced entry." }
+      },
+      "_notes": [
+        "Module (singular): value is one ModuleFieldValue object",
+        "Modules (plural): value is an array of ModuleFieldValue objects"
+      ]
+    },
+
+    "UserFieldValue": {
+      "type": "object",
+      "description": "Value shape for User (singular) fields. Round-trippable: output and input use the same shape.",
+      "properties": {
+        "value": { "type": "string", "description": "Display name of the user." },
+        "id": { "oneOf": [{ "type": "integer" }, { "type": "string" }], "description": "Entry ID of the user entry." },
+        "username": { "type": "string", "description": "Username of the user." }
+      },
+      "_notes": [
+        "User (singular): value is one UserFieldValue object",
+        "Users (plural): value is an array of UserFieldValue objects"
+      ]
+    },
+
     "EntryData": {
       "type": "object",
-      "description": "Entry field values as returned by MCP. Keys are field display names, values are typed according to FieldType. For File/Image fields, values are FileFieldValue objects ({ name, path }). For Files/Images fields, values are arrays of FileFieldValue objects.",
+      "description": "Entry field values as returned by MCP. Keys are field display names, values are typed according to FieldType. For File/Image fields, values are FileFieldValue objects ({ name, path }). For Module fields, values are ModuleFieldValue objects ({ value, id }). For User fields, values are UserFieldValue objects ({ value, id, username }). Plural variants (Files/Images/Modules/Users) use arrays of these objects.",
       "additionalProperties": true
     },
 
@@ -447,7 +488,7 @@
         "input": {
           "type": "object",
           "additionalProperties": true,
-          "description": "Field values keyed by display name. For File/Image fields, use FileFieldInput objects ({ name, path }). For Files/Images fields, use arrays of FileFieldInput objects."
+          "description": "Field values keyed by display name. For File/Image fields, use FileFieldInput objects ({ name, path }). For Module fields, use ModuleFieldValue objects ({ value, id }). For User fields, use UserFieldValue objects ({ value, id, username }). Plural variants (Files/Images/Modules/Users) use arrays of these objects."
         },
         "state": {
           "type": "string",
@@ -727,9 +768,9 @@
     "_description": "INISTATE operations map to MCP endpoints. Each operation uses display names exclusively — the MCP layer handles all internal ID resolution.",
 
     "list_workspaces": {
-      "description": "List accessible workspaces. Optionally filter by name with ?search= query parameter.",
+      "description": "List workspaces the current user can access. Call this first when no workspace is set — the chosen workspace ID must be passed on subsequent calls via the wsid header or the workspaceId tool parameter, otherwise every downstream call scopes to the wrong tenant.",
       "parameters": {
-        "search": { "type": "string", "description": "Optional name filter (case-insensitive)." }
+        "search": { "type": "string", "description": "Optional case-insensitive name filter. Use when the user names a workspace and you need to resolve it to an ID." }
       },
       "returns": {
         "type": "array",
@@ -782,7 +823,7 @@
     },
 
     "discover_modules": {
-      "description": "List all available modules in the workspace.",
+      "description": "List every module in the active workspace. Use this first to discover what's available before calling get_module, list_entries, or submit_activity — the user may refer to modules informally ('leave requests', 'the PO module') and you need the exact module name. Returns lightweight entries with name and emoji only; call get_module for fields, states, and activities.",
       "returns": {
         "type": "array",
         "items": {
@@ -797,81 +838,107 @@
     },
 
     "get_module": {
-      "description": "Get module definition including fields, states, and activities.",
+      "description": "Get a module's schema: fields, states, and (with tier=extended) activities and flows. Field, state, and activity names returned here are the keys to pass into get_form, list_entries, and submit_activity — use display names, never internal IDs. Use tier=basic by default to minimize context; request tier=extended only when you need activity forms or state-transition flows.",
       "parameters": {
-        "module": { "type": "string", "description": "Module name from discover_modules." },
+        "module": { "type": "string", "description": "Module name from discover_modules. Case-sensitive, may contain spaces (e.g. 'Leave Requests')." },
         "tier": {
           "type": "string",
           "enum": ["basic", "extended"],
           "default": "basic",
-          "description": "basic = fields + states only. extended = + activities, flows."
+          "description": "basic = fields + states only (smaller response, enough for reading/listing entries). extended = adds activities and flows (needed before submit_activity on a module you haven't seen before)."
         }
       },
       "returns": { "$ref": "#/definitions/ModuleSchema" },
-      "_maps_to": "GET /api/mcp/{moduleName}"
+      "_maps_to": "GET /api/mcp/{moduleName}",
+      "_notes": [
+        "Record list modules (master data, lookup tables) have no states/activities/flows — an empty states array in the response means you use standard create/edit/delete only",
+        "Field order in the response is the display order — preserve it when rendering forms to the user"
+      ]
     },
 
     "list_entries": {
-      "description": "Query entries with filters, pagination, and sorting.",
+      "description": "Query entries in a module with filters, pagination, and sorting. Filter keys are field display names (from get_module); simple values match exactly, object values use operators. Always prefer specific filters over fetching everything — responses >100KB are auto-truncated to 20 items with _truncated=true. Each entry in the response includes availableActivities, so you can chain directly into submit_activity without an extra get_form call.",
       "parameters": {
-        "module": { "type": "string" },
+        "module": { "type": "string", "description": "Module name from discover_modules." },
         "filters": {
           "type": "object",
-          "description": "Field display names as keys. Simple value = equality. Object value = operator(s).",
+          "description": "Field display names as keys. Simple value = equality ({'Priority': 'High'}). Object value = operator — text: {contains,startsWith,endsWith,excludes,is,not}; number: {min,max,above,below,between}; date: {after,before,upcoming,past,within}; boolean: true/false; user: {is,isMe,not,includes}; module: by referenced entry ID. Combine multiple keys for AND; use {_or: [...]} for OR.",
           "additionalProperties": true
         },
-        "state": { "type": "string", "description": "Filter by state name." },
-        "search": { "type": "string", "description": "Search by document ID." },
-        "sortBy": { "type": "string", "description": "Field display name to sort by." },
+        "state": { "type": "string", "description": "Filter by state display name (e.g. 'Pending Approval'). MCP resolves to internal state ID." },
+        "search": { "type": "string", "description": "Free-text search against document ID and indexed text fields." },
+        "sortBy": { "type": "string", "description": "Field display name to sort by. Defaults to createdDate descending." },
         "sortDirection": { "type": "string", "enum": ["asc", "desc"] },
-        "currentPage": { "type": "integer" },
-        "pageSize": { "type": "integer", "description": "Default 50, max 500." }
+        "currentPage": { "type": "integer", "description": "0-based page index." },
+        "pageSize": { "type": "integer", "description": "Items per page. Default 50, max 500. Use small pages (20–50) when summarizing for the user; larger pages only when exporting or aggregating." }
       },
       "returns": { "$ref": "#/definitions/EntryList" },
-      "_maps_to": "POST /api/mcp/list"
+      "_maps_to": "POST /api/mcp/list",
+      "_notes": [
+        "Use 'me'/'myself'/'currentUser' as filter values for User fields to match the calling user without knowing their ID",
+        "Response includes totalItems and hasMore; paginate when hasMore=true rather than raising pageSize past 500",
+        "For Module reference fields, filter by the referenced entry's ID, not its display name"
+      ]
     },
 
     "get_entry": {
-      "description": "Read a single entry by ID.",
+      "description": "Read a single entry's field values, current state, and availableActivities. Use the response's availableActivities.standard and .custom directly when deciding the next submit_activity call — do not hard-code activity names, because what's allowed depends on current state, user permissions, and workflow rules.",
       "parameters": {
-        "module": { "type": "string" },
-        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }] }
+        "module": { "type": "string", "description": "Module name from discover_modules." },
+        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }], "description": "Entry ID (numeric) or documentId (string like 'LR-2026-0042'). Both are accepted." }
       },
       "returns": { "$ref": "#/definitions/Entry" },
-      "_maps_to": "POST /api/mcp/entry"
+      "_maps_to": "POST /api/mcp/entry",
+      "_notes": [
+        "Field values use display names as keys (e.g. 'Leave Type', not an internal ID)",
+        "File/Image fields return FileFieldValue objects; Module fields return ModuleFieldValue ({value,id}); User fields return UserFieldValue ({value,id,username}) — these shapes are round-trippable: pass the same objects back to submit_activity.input"
+      ]
     },
 
     "get_form": {
-      "description": "Get the form definition for an activity, including required fields, types, options, and current values.",
+      "description": "Get the form definition for an activity: required fields, types, options, per-field readOnly/required constraints, the activity's confidence_threshold, and (for edit) current field values as defaults. REQUIRED STEP before submit_activity — skipping it leads to 422 validation failures that are entirely avoidable. Pass entryId for edit/custom activities so defaults are populated from the current entry state.",
       "parameters": {
-        "module": { "type": "string" },
-        "activity": { "type": "string", "default": "create" },
-        "entryId": { "description": "Required for edit/view activities." }
+        "module": { "type": "string", "description": "Module name from discover_modules." },
+        "activity": { "type": "string", "default": "create", "description": "Activity name. Standard: create, edit, delete, changeStatus, comment, duplicate, manage. Custom: any activity defined in the module (from get_module tier=extended)." },
+        "entryId": { "description": "Required for edit and custom activities that operate on an existing entry. Omit for create." }
       },
       "returns": { "$ref": "#/definitions/ActivityForm" },
       "_maps_to": "POST /api/mcp/form"
     },
 
     "submit_activity": {
-      "description": "Perform an activity: create, edit, delete, or any custom activity.",
+      "description": "Perform an activity on an entry: create (no entryId), edit, delete, changeStatus, comment, duplicate, manage, or any custom activity from the module. ALWAYS call get_form first — it returns the required fields, valid options, per-field constraints, and the activity's confidence_threshold. Submitting without get_form risks 422 validation errors and unknown field rejections. For bulk operations, pass entryIds instead of entryId.",
       "parameters": { "$ref": "#/definitions/ActivitySubmission" },
       "returns": { "$ref": "#/definitions/ActivityResult" },
-      "_maps_to": "POST /api/mcp/activity"
+      "_maps_to": "POST /api/mcp/activity",
+      "_notes": [
+        "Input shapes by field type — File/Image: { name, path } where path is from upload_file/confirm_upload or an external URL. Files/Images: array of those. Module: { value, id } (id is the referenced entry ID). User: { value, id, username }. Modules/Users: arrays. Table: array of row objects keyed by sub-field display name. Other types: plain values matching FieldType.",
+        "Always include the `ai` object (reasoning, sources, model, confidence) when an AI agent is the actor — it's the audit trail the user relies on to trust automated actions",
+        "Confidence gate: if ai.confidence < the activity's confidence_threshold (from get_form), the state transition is SUPPRESSED and the response returns flagged: true. The entry is saved but stays in the original state and is flagged for human review. Do NOT retry automatically — surface the situation to the user",
+        "The response includes availableActivities — use it to decide the next legal action on the entry without another round-trip to get_entry",
+        "For Selection/Tag fields, pass option names exactly as returned by get_form.options (case-sensitive, including any emoji prefix)",
+        "State names are resolved automatically from the `state` parameter — pass the display name (e.g. 'Approved'), never an internal GUID"
+      ]
     },
 
     "get_history": {
-      "description": "Get audit trail and comments for an entry.",
+      "description": "Get the chronological audit trail for an entry: create/edit/delete events, state transitions, comments, assignments, and AI audit records (reasoning, sources, model, confidence) when an `ai` object was submitted. Use this to explain how an entry reached its current state, answer 'who did what and when' questions, or surface why a transition was flagged.",
       "parameters": {
-        "module": { "type": "string" },
-        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
-        "page": { "type": "integer", "default": 0 }
+        "module": { "type": "string", "description": "Module name from discover_modules." },
+        "entryId": { "oneOf": [{ "type": "integer" }, { "type": "string" }], "description": "Entry ID or documentId." },
+        "page": { "type": "integer", "default": 0, "description": "0-based page index. 50 events per page." }
       },
       "returns": { "$ref": "#/definitions/EntryHistory" },
-      "_maps_to": "POST /api/mcp/history"
+      "_maps_to": "POST /api/mcp/history",
+      "_notes": [
+        "History entries with type='intention' indicate a confidence-gated action — the AI tried to perform an activity but ai.confidence was below confidence_threshold, so the state transition was suppressed and the entry was flagged for human review",
+        "Field-level changes are in the 'changes' object (before/after values) on edit events — use to answer 'what changed between X and Y'",
+        "AI audit context (ai.reasoning, ai.sources, ai.confidence) is preserved verbatim from what was submitted — useful for post-hoc review of automated decisions"
+      ]
     },
 
     "upload_file": {
-      "description": "Upload a file to S3. Returns a /s/ URL that can be used as a File/Image field value in submit_activity. To download, the agent prepends /api/mcp/download/{moduleName} to the returned URL.",
+      "description": "Upload a file to S3. Returns a /s/ path that can be used as a File/Image field value in submit_activity. To download, the agent prepends /api/mcp/download/{moduleName} to the returned path.",
       "parameters": {
         "required": ["module", "file"],
         "module": { "type": "string", "description": "Module name. Required — scopes the file to the module's storage folder." },
@@ -888,8 +955,48 @@
       ]
     },
 
+    "request_upload_url": {
+      "description": "Request a presigned S3 PUT URL for direct large-file upload (up to 500 MB). Returns an uploadUrl for the client to PUT the file directly to S3, plus a path to use in File/Image fields. After uploading, call confirm_upload to finalize.",
+      "parameters": {
+        "required": ["module", "fileName", "fileSize"],
+        "module": { "type": "string", "description": "Module name. Required — scopes the file to the module's storage folder." },
+        "fileName": { "type": "string", "description": "Original filename including extension." },
+        "contentType": { "type": "string", "description": "MIME type of the file. Defaults to application/octet-stream." },
+        "fileSize": { "type": "integer", "description": "File size in bytes. Must be > 0 and ≤ 500 MB.", "minimum": 1, "maximum": 524288000 }
+      },
+      "returns": { "$ref": "#/definitions/PresignedUploadResult" },
+      "_maps_to": "POST /api/mcp/request-upload-url",
+      "_notes": [
+        "Use this instead of upload_file when the file exceeds 50 MB or when you want to avoid streaming through the server",
+        "IMPORTANT: The PUT request Content-Type header MUST exactly match the contentType from this response. S3 presigned URLs sign headers — a mismatch causes 403 SignatureDoesNotMatch with no useful error message",
+        "The uploadUrl expires in 1 hour (expiresIn seconds). If the PUT fails with 403 after expiry, call request_upload_url again — presigned URLs cannot be renewed",
+        "Maximum file size: 500 MB",
+        "Blocked extensions: .exe, .bat, .cmd, .dll, .msi, and other executable types",
+        "Filenames are sanitized (path traversal characters stripped)",
+        "After the PUT upload completes, call confirm_upload with the s3Key from this response",
+        "Server should have an S3 lifecycle policy to expire unconfirmed uploads (e.g. 24h) — if a client crashes between PUT and confirm_upload, the S3 object is orphaned",
+        "Worked example: 1. request_upload_url({ module, fileName, fileSize, contentType }) → { uploadUrl, s3Key, path, filename }  2. PUT uploadUrl with body=<bytes>, headers Content-Type=<contentType>  3. confirm_upload({ s3Key }) → { path, filename, mimeType, size }  4. submit_activity({ input: { \"Attachment\": { name: filename, path } } })"
+      ]
+    },
+
+    "confirm_upload": {
+      "description": "Confirm that a presigned upload completed. Verifies the file exists in S3, reads its metadata, and tracks workspace storage. Only s3Key is required — filename, size, and content type are resolved from S3.",
+      "parameters": {
+        "required": ["s3Key"],
+        "s3Key": { "type": "string", "description": "The s3Key returned from request_upload_url." }
+      },
+      "returns": { "$ref": "#/definitions/FileUploadResult" },
+      "_maps_to": "POST /api/mcp/confirm-upload",
+      "_notes": [
+        "Must be called after the file has been uploaded to the presigned URL",
+        "Returns 400 if the file is not found in S3 — ensure the PUT upload completed before calling",
+        "If the presigned URL expired (403 from S3), call request_upload_url again before retrying",
+        "Response format matches upload_file — path can be used identically in File/Image fields"
+      ]
+    },
+
     "download_file": {
-      "description": "Download a file by module name. AI agents construct this URL by prepending /api/mcp/download/{moduleName} to a /s/{shortId}/{fileName} URL.",
+      "description": "Download a file by module name. AI agents construct the download URL by prepending /api/mcp/download/{moduleName} to a /s/{shortId}/{fileName} path.",
       "parameters": {
         "moduleName": { "type": "string", "description": "Module name (resolved to vectorId internally)." },
         "guid": { "type": "string", "description": "Short ID from the file URL." },
@@ -977,8 +1084,8 @@
       "4. get_module(module, tier='basic') → understand fields and states",
       "5. get_module(module, tier='extended') → understand activities (only when needed)",
       "6. get_form(module, activity) → get required fields, types, options, defaults, and confidence_threshold before submitting",
-      "7. upload_file(module, file) → upload files for File/Image fields, returns /s/ URL",
-      "8. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ URLs from upload_file for File/Image fields.",
+      "7. upload_file(module, file) → upload files for File/Image fields, returns /s/ path",
+      "8. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ paths from upload_file for File/Image fields.",
       "9. list_entries(module, filters) → query and browse entries",
       "10. get_entry(module, entryId) → read a specific entry",
       "11. get_history(module, entryId) → audit trail and comments",
@@ -995,7 +1102,8 @@
       "Always call get_form() before submit_activity() to discover required fields and valid options",
       "Use tier='basic' by default; only request 'extended' when activity details are needed",
       "Not all modules have workflows — record list modules (master data, lookup tables) have no states, activities, or flows. Use standard create/edit/delete activities directly.",
-      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, path } where path is from upload_file() or an external URL. Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path."
+      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, path } where path is from upload_file() or an external URL. Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path.",
+      "Module/User fields use object values. Retrieval returns { value, id } for Module and { value, id, username } for User. Submission accepts the same shape — the MCP layer decomposes these into internal storage format. Modules/Users (plural) use arrays of these objects."
     ],
     "module_types": {
       "_description": "Modules fall into two categories based on their purpose.",

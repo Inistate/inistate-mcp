@@ -15,6 +15,127 @@ export const SCHEMA: Record<string, any> = JSON.parse(
 
 export const DESIGN_GUIDE: string = readFileSync(DESIGN_GUIDE_PATH, "utf-8");
 
+// ---------- Mode-filtered schema views ----------
+//
+// The full SCHEMA is large (~66KB). Most agent sessions only need runtime
+// tools (list/get/submit/upload) and their types — configure-mode tools
+// (create_module, update_module) and design rules (state_color_system,
+// module_types) are dead weight. We expose filtered variants so agents
+// can pick by mode.
+
+const SHARED_DEFINITIONS = [
+  "FieldType",
+  "FieldDefinition",
+  "SubFieldDefinition",
+  "StateDefinition",
+  "FileFieldValue",
+  "FileFieldInput",
+  "FileUploadResult",
+  "PresignedUploadResult",
+  "ModuleFieldValue",
+  "UserFieldValue",
+  "ErrorResponse",
+];
+
+const RUNTIME_DEFINITIONS = [
+  ...SHARED_DEFINITIONS,
+  "EntryData",
+  "Entry",
+  "EntryList",
+  "ActivityForm",
+  "ActivitySubmission",
+  "AvailableActivities",
+  "ActivityResult",
+  "HistoryEvent",
+  "EntryHistory",
+  "FilterOperators",
+];
+
+const CONFIGURE_DEFINITIONS = [
+  ...SHARED_DEFINITIONS,
+  "ActivityDefinition",
+  "ActivityFieldRef",
+  "FlowDefinition",
+  "ModuleSchema",
+];
+
+const RUNTIME_OPERATIONS = [
+  "list_workspaces",
+  "get_workspace",
+  "discover_modules",
+  "get_module",
+  "list_entries",
+  "get_entry",
+  "get_form",
+  "submit_activity",
+  "get_history",
+  "upload_file",
+  "request_upload_url",
+  "confirm_upload",
+  "download_file",
+];
+
+const CONFIGURE_OPERATIONS = [
+  "get_module_schema",
+  "create_module",
+  "update_module",
+];
+
+const RUNTIME_WORKFLOW_KEYS = [
+  "_description",
+  "steps",
+  "key_rules",
+  "confidence_gate",
+  "ai_audit_trail",
+];
+
+const CONFIGURE_WORKFLOW_KEYS = [
+  "_description",
+  "steps",
+  "key_rules",
+  "module_types",
+  "state_color_system",
+];
+
+function pickKeys(source: Record<string, any>, keys: string[]): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const k of keys) {
+    if (k in source) out[k] = source[k];
+  }
+  return out;
+}
+
+function buildSchemaView(
+  definitionKeys: string[],
+  operationKeys: string[],
+  workflowKeys: string[],
+): Record<string, any> {
+  return {
+    $schema: SCHEMA.$schema,
+    title: SCHEMA.title,
+    description: SCHEMA.description,
+    version: SCHEMA.version,
+    definitions: pickKeys(SCHEMA.definitions, definitionKeys),
+    operations: {
+      _description: SCHEMA.operations._description,
+      ...pickKeys(SCHEMA.operations, operationKeys),
+    },
+    workflow_guide: pickKeys(SCHEMA.workflow_guide, workflowKeys),
+  };
+}
+
+export const SCHEMA_RUNTIME = buildSchemaView(
+  RUNTIME_DEFINITIONS,
+  RUNTIME_OPERATIONS,
+  RUNTIME_WORKFLOW_KEYS,
+);
+
+export const SCHEMA_CONFIGURE = buildSchemaView(
+  CONFIGURE_DEFINITIONS,
+  CONFIGURE_OPERATIONS,
+  CONFIGURE_WORKFLOW_KEYS,
+);
+
 // ---------- Derived lookups ----------
 
 export const VALID_FIELD_TYPES: string[] = SCHEMA.definitions.FieldType.enum;

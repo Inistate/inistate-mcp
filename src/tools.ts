@@ -357,7 +357,9 @@ Standard activities: create (no entryId), edit, delete, changeStatus, comment, d
 Custom activities: use the activity name from get_module_schema.
 Bulk operations: use entryIds array instead of entryId.
 File/Image fields: use { name, path } where path is from upload_file() or an external URL.
-Files/Images (plural): use arrays of file objects.
+Module fields: use { value, id } — id is the referenced entry's ID.
+User fields: use { value, id, username }.
+Plural variants (Files/Images/Modules/Users): use arrays of the objects above.
 AI audit: always include the ai object with reasoning, sources, model, and confidence for traceability.`,
       inputSchema: {
         module: z.string().describe("Module name"),
@@ -376,7 +378,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         input: z
           .record(z.unknown())
           .optional()
-          .describe("Field values keyed by display name. For File/Image fields, use { name, path } objects. For Files/Images fields, use arrays of { name, path } objects."),
+          .describe("Field values keyed by display name. For File/Image fields, use { name, path } objects. For Module fields, use { value, id }. For User fields, use { value, id, username }. Plural variants (Files/Images/Modules/Users) use arrays of these objects."),
         state: z
           .string()
           .optional()
@@ -472,7 +474,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         if (due) body.due = due;
         if (ai) body.ai = ai;
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
-        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target}`);
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} payload=${JSON.stringify(body)}`);
         const data = await api.post("/api/mcp/activity", body);
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ok`);
         return ok(data);
@@ -553,11 +555,6 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
         formData.append("file", blob, fileName);
         formData.append("module", moduleName);
         const raw = await api.uploadFormData("/api/mcp/upload", formData) as Record<string, unknown>;
-        // Remap 'url' → 'path' so response aligns with FileFieldInput / submit_activity
-        if (raw.url && !raw.path) {
-          raw.path = raw.url;
-          delete raw.url;
-        }
         log("upload_file", `module=${moduleName} file=${fileName} → ok`);
         return ok(raw);
       } catch (e) {
@@ -599,7 +596,78 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
   );
 
   // ═══════════════════════════════════════════
-  // 13. design_workflow
+  // 13. request_upload_url
+  // ═══════════════════════════════════════════
+  server.registerTool(
+    "request_upload_url",
+    {
+      description: `Request a presigned S3 PUT URL for direct large-file upload (up to 500MB). Use this instead of upload_file when the file exceeds 50MB or when you want to avoid base64/JSON overhead. Three-step flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403 SignatureDoesNotMatch), 3) call confirm_upload({ s3Key }). The returned path is used directly as the File/Image field value in submit_activity. uploadUrl expires in ~1 hour and cannot be renewed — call this again on expiry.`,
+      inputSchema: {
+        module: z
+          .string()
+          .describe("Module name. Required — scopes the file to the module's storage folder."),
+        fileName: z.string().describe("Original filename including extension (e.g. 'report.pdf')"),
+        contentType: z
+          .string()
+          .default("application/octet-stream")
+          .describe("MIME type. Must match the Content-Type header used in the PUT request."),
+        fileSize: z
+          .number()
+          .int()
+          .positive()
+          .describe("File size in bytes. Must be > 0 and ≤ 500MB (524288000)."),
+        workspaceId: wsParam,
+      },
+    },
+    async ({ module: moduleName, fileName, contentType, fileSize, workspaceId }) => {
+      try {
+        applyWorkspace(workspaceId);
+        log("request_upload_url", `module=${moduleName} file=${fileName} size=${fileSize} mime=${contentType}`);
+        const data = await api.post("/api/mcp/request-upload-url", {
+          module: moduleName,
+          fileName,
+          contentType,
+          fileSize,
+        });
+        log("request_upload_url", `module=${moduleName} file=${fileName} → ok`);
+        return ok(data);
+      } catch (e) {
+        log("request_upload_url", `module=${moduleName} file=${fileName} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        return err(e);
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════
+  // 14. confirm_upload
+  // ═══════════════════════════════════════════
+  server.registerTool(
+    "confirm_upload",
+    {
+      description: `Confirm a presigned upload completed. Call after successfully PUTting the file to the uploadUrl from request_upload_url. The server verifies the object exists in S3, reads its metadata, and tracks workspace storage. Only s3Key is required — filename, size, and MIME type are resolved from S3. Returns { url, filename, mimeType, size } where url is the /s/ path usable as a File/Image field value. Returns 400 if the file is not found in S3 — ensure the PUT completed before calling.`,
+      inputSchema: {
+        s3Key: z
+          .string()
+          .describe("The s3Key returned from request_upload_url."),
+        workspaceId: wsParam,
+      },
+    },
+    async ({ s3Key, workspaceId }) => {
+      try {
+        applyWorkspace(workspaceId);
+        log("confirm_upload", `s3Key=${s3Key}`);
+        const data = await api.post("/api/mcp/confirm-upload", { s3Key });
+        log("confirm_upload", `s3Key=${s3Key} → ok`);
+        return ok(data);
+      } catch (e) {
+        log("confirm_upload", `s3Key=${s3Key} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        return err(e);
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════
+  // 15. design_workflow
   // ═══════════════════════════════════════════
   server.registerTool(
     "design_workflow",
