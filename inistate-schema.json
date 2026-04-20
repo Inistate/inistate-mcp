@@ -288,11 +288,11 @@
 
     "FileFieldInput": {
       "type": "object",
-      "description": "Input shape for File/Image fields when submitting an activity. Provide a path from upload_file() or an external URL.",
+      "description": "Input shape for File/Image fields when submitting an activity. Provide a path from request_upload_url()+confirm_upload() (default) or an external URL. upload_file() is a fallback only.",
       "required": ["name", "path"],
       "properties": {
         "name": { "type": "string", "description": "Filename (e.g. 'report.pdf'). Required." },
-        "path": { "type": "string", "description": "Either a path from upload_file() (e.g. '/s/xK8m/report.pdf') or an external URL (e.g. 'https://example.com/report.pdf')." },
+        "path": { "type": "string", "description": "Either a path from request_upload_url()+confirm_upload() / upload_file() (fallback) (e.g. '/s/xK8m/report.pdf') or an external URL (e.g. 'https://example.com/report.pdf')." },
         "type": { "type": "string", "description": "MIME type (optional, e.g. 'application/pdf')." }
       },
       "_notes": [
@@ -912,7 +912,7 @@
       "returns": { "$ref": "#/definitions/ActivityResult" },
       "_maps_to": "POST /api/mcp/activity",
       "_notes": [
-        "Input shapes by field type — File/Image: { name, path } where path is from upload_file/confirm_upload or an external URL. Files/Images: array of those. Module: { value, id } (id is the referenced entry ID). User: { value, id, username }. Modules/Users: arrays. Table: array of row objects keyed by sub-field display name. Other types: plain values matching FieldType.",
+        "Input shapes by field type — File/Image: { name, path } where path is from confirm_upload (default via request_upload_url+confirm_upload) or upload_file (fallback only) or an external URL. Files/Images: array of those. Module: { value, id } (id is the referenced entry ID). User: { value, id, username }. Modules/Users: arrays. Table: array of row objects keyed by sub-field display name. Other types: plain values matching FieldType.",
         "Always include the `ai` object (reasoning, sources, model, confidence) when an AI agent is the actor — it's the audit trail the user relies on to trust automated actions",
         "Confidence gate: if ai.confidence < the activity's confidence_threshold (from get_form), the state transition is SUPPRESSED and the response returns flagged: true. The entry is saved but stays in the original state and is flagged for human review. Do NOT retry automatically — surface the situation to the user",
         "The response includes availableActivities — use it to decide the next legal action on the entry without another round-trip to get_entry",
@@ -938,7 +938,7 @@
     },
 
     "upload_file": {
-      "description": "Upload a file to S3. Returns a /s/ path that can be used as a File/Image field value in submit_activity. To download, the agent prepends /api/mcp/download/{moduleName} to the returned path.",
+      "description": "FALLBACK ONLY — do NOT use this by default. Always use request_upload_url + confirm_upload first; call this tool only after the presigned flow has actually failed. Uploads a file to S3 via multipart/form-data. Returns a /s/ path usable as a File/Image field value in submit_activity.",
       "parameters": {
         "required": ["module", "file"],
         "module": { "type": "string", "description": "Module name. Required — scopes the file to the module's storage folder." },
@@ -947,6 +947,7 @@
       "returns": { "$ref": "#/definitions/FileUploadResult" },
       "_maps_to": "POST /api/mcp/upload",
       "_notes": [
+        "Fallback path — only use after request_upload_url + confirm_upload has failed",
         "Request must be multipart/form-data — no other content types are supported",
         "Required 'module' form field scopes the file to the module's S3 folder",
         "Maximum file size: 50MB",
@@ -956,7 +957,7 @@
     },
 
     "request_upload_url": {
-      "description": "Request a presigned S3 PUT URL for direct large-file upload (up to 500 MB). Returns an uploadUrl for the client to PUT the file directly to S3, plus a path to use in File/Image fields. After uploading, call confirm_upload to finalize.",
+      "description": "DEFAULT upload path — ALWAYS use this for every file upload (any size, up to 500 MB). Only fall back to upload_file if this flow actually fails. Returns an uploadUrl for the client to PUT the file directly to S3, plus a path to use in File/Image fields. After uploading, call confirm_upload to finalize.",
       "parameters": {
         "required": ["module", "fileName", "fileSize"],
         "module": { "type": "string", "description": "Module name. Required — scopes the file to the module's storage folder." },
@@ -967,7 +968,7 @@
       "returns": { "$ref": "#/definitions/PresignedUploadResult" },
       "_maps_to": "POST /api/mcp/request-upload-url",
       "_notes": [
-        "Use this instead of upload_file when the file exceeds 50 MB or when you want to avoid streaming through the server",
+        "Default for every file upload regardless of size — always attempt this flow first; only fall back to upload_file if this actually fails",
         "IMPORTANT: The PUT request Content-Type header MUST exactly match the contentType from this response. S3 presigned URLs sign headers — a mismatch causes 403 SignatureDoesNotMatch with no useful error message",
         "The uploadUrl expires in 1 hour (expiresIn seconds). If the PUT fails with 403 after expiry, call request_upload_url again — presigned URLs cannot be renewed",
         "Maximum file size: 500 MB",
@@ -1084,8 +1085,8 @@
       "4. get_module(module, tier='basic') → understand fields and states",
       "5. get_module(module, tier='extended') → understand activities (only when needed)",
       "6. get_form(module, activity) → get required fields, types, options, defaults, and confidence_threshold before submitting",
-      "7. upload_file(module, file) → upload files for File/Image fields, returns /s/ path",
-      "8. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ paths from upload_file for File/Image fields.",
+      "7. request_upload_url(module, fileName, fileSize, contentType) → PUT bytes to uploadUrl → confirm_upload(s3Key) → returns /s/ path. ALWAYS use this flow for File/Image fields. Only fall back to upload_file(module, file) if this flow fails.",
+      "8. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ paths from confirm_upload (or upload_file fallback) for File/Image fields.",
       "9. list_entries(module, filters) → query and browse entries",
       "10. get_entry(module, entryId) → read a specific entry",
       "11. get_history(module, entryId) → audit trail and comments",
@@ -1102,7 +1103,7 @@
       "Always call get_form() before submit_activity() to discover required fields and valid options",
       "Use tier='basic' by default; only request 'extended' when activity details are needed",
       "Not all modules have workflows — record list modules (master data, lookup tables) have no states, activities, or flows. Use standard create/edit/delete activities directly.",
-      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, path } where path is from upload_file() or an external URL. Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path.",
+      "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, path } where path is from request_upload_url()+confirm_upload() (always the default flow; fall back to upload_file() only if it fails) or an external URL. Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path.",
       "Module/User fields use object values. Retrieval returns { value, id } for Module and { value, id, username } for User. Submission accepts the same shape — the MCP layer decomposes these into internal storage format. Modules/Users (plural) use arrays of these objects."
     ],
     "module_types": {
@@ -1179,64 +1180,6 @@
         "In parallel/branching workflows, multiple states may use #2A7B50 (green) if each represents genuinely concurrent active work by different actors"
       ],
       "default_when_unsure": "#2968A8",
-      "examples": {
-        "_description": "Reference examples showing correct color assignment across common workflow patterns.",
-        "approval_workflow": {
-          "_pattern": "Linear: submit → wait → approve/reject",
-          "Draft": "#5A6070",
-          "Submitted": "#2968A8",
-          "Under Review": "#2A7B50",
-          "Approved": "#1E6B45",
-          "Rejected": "#8B2D2D"
-        },
-        "support_ticket": {
-          "_pattern": "Service desk with external dependency and escalation",
-          "New": "#5A6070",
-          "Triaged": "#2968A8",
-          "In Progress": "#2A7B50",
-          "Awaiting Customer": "#6B4D91",
-          "Escalated": "#C0392B",
-          "Resolved": "#1E6B45",
-          "Closed": "#1E6B45"
-        },
-        "procurement": {
-          "_pattern": "Multi-stage with handoffs between teams",
-          "Requested": "#5A6070",
-          "Budget Review": "#2968A8",
-          "Approved": "#2968A8",
-          "Ordering": "#2A7B50",
-          "Shipped": "#2968A8",
-          "Delivered": "#1E6B45",
-          "Cancelled": "#8B2D2D"
-        },
-        "inspection_checklist": {
-          "_pattern": "Deadline-sensitive with overdue escalation",
-          "Scheduled": "#5A6070",
-          "Due Soon": "#A07828",
-          "In Progress": "#2A7B50",
-          "Overdue": "#C0392B",
-          "Completed": "#1E6B45",
-          "Waived": "#8B2D2D"
-        },
-        "onboarding": {
-          "_pattern": "Parallel tasks with external blockers",
-          "Not Started": "#5A6070",
-          "Documents Pending": "#6B4D91",
-          "Training": "#2A7B50",
-          "IT Setup": "#2A7B50",
-          "Ready": "#1E6B45"
-        },
-        "record_list": {
-          "_pattern": "No workflow — master data / lookup table",
-          "_note": "Record list modules have no states, activities, or flows. Only standard create/edit/delete operations apply. No state colors needed."
-        }
-      },
-      "common_mistakes": [
-        "Using green (#2A7B50) for 'Approved' — approval is a decision, not active work. Use blue (#2968A8) if awaiting next step, or dark green (#1E6B45) if terminal.",
-        "Using grey (#5A6070) for 'Closed' or 'Cancelled' — these are terminal states and must use #1E6B45 or #8B2D2D.",
-        "Using red (#C0392B) for 'Rejected' — rejection is a terminal outcome, not an escalation. Use dark red (#8B2D2D).",
-        "Using green (#2A7B50) for 'Pending' or 'Waiting' — no one is actively working. Use blue (#2968A8)."
-      ],
       "strict_palette": "Only use the 8 hex codes listed in the palette. Never generate custom hex values.",
       "keyword_hints": {
         "_description": "When a state name contains these keywords, use the mapped color. Always check terminal rules first — a state named 'Completed' is terminal success even if it contains 'complete' from the green list.",

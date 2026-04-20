@@ -69,9 +69,9 @@ const RUNTIME_OPERATIONS = [
   "get_form",
   "submit_activity",
   "get_history",
-  "upload_file",
   "request_upload_url",
   "confirm_upload",
+  "upload_file",
   "download_file",
 ];
 

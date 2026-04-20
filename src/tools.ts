@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -58,9 +58,72 @@ const wsParam = z
   .optional()
   .describe("Workspace ID. Required in stateless/remote mode. If set via env INISTATE_WORKSPACE_ID or prior set_workspace call, can be omitted.");
 
+// ---------- Shared module-schema shapes (used by create_module + update_module) ----------
+// `id` is optional on both: ignored on create, used to match items on update (enables renaming).
+// `type` is optional so update can rename without re-sending it; create still requires it server-side.
+
+const subFieldShape = z.object({
+  id: z.string().optional(),
+  name: z.string(),
+  type: z.string().optional(),
+  options: z.array(z.string()).optional(),
+});
+
+const fieldShape = z.object({
+  id: z.string().optional(),
+  name: z.string(),
+  type: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  fields: z.array(subFieldShape).optional().describe("Sub-fields for Table type"),
+  ai_hint: z.string().optional(),
+});
+
+const stateShape = z.object({
+  id: z.string().optional(),
+  name: z.string(),
+  color: z.string().optional(),
+  initial: z.boolean().optional(),
+  ai_hint: z.string().optional(),
+  ai_instruction: z.string().optional(),
+});
+
+const activityFieldRefShape = z.object({
+  name: z.string(),
+  required: z.boolean().optional(),
+  readOnly: z.boolean().optional(),
+  options: z.array(z.string()).optional(),
+});
+
+const activityShape = z.object({
+  id: z.string().optional(),
+  name: z.string(),
+  actor: z.enum(["human", "ai", "hybrid"]).optional(),
+  fields: z.array(z.union([z.string(), activityFieldRefShape])).optional(),
+  ai_hint: z.string().optional(),
+  ai_instruction: z.string().optional(),
+  confidence_threshold: z.number().min(0).max(1).optional(),
+});
+
+const flowShape = z.object({
+  from: z.string(),
+  to: z.string(),
+  activity: z.string(),
+  ai_hint: z.string().optional(),
+});
+
+const moduleSectionsShape = {
+  icon: z.string().optional().describe("Emoji identifier"),
+  description: z.string().optional(),
+  information: z.array(fieldShape).optional().describe("Field definitions. Items matched by id on update enable renaming."),
+  states: z.array(stateShape).optional().describe("Workflow states. Omit for record list modules."),
+  activities: z.array(activityShape).optional().describe("Custom activities. Omit for record list modules."),
+  flows: z.array(flowShape).optional().describe("State transition rules. Omit for record list modules."),
+};
+
 // ---------- Tool registration ----------
 
-export function registerTools(server: McpServer) {
+export function registerTools(server: McpServer): { configureTools: RegisteredTool[] } {
+  const configureTools: RegisteredTool[] = [];
   // ═══════════════════════════════════════════
   // 0. login
   // ═══════════════════════════════════════════
@@ -164,9 +227,9 @@ Workflow sequences after workspace is set:
   );
 
   // ═══════════════════════════════════════════
-  // 4. get_module_schema
+  // 4. get_module_schema (configure mode)
   // ═══════════════════════════════════════════
-  server.registerTool(
+  configureTools.push(server.registerTool(
     "get_module_schema",
     {
       description:
@@ -193,12 +256,12 @@ Workflow sequences after workspace is set:
         return err(e);
       }
     },
-  );
+  ));
 
   // ═══════════════════════════════════════════
-  // 5. get_module_canvas
+  // 5. get_module_canvas (configure mode)
   // ═══════════════════════════════════════════
-  server.registerTool(
+  configureTools.push(server.registerTool(
     "get_module_canvas",
     {
       description: `Get the full module definition with stable IDs. The output is round-trippable — modify and send back via update_module. Use this when modifying a module to preserve IDs for renaming.
@@ -221,7 +284,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         return err(e);
       }
     },
-  );
+  ));
 
   // ═══════════════════════════════════════════
   // 6. list_entries
@@ -229,31 +292,17 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "list_entries",
     {
-      description: `Query entries from a module with filtering, sorting, and pagination. Prerequisite: set_workspace. Use display names for field references.
-
-Filters are keyed by display name. Values can be:
-- Simple equality: { "Priority": "High" }
-- Text operators: { "Title": { "contains": "report" } } — is, not, contains, startsWith, endsWith, excludes
-- Number operators: { "Amount": { "min": 1000, "max": 5000 } } — min, max, above, below, between
-- Date operators: { "DueDate": { "after": "2026-01-01" } } — after, before, upcoming, past, within
-- YesNo: { "Active": { "yes": true } }
-- Existence: { "Notes": { "empty": true } }, { "Assignee": { "exists": true } }
-- User: { "assignee": "me" }
-- Logical: { "and": [...] }, { "or": [...] }
-
-Multiple filters are AND-ed. Use state parameter for state filtering.`,
+      description:
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {_or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
-        state: z.string().optional().describe("Filter by state name"),
-        search: z.string().optional().describe("Search by document ID"),
-        filters: z
-          .record(z.unknown())
-          .optional()
-          .describe("Field filters keyed by display name. See description for operators."),
-        sortBy: z.string().optional().describe("Field display name to sort by"),
+        state: z.string().optional(),
+        search: z.string().optional().describe("Free-text against document ID and indexed text fields"),
+        filters: z.record(z.unknown()).optional(),
+        sortBy: z.string().optional(),
         sortDirection: z.enum(["asc", "desc"]).default("asc").optional(),
-        currentPage: z.number().int().default(0).optional().describe("Zero-based page index"),
-        pageSize: z.number().int().default(50).optional().describe("Items per page (max 500)"),
+        currentPage: z.number().int().default(0).optional(),
+        pageSize: z.number().int().default(50).optional().describe("Default 50, max 500"),
         workspaceId: wsParam,
       },
     },
@@ -351,53 +400,26 @@ Multiple filters are AND-ed. Use state parameter for state filtering.`,
   server.registerTool(
     "submit_activity",
     {
-      description: `Perform an activity on a module entry. Always call get_form first to discover fields and confidence_threshold.
-
-Standard activities: create (no entryId), edit, delete, changeStatus, comment, duplicate, manage.
-Custom activities: use the activity name from get_module_schema.
-Bulk operations: use entryIds array instead of entryId.
-File/Image fields: use { name, path } where path is from upload_file() or an external URL.
-Module fields: use { value, id } — id is the referenced entry's ID.
-User fields: use { value, id, username }.
-Plural variants (Files/Images/Modules/Users): use arrays of the objects above.
-AI audit: always include the ai object with reasoning, sources, model, and confidence for traceability.`,
+      description:
+        "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED for every submission (reasoning + model + confidence at minimum) — submissions without it are rejected. If ai.confidence < the activity's confidence_threshold, the state transition is suppressed and the entry is flagged for human review. See ActivitySubmission in inistate://schema/runtime for full input shapes.",
       inputSchema: {
-        module: z.string().describe("Module name"),
-        activity: z
-          .string()
-          .default("create")
-          .describe("create, edit, delete, changeStatus, comment, duplicate, manage, or custom activity name"),
-        entryId: z
-          .union([z.string(), z.number()])
-          .optional()
-          .describe("Required for edit/delete/custom. Omit for create."),
-        entryIds: z
-          .array(z.union([z.string(), z.number()]))
-          .optional()
-          .describe("Multiple entry IDs for bulk operations"),
+        module: z.string(),
+        activity: z.string().default("create"),
+        entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
+        entryIds: z.array(z.union([z.string(), z.number()])).optional().describe("For bulk ops"),
         input: z
           .record(z.unknown())
           .optional()
-          .describe("Field values keyed by display name. For File/Image fields, use { name, path } objects. For Module fields, use { value, id }. For User fields, use { value, id, username }. Plural variants (Files/Images/Modules/Users) use arrays of these objects."),
-        state: z
-          .string()
-          .optional()
-          .describe("Target state name (resolved to internal ID automatically)"),
-        comment: z
-          .string()
-          .optional()
-          .describe("Comment to attach to the activity"),
-        assignees: z
-          .array(z.string())
-          .optional()
-          .describe("Usernames to assign"),
-        due: z
-          .string()
-          .optional()
-          .describe("Due date for assignment (ISO 8601)"),
+          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {value,id}. User: {value,id,username}. Plural variants use arrays."),
+        state: z.string().optional().describe("Target state name"),
+        comment: z.string().optional(),
+        assignees: z.array(z.string()).optional().describe("Usernames"),
+        due: z.string().optional().describe("ISO 8601"),
         ai: z
           .object({
-            reasoning: z.string().optional().describe("Natural language explanation of the AI's decision"),
+            reasoning: z.string().describe("Why the AI chose this action"),
+            model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
+            confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
             sources: z
               .array(
                 z.object({
@@ -406,20 +428,11 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
                   excerpt: z.string().optional(),
                 }),
               )
-              .optional()
-              .describe("What data the AI used and from where"),
-            model: z.string().optional().describe("Which model made this decision"),
-            model_version: z.string().optional().describe("Model version / checkpoint"),
-            prompt_hash: z.string().optional().describe("Hash of the system prompt used"),
-            confidence: z
-              .number()
-              .min(0)
-              .max(1)
-              .optional()
-              .describe("Confidence score. If below confidence_threshold, state transition is suppressed."),
+              .optional(),
+            model_version: z.string().optional(),
+            prompt_hash: z.string().optional(),
           })
-          .optional()
-          .describe("AI agent traceability context"),
+          .describe("REQUIRED — AI agent traceability"),
         workspaceId: wsParam,
       },
     },
@@ -531,7 +544,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
     "upload_file",
     {
       description:
-        "Upload a file to S3 storage. Returns { path, filename, mimeType, size }. Use the returned path directly as the 'path' value in File/Image fields for submit_activity (e.g. { name: 'photo.jpg', path: result.path }). Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi. The agent provides file content as base64 which the server converts to multipart/form-data for the API.",
+        "FALLBACK ONLY — do NOT use this by default. Always use request_upload_url + confirm_upload first; call this tool only after the presigned flow has actually failed (e.g. request_upload_url errored, or the PUT/confirm step failed for non-retryable reasons). Uploads a file to S3 via base64/multipart. Returns { path, filename, mimeType, size }. Use the returned path as the 'path' value in File/Image fields for submit_activity (e.g. { name: 'photo.jpg', path: result.path }). Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi.",
       inputSchema: {
         module: z
           .string()
@@ -601,7 +614,7 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
   server.registerTool(
     "request_upload_url",
     {
-      description: `Request a presigned S3 PUT URL for direct large-file upload (up to 500MB). Use this instead of upload_file when the file exceeds 50MB or when you want to avoid base64/JSON overhead. Three-step flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403 SignatureDoesNotMatch), 3) call confirm_upload({ s3Key }). The returned path is used directly as the File/Image field value in submit_activity. uploadUrl expires in ~1 hour and cannot be renewed — call this again on expiry.`,
+      description: `DEFAULT upload path — ALWAYS use this for every file upload (any size, up to 500MB). Only fall back to upload_file if this flow actually fails. Three-step flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403 SignatureDoesNotMatch), 3) call confirm_upload({ s3Key }). The path returned by confirm_upload is used directly as the File/Image field value in submit_activity. uploadUrl expires in ~1 hour and cannot be renewed — call this again on expiry.`,
       inputSchema: {
         module: z
           .string()
@@ -667,9 +680,9 @@ AI audit: always include the ai object with reasoning, sources, model, and confi
   );
 
   // ═══════════════════════════════════════════
-  // 15. design_workflow
+  // 15. design_workflow (configure mode)
   // ═══════════════════════════════════════════
-  server.registerTool(
+  configureTools.push(server.registerTool(
     "design_workflow",
     {
       description: `Generate a scaffolded ModuleSchema template from a natural language description. Use when the user wants to create a new module or workflow.
@@ -702,12 +715,12 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       const result = designWorkflow(description, industry);
       return ok(result);
     },
-  );
+  ));
 
   // ═══════════════════════════════════════════
-  // 14. validate_design
+  // 14. validate_design (configure mode)
   // ═══════════════════════════════════════════
-  server.registerTool(
+  configureTools.push(server.registerTool(
     "validate_design",
     {
       description:
@@ -728,91 +741,19 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       const result = validateDesign(schema as Record<string, any>, mode);
       return ok(result);
     },
-  );
+  ));
 
   // ═══════════════════════════════════════════
-  // 15. create_module
+  // 15. create_module (configure mode)
   // ═══════════════════════════════════════════
-  server.registerTool(
+  configureTools.push(server.registerTool(
     "create_module",
     {
-      description: `Create a new module in the current workspace. Supports both workflow modules (with states, activities, flows) and record list modules (fields only). Requires Administrator, Consultant, or Workspace Admin role.
-
-Design workflow: design_workflow → validate_design → create_module.
-Always call validate_design before this tool.`,
+      description:
+        "Create a new module. Supports workflow modules (states, activities, flows) and record list modules (fields only). Requires Administrator, Consultant, or Workspace Admin role. Always call validate_design first. See inistate://schema/configure for field types, color palette, and design rules.",
       inputSchema: {
         name: z.string().describe("Module name"),
-        icon: z.string().optional().describe("Emoji identifier"),
-        description: z.string().optional().describe("Human-readable module description"),
-        information: z
-          .array(
-            z.object({
-              name: z.string(),
-              type: z.string(),
-              options: z.array(z.string()).optional(),
-              fields: z
-                .array(
-                  z.object({
-                    name: z.string(),
-                    type: z.string(),
-                    options: z.array(z.string()).optional(),
-                  }),
-                )
-                .optional()
-                .describe("Sub-fields for Table type"),
-              ai_hint: z.string().optional(),
-            }),
-          )
-          .optional()
-          .describe("Field definitions"),
-        states: z
-          .array(
-            z.object({
-              name: z.string(),
-              color: z.string().optional(),
-              initial: z.boolean().optional(),
-              ai_hint: z.string().optional(),
-              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when an entry reaches this state"),
-            }),
-          )
-          .optional()
-          .describe("Workflow states. Omit for record list modules."),
-        activities: z
-          .array(
-            z.object({
-              name: z.string(),
-              actor: z.enum(["human", "ai", "hybrid"]).optional(),
-              fields: z
-                .array(
-                  z.union([
-                    z.string(),
-                    z.object({
-                      name: z.string(),
-                      required: z.boolean().optional(),
-                      readOnly: z.boolean().optional(),
-                      options: z.array(z.string()).optional(),
-                    }),
-                  ]),
-                )
-                .optional(),
-              ai_hint: z.string().optional(),
-              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when this activity is performed"),
-              confidence_threshold: z.number().min(0).max(1).optional(),
-            }),
-          )
-          .optional()
-          .describe("Custom activities. Omit for record list modules."),
-        flows: z
-          .array(
-            z.object({
-              from: z.string(),
-              to: z.string(),
-              activity: z.string(),
-              ai_hint: z.string().optional(),
-            }),
-          )
-          .optional()
-          .describe("State transition rules. Omit for record list modules."),
+        ...moduleSectionsShape,
         workspaceId: wsParam,
       },
     },
@@ -847,93 +788,20 @@ Always call validate_design before this tool.`,
         return err(e);
       }
     },
-  );
+  ));
 
   // ═══════════════════════════════════════════
-  // 16. update_module
+  // 16. update_module (configure mode)
   // ═══════════════════════════════════════════
-  server.registerTool(
+  configureTools.push(server.registerTool(
     "update_module",
     {
-      description: `Update an existing module's schema. Merges changes into the existing canvas. Items matched by id enable renaming without losing data. Omitted sections are left unchanged.
-
-Modify workflow: list_modules → get_module_canvas → (apply changes) → validate_design → update_module.
-Always call get_module_canvas first (not get_module_schema) to get stable IDs. Always call validate_design before this tool.`,
+      description:
+        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain stable ids, then validate_design before submitting.",
       inputSchema: {
-        id: z
-          .string()
-          .describe("Module ID from get_module_canvas (identifies which module to update)"),
+        id: z.string().describe("Module ID from get_module_canvas"),
         name: z.string().optional().describe("New module name (for renaming)"),
-        icon: z.string().optional(),
-        description: z.string().optional(),
-        information: z
-          .array(
-            z.object({
-              id: z.string().optional().describe("Stable ID for matching (enables renaming)"),
-              name: z.string(),
-              type: z.string().optional(),
-              options: z.array(z.string()).optional(),
-              fields: z
-                .array(
-                  z.object({
-                    id: z.string().optional(),
-                    name: z.string(),
-                    type: z.string().optional(),
-                    options: z.array(z.string()).optional(),
-                  }),
-                )
-                .optional(),
-              ai_hint: z.string().optional(),
-            }),
-          )
-          .optional(),
-        states: z
-          .array(
-            z.object({
-              id: z.string().optional().describe("Stable ID for matching"),
-              name: z.string(),
-              color: z.string().optional(),
-              initial: z.boolean().optional(),
-              ai_hint: z.string().optional(),
-              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when an entry reaches this state"),
-            }),
-          )
-          .optional(),
-        activities: z
-          .array(
-            z.object({
-              id: z.string().optional().describe("Stable ID for matching"),
-              name: z.string(),
-              actor: z.enum(["human", "ai", "hybrid"]).optional(),
-              fields: z
-                .array(
-                  z.union([
-                    z.string(),
-                    z.object({
-                      name: z.string(),
-                      required: z.boolean().optional(),
-                      readOnly: z.boolean().optional(),
-                      options: z.array(z.string()).optional(),
-                    }),
-                  ]),
-                )
-                .optional(),
-              ai_hint: z.string().optional(),
-              ai_instruction: z.string().optional().describe("Instruction for AI agents to execute when this activity is performed"),
-              confidence_threshold: z.number().min(0).max(1).optional(),
-            }),
-          )
-          .optional(),
-        flows: z
-          .array(
-            z.object({
-              from: z.string(),
-              to: z.string(),
-              activity: z.string(),
-              ai_hint: z.string().optional(),
-            }),
-          )
-          .optional(),
+        ...moduleSectionsShape,
         workspaceId: wsParam,
       },
     },
@@ -970,5 +838,7 @@ Always call get_module_canvas first (not get_module_schema) to get stable IDs. A
         return err(e);
       }
     },
-  );
+  ));
+
+  return { configureTools };
 }

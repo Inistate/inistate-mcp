@@ -37,15 +37,15 @@ afterAll(async () => {
 // Server capability discovery
 // ──────────────────────────────────────────────
 
-describe("server discovery", () => {
-  it("lists all expected tools", async () => {
+describe("server discovery (runtime mode default)", () => {
+  it("lists runtime tools and switch_mode; hides configure-mode tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
+    // runtime + always-on
+    expect(names).toContain("login");
     expect(names).toContain("list_workspaces");
     expect(names).toContain("set_workspace");
     expect(names).toContain("list_modules");
-    expect(names).toContain("get_module_schema");
-    expect(names).toContain("get_module_canvas");
     expect(names).toContain("list_entries");
     expect(names).toContain("get_entry");
     expect(names).toContain("get_form");
@@ -55,140 +55,93 @@ describe("server discovery", () => {
     expect(names).toContain("download_file");
     expect(names).toContain("request_upload_url");
     expect(names).toContain("confirm_upload");
-    expect(names).toContain("design_workflow");
-    expect(names).toContain("validate_design");
-    expect(names).toContain("create_module");
-    expect(names).toContain("update_module");
+    expect(names).toContain("switch_mode");
+    // configure-mode tools must be hidden
+    expect(names).not.toContain("get_module_schema");
+    expect(names).not.toContain("get_module_canvas");
+    expect(names).not.toContain("design_workflow");
+    expect(names).not.toContain("validate_design");
+    expect(names).not.toContain("create_module");
+    expect(names).not.toContain("update_module");
   });
 
-  it("lists expected resources", async () => {
+  it("lists runtime resources; hides configure-mode resources", async () => {
     const { resources } = await client.listResources();
     const uris = resources.map((r) => r.uri);
     expect(uris).toContain("inistate://modules");
-    expect(uris).toContain("inistate://schema");
     expect(uris).toContain("inistate://schema/runtime");
-    expect(uris).toContain("inistate://schema/configure");
-    expect(uris).toContain("inistate://design-guide");
+    expect(uris).not.toContain("inistate://schema/configure");
+    expect(uris).not.toContain("inistate://design-guide");
+    expect(uris).not.toContain("inistate://schema");
   });
 
-  it("lists expected prompts", async () => {
+  it("lists runtime prompts; hides configure-mode prompts", async () => {
     const { prompts } = await client.listPrompts();
     const names = prompts.map((p) => p.name);
-    expect(names).toContain("design_factsops_workflow");
     expect(names).toContain("execute_activity");
     expect(names).toContain("diagnose_entry");
-    expect(names).toContain("modify_module");
+    expect(names).not.toContain("design_factsops_workflow");
+    expect(names).not.toContain("modify_module");
+  });
+});
+
+describe("switch_mode tool", () => {
+  afterAll(async () => {
+    // Always leave the server in runtime mode for sibling describes.
+    await client.callTool({ name: "switch_mode", arguments: { mode: "runtime" } });
+  });
+
+  it("unlocks configure-mode tools, resources, and prompts", async () => {
+    await client.callTool({ name: "switch_mode", arguments: { mode: "configure" } });
+
+    const toolNames = (await client.listTools()).tools.map((t) => t.name);
+    expect(toolNames).toContain("create_module");
+    expect(toolNames).toContain("update_module");
+    expect(toolNames).toContain("design_workflow");
+    expect(toolNames).toContain("validate_design");
+    expect(toolNames).toContain("get_module_canvas");
+    expect(toolNames).toContain("get_module_schema");
+
+    const resourceUris = (await client.listResources()).resources.map((r) => r.uri);
+    expect(resourceUris).toContain("inistate://schema/configure");
+    expect(resourceUris).toContain("inistate://design-guide");
+
+    const promptNames = (await client.listPrompts()).prompts.map((p) => p.name);
+    expect(promptNames).toContain("design_factsops_workflow");
+    expect(promptNames).toContain("modify_module");
+  });
+
+  it("collapses configure-mode surface when switching back to runtime", async () => {
+    await client.callTool({ name: "switch_mode", arguments: { mode: "runtime" } });
+
+    const toolNames = (await client.listTools()).tools.map((t) => t.name);
+    expect(toolNames).not.toContain("create_module");
+    expect(toolNames).not.toContain("design_workflow");
+
+    const resourceUris = (await client.listResources()).resources.map((r) => r.uri);
+    expect(resourceUris).not.toContain("inistate://design-guide");
   });
 });
 
 // ──────────────────────────────────────────────
-// Local tools (no API calls)
+// Configure-mode surface (gated behind switch_mode)
 // ──────────────────────────────────────────────
 
-describe("design_workflow tool", () => {
-  it("returns a template for an approval workflow", async () => {
-    const result = await client.callTool({
-      name: "design_workflow",
-      arguments: {
-        description: "expense approval workflow",
-        industry: "financial_services",
-      },
-    });
-    const data = JSON.parse((result.content as any)[0].text);
-    expect(data.suggestions.detected_pattern).toBe("approval_workflow");
-    expect(data.template.states.length).toBeGreaterThan(0);
-    expect(data.suggestions.industry_defaults.confidence_threshold).toBe(0.9);
-  });
-
-  it("returns a record list template for a directory", async () => {
-    const result = await client.callTool({
-      name: "design_workflow",
-      arguments: {
-        description: "vendor directory",
-      },
-    });
-    const data = JSON.parse((result.content as any)[0].text);
-    expect(data.suggestions.detected_pattern).toBe("record_list");
-  });
-});
-
-describe("validate_design tool", () => {
-  it("validates a correct workflow schema", async () => {
-    const result = await client.callTool({
-      name: "validate_design",
-      arguments: {
-        schema: {
-          name: "Test",
-          information: [{ name: "Title", type: "Text" }],
-          states: [
-            { name: "Open", color: "#5A6070", initial: true },
-            { name: "Closed", color: "#1E6B45" },
-          ],
-          activities: [{ name: "Close", actor: "human", fields: ["Title"] }],
-          flows: [{ from: "Open", to: "Closed", activity: "Close" }],
-        },
-        mode: "create",
-      },
-    });
-    const data = JSON.parse((result.content as any)[0].text);
-    expect(data.valid).toBe(true);
-    expect(data.errors).toHaveLength(0);
-  });
-
-  it("returns errors for an invalid schema", async () => {
-    const result = await client.callTool({
-      name: "validate_design",
-      arguments: {
-        schema: {
-          name: "",
-          states: [
-            { name: "A", initial: true },
-            { name: "B", initial: true },
-          ],
-        },
-        mode: "create",
-      },
-    });
-    const data = JSON.parse((result.content as any)[0].text);
-    expect(data.valid).toBe(false);
-    expect(data.errors.length).toBeGreaterThan(0);
-  });
-});
-
 // ──────────────────────────────────────────────
-// Static resources (no API calls)
+// Runtime-mode static resources and prompts (always available)
 // ──────────────────────────────────────────────
 
-describe("static resources", () => {
-  it("reads the schema resource", async () => {
-    const result = await client.readResource({ uri: "inistate://schema" });
+describe("runtime resources", () => {
+  it("reads the schema/runtime resource", async () => {
+    const result = await client.readResource({ uri: "inistate://schema/runtime" });
     expect(result.contents.length).toBe(1);
     const data = JSON.parse(result.contents[0].text as string);
     expect(data.definitions).toBeDefined();
     expect(data.definitions.FieldType).toBeDefined();
   });
-
-  it("reads the design-guide resource", async () => {
-    const result = await client.readResource({ uri: "inistate://design-guide" });
-    expect(result.contents.length).toBe(1);
-    expect((result.contents[0].text as string).length).toBeGreaterThan(100);
-  });
 });
 
-// ──────────────────────────────────────────────
-// Prompts
-// ──────────────────────────────────────────────
-
-describe("prompts", () => {
-  it("returns the design_factsops_workflow prompt", async () => {
-    const result = await client.getPrompt({
-      name: "design_factsops_workflow",
-      arguments: { entity: "invoice" },
-    });
-    expect(result.messages.length).toBeGreaterThan(0);
-    expect((result.messages[0].content as any).text).toContain("invoice");
-  });
-
+describe("runtime prompts", () => {
   it("returns the execute_activity prompt", async () => {
     const result = await client.getPrompt({
       name: "execute_activity",
@@ -206,14 +159,116 @@ describe("prompts", () => {
     expect(result.messages.length).toBeGreaterThan(0);
     expect((result.messages[0].content as any).text).toContain("42");
   });
+});
 
-  it("returns the modify_module prompt", async () => {
-    const result = await client.getPrompt({
-      name: "modify_module",
-      arguments: { module: "Tasks", change: "add a Priority field" },
+// ──────────────────────────────────────────────
+// Configure-mode surface (gated behind switch_mode)
+// ──────────────────────────────────────────────
+
+describe("configure mode", () => {
+  beforeAll(async () => {
+    await client.callTool({ name: "switch_mode", arguments: { mode: "configure" } });
+  });
+  afterAll(async () => {
+    await client.callTool({ name: "switch_mode", arguments: { mode: "runtime" } });
+  });
+
+  describe("design_workflow tool", () => {
+    it("returns a template for an approval workflow", async () => {
+      const result = await client.callTool({
+        name: "design_workflow",
+        arguments: {
+          description: "expense approval workflow",
+          industry: "financial_services",
+        },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.suggestions.detected_pattern).toBe("approval_workflow");
+      expect(data.template.states.length).toBeGreaterThan(0);
+      expect(data.suggestions.industry_defaults.confidence_threshold).toBe(0.9);
     });
-    expect(result.messages.length).toBeGreaterThan(0);
-    expect((result.messages[0].content as any).text).toContain("Tasks");
-    expect((result.messages[0].content as any).text).toContain("Priority");
+
+    it("returns a record list template for a directory", async () => {
+      const result = await client.callTool({
+        name: "design_workflow",
+        arguments: {
+          description: "vendor directory",
+        },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.suggestions.detected_pattern).toBe("record_list");
+    });
+  });
+
+  describe("validate_design tool", () => {
+    it("validates a correct workflow schema", async () => {
+      const result = await client.callTool({
+        name: "validate_design",
+        arguments: {
+          schema: {
+            name: "Test",
+            information: [{ name: "Title", type: "Text" }],
+            states: [
+              { name: "Open", color: "#5A6070", initial: true },
+              { name: "Closed", color: "#1E6B45" },
+            ],
+            activities: [{ name: "Close", actor: "human", fields: ["Title"] }],
+            flows: [{ from: "Open", to: "Closed", activity: "Close" }],
+          },
+          mode: "create",
+        },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.valid).toBe(true);
+      expect(data.errors).toHaveLength(0);
+    });
+
+    it("returns errors for an invalid schema", async () => {
+      const result = await client.callTool({
+        name: "validate_design",
+        arguments: {
+          schema: {
+            name: "",
+            states: [
+              { name: "A", initial: true },
+              { name: "B", initial: true },
+            ],
+          },
+          mode: "create",
+        },
+      });
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.valid).toBe(false);
+      expect(data.errors.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("design-guide resource", () => {
+    it("reads the design-guide resource", async () => {
+      const result = await client.readResource({ uri: "inistate://design-guide" });
+      expect(result.contents.length).toBe(1);
+      expect((result.contents[0].text as string).length).toBeGreaterThan(100);
+    });
+  });
+
+  describe("configure prompts", () => {
+    it("returns the design_factsops_workflow prompt", async () => {
+      const result = await client.getPrompt({
+        name: "design_factsops_workflow",
+        arguments: { entity: "invoice" },
+      });
+      expect(result.messages.length).toBeGreaterThan(0);
+      expect((result.messages[0].content as any).text).toContain("invoice");
+    });
+
+    it("returns the modify_module prompt", async () => {
+      const result = await client.getPrompt({
+        name: "modify_module",
+        arguments: { module: "Tasks", change: "add a Priority field" },
+      });
+      expect(result.messages.length).toBeGreaterThan(0);
+      expect((result.messages[0].content as any).text).toContain("Tasks");
+      expect((result.messages[0].content as any).text).toContain("Priority");
+    });
   });
 });

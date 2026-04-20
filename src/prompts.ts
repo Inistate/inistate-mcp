@@ -1,9 +1,11 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, RegisteredPrompt } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export function registerPrompts(server: McpServer) {
-  // 1. design_factsops_workflow
-  server.registerPrompt(
+export function registerPrompts(server: McpServer): { configurePrompts: RegisteredPrompt[] } {
+  const configurePrompts: RegisteredPrompt[] = [];
+
+  // 1. design_factsops_workflow (configure mode)
+  configurePrompts.push(server.registerPrompt(
     "design_factsops_workflow",
     {
       description:
@@ -72,9 +74,9 @@ Output a complete ModuleSchema JSON object.`,
         ],
       };
     },
-  );
+  ));
 
-  // 2. execute_activity
+  // 2. execute_activity (always on)
   server.registerPrompt(
     "execute_activity",
     {
@@ -152,8 +154,8 @@ Follow this sequence:
     },
   );
 
-  // 4. modify_module
-  server.registerPrompt(
+  // 4. modify_module (configure mode)
+  configurePrompts.push(server.registerPrompt(
     "modify_module",
     {
       description:
@@ -197,5 +199,7 @@ Rules:
         ],
       };
     },
-  );
+  ));
+
+  return { configurePrompts };
 }

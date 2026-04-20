@@ -1,11 +1,13 @@
 import {
   McpServer,
+  RegisteredResource,
   ResourceTemplate,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as api from "./api.js";
-import { SCHEMA, SCHEMA_RUNTIME, SCHEMA_CONFIGURE, DESIGN_GUIDE } from "./schema.js";
+import { SCHEMA_RUNTIME, SCHEMA_CONFIGURE, DESIGN_GUIDE } from "./schema.js";
 
-export function registerResources(server: McpServer) {
+export function registerResources(server: McpServer): { configureResources: RegisteredResource[] } {
+  const configureResources: RegisteredResource[] = [];
   // 1. inistate://modules — list all discoverable modules
   server.registerResource(
     "modules",
@@ -73,7 +75,7 @@ export function registerResources(server: McpServer) {
     "inistate://schema/runtime",
     {
       description:
-        "DEFAULT resource — load this at session start for runtime operations: listing/reading entries, submitting activities, uploading/downloading files, reading history. Contains only the tools and types needed to USE existing modules: list_entries, get_entry, get_form, submit_activity, get_history, upload_file, request_upload_url, confirm_upload, download_file, plus field value shapes (File/Image/Module/User) and filter operators. Does NOT include module design content — if the user asks to create or update a module, load inistate://schema/configure + inistate://design-guide instead. Loading this AND configure together doubles context cost — pick one.",
+        "DEFAULT resource — load this at session start for runtime operations: listing/reading entries, submitting activities, uploading/downloading files, reading history. Contains only the tools and types needed to USE existing modules: list_entries, get_entry, get_form, submit_activity, get_history, request_upload_url + confirm_upload (ALWAYS the default upload flow), download_file, upload_file (fallback only — use only if the presigned flow fails), plus field value shapes (File/Image/Module/User) and filter operators. Does NOT include module design content — if the user asks to create or update a module, load inistate://schema/configure + inistate://design-guide instead. Loading this AND configure together doubles context cost — pick one.",
       mimeType: "application/json",
     },
     async (uri) => {
@@ -83,8 +85,8 @@ export function registerResources(server: McpServer) {
     },
   );
 
-  // 4b. inistate://schema/configure — module design & configuration
-  server.registerResource(
+  // 4b. inistate://schema/configure — module design & configuration (configure mode)
+  configureResources.push(server.registerResource(
     "schema-configure",
     "inistate://schema/configure",
     {
@@ -97,26 +99,10 @@ export function registerResources(server: McpServer) {
         contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_CONFIGURE, null, 2) }],
       };
     },
-  );
+  ));
 
-  // 4c. inistate://schema — full schema (backward compatibility)
-  server.registerResource(
-    "schema",
-    "inistate://schema",
-    {
-      description:
-        "FULL FACTSOps schema — every tool, type, and design rule in one payload. Prefer inistate://schema/runtime or inistate://schema/configure for lower context cost. Use this only when you genuinely need both modes in one session or when building agents that can't load multiple resources.",
-      mimeType: "application/json",
-    },
-    async (uri) => {
-      return {
-        contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA, null, 2) }],
-      };
-    },
-  );
-
-  // 5. inistate://design-guide — FACTS module design guide
-  server.registerResource(
+  // 5. inistate://design-guide — FACTS module design guide (configure mode)
+  configureResources.push(server.registerResource(
     "design-guide",
     "inistate://design-guide",
     {
@@ -129,5 +115,7 @@ export function registerResources(server: McpServer) {
         contents: [{ uri: uri.href, text: DESIGN_GUIDE }],
       };
     },
-  );
+  ));
+
+  return { configureResources };
 }
