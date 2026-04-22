@@ -4,10 +4,14 @@ import {
   ResourceTemplate,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as api from "./api.js";
-import { SCHEMA_RUNTIME, SCHEMA_CONFIGURE, DESIGN_GUIDE } from "./schema.js";
+import { SCHEMA_RUNTIME, SCHEMA_CONFIGURE, DESIGN_GUIDE, FRONTEND_GUIDE } from "./schema.js";
 
-export function registerResources(server: McpServer): { configureResources: RegisteredResource[] } {
+export function registerResources(server: McpServer): {
+  configureResources: RegisteredResource[];
+  frontendResources: RegisteredResource[];
+} {
   const configureResources: RegisteredResource[] = [];
+  const frontendResources: RegisteredResource[] = [];
   // 1. inistate://modules — list all discoverable modules
   server.registerResource(
     "modules",
@@ -117,5 +121,21 @@ export function registerResources(server: McpServer): { configureResources: Regi
     },
   ));
 
-  return { configureResources };
+  // 6. inistate://frontend-guide — REST API reference for generated UIs (frontend mode)
+  frontendResources.push(server.registerResource(
+    "frontend-guide",
+    "inistate://frontend-guide",
+    {
+      description:
+        "Load ONLY in frontend mode. REST API reference for hand-written Vue/React/etc. UIs that call api.inistate.com directly (no MCP). Covers: auth header + wsid, workspace/module discovery, list/read/form/submit/history endpoints, filter operator syntax, field value shapes (File/Image/User/Module), two-step presigned uploads, error shapes, and a framework-agnostic client plus minimal Vue and React reference patterns. Token is user-supplied at runtime — never hardcoded. Pair with get_module_schema(tier=extended) for the target module.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => {
+      return {
+        contents: [{ uri: uri.href, text: FRONTEND_GUIDE }],
+      };
+    },
+  ));
+
+  return { configureResources, frontendResources };
 }

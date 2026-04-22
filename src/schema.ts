@@ -8,12 +8,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SCHEMA_PATH = resolve(__dirname, "../inistate-schema.json");
 const DESIGN_GUIDE_PATH = resolve(__dirname, "../facts-module-design-guide.md");
+const FRONTEND_GUIDE_PATH = resolve(__dirname, "../facts-frontend-guide.md");
 
 export const SCHEMA: Record<string, any> = JSON.parse(
   readFileSync(SCHEMA_PATH, "utf-8"),
 );
 
 export const DESIGN_GUIDE: string = readFileSync(DESIGN_GUIDE_PATH, "utf-8");
+
+export const FRONTEND_GUIDE: string = readFileSync(FRONTEND_GUIDE_PATH, "utf-8");
 
 // ---------- Mode-filtered schema views ----------
 //

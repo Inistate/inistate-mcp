@@ -11,30 +11,45 @@ export function createServer(): McpServer {
   });
 
   const { configureTools } = registerTools(server);
-  const { configureResources } = registerResources(server);
+  const { configureResources, frontendResources } = registerResources(server);
   const { configurePrompts } = registerPrompts(server);
 
-  // Start in runtime mode: configure-mode tools/resources/prompts are hidden until switch_mode is called.
-  for (const t of configureTools) t.disable();
-  for (const r of configureResources) r.disable();
-  for (const p of configurePrompts) p.disable();
+  // Initial mode: runtime by default. Set INISTATE_MCP_MODE=configure to expose
+  // the full configure surface on connect. Set INISTATE_MCP_MODE=frontend for
+  // configure + the frontend-guide resource (for generating Vue/React UIs that
+  // call the Inistate REST API directly).
+  const envMode = (process.env.INISTATE_MCP_MODE || "").toLowerCase();
+  const startConfigure = envMode === "configure" || envMode === "full" || envMode === "frontend";
+  const startFrontend = envMode === "frontend";
 
-  let currentMode: "runtime" | "configure" = "runtime";
+  if (!startConfigure) {
+    for (const t of configureTools) t.disable();
+    for (const r of configureResources) r.disable();
+    for (const p of configurePrompts) p.disable();
+  }
+  if (!startFrontend) {
+    for (const r of frontendResources) r.disable();
+  }
+
+  let currentMode: "runtime" | "configure" | "frontend" =
+    startFrontend ? "frontend" : startConfigure ? "configure" : "runtime";
 
   server.registerTool(
     "switch_mode",
     {
       description:
-        "Switch tool surface. 'runtime' (default) exposes entry CRUD only. 'configure' additionally exposes module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas, get_module_schema) plus the schema/configure and design-guide resources. Call with mode='configure' when the user asks to create, modify, or design a module; call with mode='runtime' to collapse back. The tool list refreshes via tools/list_changed after this call.",
+        "Switch tool surface. 'runtime' (default) exposes entry CRUD only. 'configure' adds module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas, get_module_schema) plus schema/configure and design-guide resources. 'frontend' is a superset of 'configure' that also exposes the inistate://frontend-guide resource — REST API reference for generating Vue/React UIs that call the Inistate API directly with a user-supplied token. Use 'frontend' when the user wants to build a custom UI (and optionally iterate on the schema in the same session). The tool/resource list refreshes via list_changed after this call.",
       inputSchema: {
-        mode: z.enum(["runtime", "configure"]).describe("Target mode"),
+        mode: z.enum(["runtime", "configure", "frontend"]).describe("Target mode"),
       },
     },
     async ({ mode }) => {
-      const enable = mode === "configure";
-      for (const t of configureTools) enable ? t.enable() : t.disable();
-      for (const r of configureResources) enable ? r.enable() : r.disable();
-      for (const p of configurePrompts) enable ? p.enable() : p.disable();
+      const enableConfigure = mode === "configure" || mode === "frontend";
+      const enableFrontend = mode === "frontend";
+      for (const t of configureTools) enableConfigure ? t.enable() : t.disable();
+      for (const r of configureResources) enableConfigure ? r.enable() : r.disable();
+      for (const p of configurePrompts) enableConfigure ? p.enable() : p.disable();
+      for (const r of frontendResources) enableFrontend ? r.enable() : r.disable();
       currentMode = mode;
       return {
         content: [
