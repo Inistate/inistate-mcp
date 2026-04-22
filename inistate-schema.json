@@ -862,7 +862,7 @@
         "module": { "type": "string", "description": "Module name from discover_modules." },
         "filters": {
           "type": "object",
-          "description": "Field display names as keys. Simple value = equality ({'Priority': 'High'}). Object value = operator — text: {contains,startsWith,endsWith,excludes,is,not}; number: {min,max,above,below,between}; date: {after,before,upcoming,past,within}; boolean: true/false; user: {is,isMe,not,includes}; module: by referenced entry ID. Combine multiple keys for AND; use {_or: [...]} for OR.",
+          "description": "Field display names as keys. Simple value = equality ({'Priority': 'High'}). Object value = operator — text: {contains,startsWith,endsWith,excludes,is,not}; number: {min,max,above,below,between}; date: {after,before,upcoming,past,within}; boolean: true/false; user: {is,isMe,not,includes}; module: by referenced entry ID. Combine multiple keys for AND; use {or: [...]} for OR.",
           "additionalProperties": true
         },
         "state": { "type": "string", "description": "Filter by state display name (e.g. 'Pending Approval'). MCP resolves to internal state ID." },

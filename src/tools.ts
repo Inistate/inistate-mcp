@@ -293,7 +293,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "list_entries",
     {
       description:
-        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {_or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.",
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         state: z.string().optional(),
