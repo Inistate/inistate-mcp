@@ -116,8 +116,7 @@ npx pm2 save
 Enable startup on reboot:
 
 ```bash
-npx pm2 startup systemd -u ubuntu --hp /home/ubuntu
-# run the command PM2 prints with sudo, then:
+sudo npx pm2 startup systemd -u ubuntu --hp /home/ubuntu
 npx pm2 save
 ```
 
