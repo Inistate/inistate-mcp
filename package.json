@@ -17,7 +17,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "start:http": "node build/http.js",
-    "inspector": "npx @modelcontextprotocol/inspector build/index.js"
+    "inspector": "npx @modelcontextprotocol/inspector build/index.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs --env production",
+    "pm2:restart": "pm2 restart inistate-mcp",
+    "pm2:stop": "pm2 stop inistate-mcp",
+    "pm2:logs": "pm2 logs inistate-mcp"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

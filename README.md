@@ -102,6 +102,35 @@ npm run watch          # Watch mode for TypeScript compilation
 npm run inspector      # Test with MCP Inspector
 ```
 
+## PM2 (Ubuntu/AWS)
+
+Run the HTTP transport in production using PM2:
+
+```bash
+npm install
+npm run build
+npm run pm2:start
+npx pm2 save
+```
+
+Enable startup on reboot:
+
+```bash
+npx pm2 startup systemd -u ubuntu --hp /home/ubuntu
+# run the command PM2 prints with sudo, then:
+npx pm2 save
+```
+
+Common operations:
+
+```bash
+npm run pm2:restart
+npm run pm2:logs
+npm run pm2:stop
+```
+
+Set required environment variables (`INISTATE_API_TOKEN`, and optionally `INISTATE_API_URL`, `INISTATE_WORKSPACE_ID`, `OAUTH_ISSUER_URL`, `INISTATE_APP_URL`) in your shell, PM2 ecosystem `env`, or deployment secret manager before starting.
+
 ## Testing
 
 ### Run all tests
