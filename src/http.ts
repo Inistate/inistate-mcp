@@ -32,7 +32,7 @@ const app = express();
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id, Last-Event-ID, x-workspace-id");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id, mcp-protocol-version, Last-Event-ID, x-workspace-id");
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   if (_req.method === "OPTIONS") {
     res.status(204).end();
