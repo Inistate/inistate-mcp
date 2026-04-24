@@ -1,0 +1,55 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.<org-or-user>/inistate-mcp",
+  "description": "MCP server for the Inistate platform: module discovery, entry management, and activity submission.",
+  "title": "Inistate MCP",
+  "websiteUrl": "https://<your-docs-or-product-url>",
+  "repository": {
+    "url": "https://github.com/<org-or-user>/<repo>",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "inistate-mcp",
+      "version": "1.0.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "INISTATE_API_TOKEN",
+          "description": "Bearer token for Inistate API authentication.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "INISTATE_API_URL",
+          "description": "Inistate API base URL.",
+          "default": "https://app02.apps.inistate.com"
+        },
+        {
+          "name": "INISTATE_WORKSPACE_ID",
+          "description": "Default workspace ID for stateless/remote usage."
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://<your-mcp-host>/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Optional auth header for your remote deployment (e.g., Bearer token).",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
