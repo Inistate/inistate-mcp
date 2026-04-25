@@ -42,7 +42,6 @@ describe("server discovery (runtime mode default)", () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
     // runtime + always-on
-    expect(names).toContain("login");
     expect(names).toContain("list_workspaces");
     expect(names).toContain("set_workspace");
     expect(names).toContain("list_modules");

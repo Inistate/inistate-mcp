@@ -8,8 +8,3 @@ export interface RequestContext {
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
-
-/** Returns true when running inside an HTTP request (stateless mode). */
-export function isHttpRequest(): boolean {
-  return requestContext.getStore() !== undefined;
-}

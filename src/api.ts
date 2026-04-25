@@ -1,4 +1,4 @@
-import { requestContext, isHttpRequest } from "./context.js";
+import { requestContext } from "./context.js";
 
 const BASE_URL = (
   process.env.INISTATE_API_BASE ||
@@ -19,20 +19,14 @@ function log(message: string, data?: Record<string, unknown>): void {
   console.error(JSON.stringify(entry));
 }
 
-// Fallback auth from env vars (used when no per-request auth is provided)
+// Fallback auth from env vars (used when no per-request auth is provided).
+// Stdio mode authenticates exclusively via this API token; HTTP mode prefers
+// the per-request Authorization header from the OAuth flow.
 const ENV_API_KEY =
   process.env.INISTATE_ACCESS_TOKEN ||
   process.env.INISTATE_API_TOKEN ||
   process.env.INISTATE_API_KEY;
 
-// Username/password auth (login → JWT) — only for stdio/session mode
-const USERNAME = process.env.INISTATE_USERNAME;
-const PASSWORD = process.env.INISTATE_PASSWORD;
-
-let jwt: string | null = null;
-let refreshToken: string | null = null;
-let storedUsername: string | null = USERNAME ?? null;
-let storedPassword: string | null = PASSWORD ?? null;
 let workspaceId: string | null = process.env.INISTATE_WORKSPACE_ID ?? null;
 
 export function setWorkspaceId(wsid: string): void {
@@ -61,104 +55,13 @@ function effectiveWorkspaceId(): string | null {
 
 /**
  * Resolve the effective Authorization header value.
- * Priority: per-request context header > env API key > JWT from login
+ * Priority: per-request context header (HTTP/OAuth flow) > env API key (stdio).
  */
 function effectiveAuthorization(): string | null {
   const ctx = requestContext.getStore();
   if (ctx?.authorization) return ctx.authorization;
   if (ENV_API_KEY) return `fsk ${ENV_API_KEY}`;
-  if (jwt) return `Bearer ${jwt}`;
   return null;
-}
-
-function extractTokens(data: Record<string, unknown>): void {
-  const token = data.token ?? data.access_token ?? data.jwt;
-  if (typeof token !== "string") {
-    throw new Error("Login response did not contain a token");
-  }
-  jwt = token;
-  const rt = data.refreshToken ?? data.refresh_token;
-  if (typeof rt === "string") refreshToken = rt;
-}
-
-/**
- * Login with username/password to obtain a JWT + refresh token.
- * Only available in stdio/session mode — in HTTP mode, clients must
- * pass their own Authorization header.
- */
-export async function loginWithCredentials(
-  username: string,
-  password: string,
-): Promise<void> {
-  if (isHttpRequest()) {
-    throw new Error(
-      "Login is not supported in remote/HTTP mode. Pass your API key or JWT via the Authorization header instead."
-    );
-  }
-  const params = new URLSearchParams();
-  params.set("grant_type", "password");
-  params.set("username", username);
-  params.set("password", password);
-  log("login", { username });
-  const res = await fetch(`${BASE_URL}/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: params.toString(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    log("login_failed", { status: res.status, body: text });
-    throw new Error(`Login failed (${res.status}): ${text}`);
-  }
-  log("login_success", { username });
-  const data = (await res.json()) as Record<string, unknown>;
-  extractTokens(data);
-  // Store credentials for future re-login if refresh token is not available
-  storedUsername = username;
-  storedPassword = password;
-}
-
-/**
- * Refresh the JWT using the refresh token.
- * Falls back to full re-login if refresh fails or no refresh token exists.
- */
-async function refreshAuth(): Promise<boolean> {
-  if (refreshToken) {
-    try {
-      const res = await fetch(`${BASE_URL}/token/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ refreshToken }),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as Record<string, unknown>;
-        extractTokens(data);
-        return true;
-      }
-    } catch {
-      // refresh failed — fall through to re-login
-    }
-  }
-  // Fall back to re-login with stored credentials
-  if (storedUsername && storedPassword) {
-    try {
-      await loginWithCredentials(storedUsername, storedPassword);
-      return true;
-    } catch {
-      // re-login also failed
-    }
-  }
-  return false;
-}
-
-async function ensureAuth(): Promise<void> {
-  // Per-request auth from HTTP header takes priority — no login needed
-  const ctx = requestContext.getStore();
-  if (ctx?.authorization) return;
-  if (ENV_API_KEY || jwt) return;
-  if (storedUsername && storedPassword) {
-    await loginWithCredentials(storedUsername, storedPassword);
-  }
 }
 
 function buildHeaders(contentType?: string): Record<string, string> {
@@ -232,38 +135,22 @@ async function handleResponse(res: Response): Promise<unknown> {
   return data;
 }
 
-/** Can we attempt a token refresh? Only for JWT auth, not API key or pass-through. */
-function canRefresh(): boolean {
-  const ctx = requestContext.getStore();
-  if (ctx?.authorization) return false; // pass-through auth — server can't refresh client's token
-  return !ENV_API_KEY && (!!refreshToken || (!!storedUsername && !!storedPassword));
-}
-
 /**
- * Core request function with automatic 401 refresh+retry.
+ * Core request function. The MCP server no longer manages tokens itself —
+ * stdio uses a long-lived API token, HTTP/OAuth passes the client's bearer
+ * through. On 401, the caller (or in HTTP mode the OAuth client) is
+ * responsible for refreshing.
  */
 async function request(
   url: string,
   init: RequestInit,
   getHeaders: () => Record<string, string>,
 ): Promise<Response> {
-  await ensureAuth();
   const method = init.method || "GET";
   log("request", { method, url });
   const start = Date.now();
   const res = await fetch(url, { ...init, headers: getHeaders() });
   log("response", { method, url, status: res.status, ms: Date.now() - start });
-  if (res.status === 401 && canRefresh()) {
-    log("auth_refresh", { url });
-    const refreshed = await refreshAuth();
-    if (refreshed) {
-      log("request_retry", { method, url });
-      const retryStart = Date.now();
-      const retryRes = await fetch(url, { ...init, headers: getHeaders() });
-      log("response_retry", { method, url, status: retryRes.status, ms: Date.now() - retryStart });
-      return retryRes;
-    }
-  }
   return res;
 }
 

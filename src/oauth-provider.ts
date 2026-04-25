@@ -116,11 +116,18 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     // Redirect to the app's login page with MCP callback params.
     // The path is configurable via INISTATE_APP_LOGIN_PATH; defaults to "/#/login"
     // (Vue hash routing places query params after the hash).
+    // mcp_client_name is forwarded so the login banner can read e.g.
+    // "Sign in to authorize Claude" instead of "authorize mcp.inistate.com".
+    // The name comes from DCR (RFC 7591), so it's client-supplied — Vue must
+    // treat it as untrusted display text (no HTML, length-cap on render side).
     const callbackUrl = `${this.mcpUrl}/authorize/callback`;
     const query = new URLSearchParams({
       mcp_nonce: nonce,
       mcp_callback: callbackUrl,
     });
+    if (client.client_name) {
+      query.set("mcp_client_name", client.client_name);
+    }
     const loginUrl = `${this.appUrl}${this.loginPath}?${query.toString()}`;
 
     res.redirect(302, loginUrl);
