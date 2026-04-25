@@ -22,6 +22,7 @@ const BASE_URL =
 
 const ISSUER_URL = process.env.OAUTH_ISSUER_URL || `http://localhost:${PORT}`;
 const APP_URL = process.env.INISTATE_APP_URL || "https://app.inistate.com";
+const APP_LOGIN_PATH = process.env.INISTATE_APP_LOGIN_PATH || "/#/login";
 
 const app = express();
 
@@ -45,7 +46,9 @@ app.use((_req, res, next) => {
 /*  OAuth 2.0 provider                                                 */
 /* ------------------------------------------------------------------ */
 
-const oauthProvider = new InistateOAuthProvider(BASE_URL, APP_URL, ISSUER_URL);
+const oauthProvider = new InistateOAuthProvider(BASE_URL, APP_URL, ISSUER_URL, APP_LOGIN_PATH);
+
+const PROTECTED_RESOURCE_METADATA_URL = `${ISSUER_URL.replace(/\/$/, "")}/.well-known/oauth-protected-resource/mcp`;
 
 // Mount the SDK's OAuth router at root
 // Handles: /.well-known/oauth-authorization-server, /authorize, /token, /register
@@ -227,13 +230,34 @@ app.get("/health", (_req, res) => {
 /*  MCP endpoint (stateless)                                           */
 /* ------------------------------------------------------------------ */
 
+function sendUnauthorized(res: express.Response, description: string) {
+  res.set(
+    "WWW-Authenticate",
+    `Bearer realm="mcp", error="invalid_token", error_description="${description}", resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`,
+  );
+  res.status(401).json({
+    jsonrpc: "2.0",
+    error: { code: -32001, message: description },
+    id: null,
+  });
+}
+
+app.get("/mcp", (_req, res) => sendUnauthorized(res, "Missing Authorization header"));
+app.delete("/mcp", (_req, res) => sendUnauthorized(res, "Missing Authorization header"));
+
 app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) => {
   try {
+    const authHeader = req.headers["authorization"] as string | undefined;
+    if (!authHeader || !/^Bearer\s+\S+/i.test(authHeader)) {
+      sendUnauthorized(res, "Missing or malformed Authorization header");
+      return;
+    }
+
     const body = JSON.parse(req.body.toString());
 
     // Extract per-request auth context from HTTP headers
     const ctx: RequestContext = {
-      authorization: req.headers["authorization"] as string | undefined,
+      authorization: authHeader,
       workspaceId: req.headers["x-workspace-id"] as string | undefined,
     };
 

@@ -11,6 +11,25 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 
 const CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Decode a JWT payload without verifying the signature. Returns `undefined` if malformed. */
+function decodeJwtExp(jwt: string): number | undefined {
+  const parts = jwt.split(".");
+  if (parts.length < 2) return undefined;
+  try {
+    const payload = Buffer.from(parts[1], "base64url").toString("utf8");
+    const claims = JSON.parse(payload) as { exp?: unknown };
+    return typeof claims.exp === "number" ? claims.exp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function expiresInFromExp(exp: number | undefined): number | undefined {
+  if (exp === undefined) return undefined;
+  const remaining = exp - Math.floor(Date.now() / 1000);
+  return remaining > 0 ? remaining : 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  In-memory stores                                                   */
 /* ------------------------------------------------------------------ */
@@ -63,12 +82,19 @@ export class InistateOAuthProvider implements OAuthServerProvider {
   private baseUrl: string;
   private appUrl: string;
   private mcpUrl: string;
+  private loginPath: string;
 
-  constructor(inistateBaseUrl: string, appUrl: string, mcpUrl: string) {
+  constructor(
+    inistateBaseUrl: string,
+    appUrl: string,
+    mcpUrl: string,
+    loginPath: string = "/#/login",
+  ) {
     this.clientsStore = new InMemoryClientsStore();
     this.baseUrl = inistateBaseUrl;
-    this.appUrl = appUrl;
+    this.appUrl = appUrl.replace(/\/$/, "");
     this.mcpUrl = mcpUrl;
+    this.loginPath = loginPath.startsWith("/") ? loginPath : `/${loginPath}`;
 
     // Periodic cleanup of expired codes and pending auths
     setInterval(() => this.cleanup(), 60_000);
@@ -87,17 +113,17 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       createdAt: Date.now(),
     });
 
-    // Redirect to the app's existing login page with MCP callback params.
-    // Vue Router uses hash mode, so query params must go after the hash:
-    //   app.inistate.com/#/login?mcp_nonce=xxx&mcp_callback=yyy
+    // Redirect to the app's login page with MCP callback params.
+    // The path is configurable via INISTATE_APP_LOGIN_PATH; defaults to "/#/login"
+    // (Vue hash routing places query params after the hash).
     const callbackUrl = `${this.mcpUrl}/authorize/callback`;
     const query = new URLSearchParams({
       mcp_nonce: nonce,
       mcp_callback: callbackUrl,
     });
-    const loginUrl = `${this.appUrl}/#/login?${query.toString()}`;
+    const loginUrl = `${this.appUrl}${this.loginPath}?${query.toString()}`;
 
-    res.redirect(302, loginUrl.toString());
+    res.redirect(302, loginUrl);
   }
 
   /**
@@ -171,6 +197,8 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       access_token: stored.jwt,
       token_type: "bearer",
     };
+    const expiresIn = expiresInFromExp(decodeJwtExp(stored.jwt));
+    if (expiresIn !== undefined) tokens.expires_in = expiresIn;
     if (stored.refreshToken) tokens.refresh_token = stored.refreshToken;
     return tokens;
   }
@@ -209,6 +237,8 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       access_token: token,
       token_type: "bearer",
     };
+    const expiresIn = expiresInFromExp(decodeJwtExp(token));
+    if (expiresIn !== undefined) tokens.expires_in = expiresIn;
     const rt = data.refreshToken ?? data.refresh_token;
     if (typeof rt === "string") tokens.refresh_token = rt;
     return tokens;
@@ -216,6 +246,8 @@ export class InistateOAuthProvider implements OAuthServerProvider {
 
   /* ---- Token verification ---- */
   async verifyAccessToken(token: string): Promise<AuthInfo> {
+    const expiresAt = decodeJwtExp(token);
+
     // Check our in-memory store first
     const stored = this.tokens.get(token);
     if (stored) {
@@ -223,6 +255,7 @@ export class InistateOAuthProvider implements OAuthServerProvider {
         token,
         clientId: stored.clientId,
         scopes: [],
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
       };
     }
 
@@ -232,6 +265,7 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       token,
       clientId: "legacy",
       scopes: [],
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
     };
   }
 
