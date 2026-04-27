@@ -3,8 +3,10 @@ import { z } from "zod";
 import { registerTools } from "./tools.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
+import { requestContext } from "./context.js";
+import { setUserMode, type Mode } from "./mode-store.js";
 
-export function createServer(): McpServer {
+export function createServer(initialMode?: Mode): McpServer {
   const server = new McpServer({
     name: "inistate-mcp",
     version: "1.0.0",
@@ -14,13 +16,21 @@ export function createServer(): McpServer {
   const { configureResources, frontendResources } = registerResources(server);
   const { configurePrompts } = registerPrompts(server);
 
-  // Initial mode: runtime by default. Set INISTATE_MCP_MODE=configure to expose
-  // the full configure surface on connect. Set INISTATE_MCP_MODE=frontend for
-  // configure + the frontend-guide resource (for generating Vue/React UIs that
-  // call the Inistate REST API directly).
+  // Initial mode: per-request override > env var > runtime default.
+  // INISTATE_MCP_MODE=configure|full exposes the configure surface on connect.
+  // INISTATE_MCP_MODE=frontend adds the frontend-guide resource on top.
+  // initialMode lets the HTTP transport (stateless, fresh server per request)
+  // restore a per-user choice from the mode store.
   const envMode = (process.env.INISTATE_MCP_MODE || "").toLowerCase();
-  const startConfigure = envMode === "configure" || envMode === "full" || envMode === "frontend";
-  const startFrontend = envMode === "frontend";
+  const envResolved: Mode =
+    envMode === "frontend"
+      ? "frontend"
+      : envMode === "configure" || envMode === "full"
+        ? "configure"
+        : "runtime";
+  const startMode: Mode = initialMode ?? envResolved;
+  const startConfigure = startMode === "configure" || startMode === "frontend";
+  const startFrontend = startMode === "frontend";
 
   if (!startConfigure) {
     for (const t of configureTools) t.disable();
@@ -31,8 +41,7 @@ export function createServer(): McpServer {
     for (const r of frontendResources) r.disable();
   }
 
-  let currentMode: "runtime" | "configure" | "frontend" =
-    startFrontend ? "frontend" : startConfigure ? "configure" : "runtime";
+  let currentMode: Mode = startMode;
 
   server.registerTool(
     "switch_mode",
@@ -51,6 +60,11 @@ export function createServer(): McpServer {
       for (const p of configurePrompts) enableConfigure ? p.enable() : p.disable();
       for (const r of frontendResources) enableFrontend ? r.enable() : r.disable();
       currentMode = mode;
+
+      // Persist across the stateless HTTP transport's per-request servers.
+      const userId = requestContext.getStore()?.userId;
+      if (userId) setUserMode(userId, mode);
+
       return {
         content: [
           {

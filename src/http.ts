@@ -11,7 +11,8 @@ import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./server.js";
 import { requestContext, RequestContext } from "./context.js";
-import { InistateOAuthProvider } from "./oauth-provider.js";
+import { InistateOAuthProvider, decodeJwtSub } from "./oauth-provider.js";
+import { getUserMode } from "./mode-store.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const BASE_URL =
@@ -117,9 +118,15 @@ app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) =>
     const body = JSON.parse(req.body.toString());
 
     // Extract per-request auth context from HTTP headers
+    const bearer = authHeader.replace(/^Bearer\s+/i, "");
+    const userId = decodeJwtSub(bearer);
+    const mode = userId ? getUserMode(userId) : undefined;
+
     const ctx: RequestContext = {
       authorization: authHeader,
       workspaceId: req.headers["x-workspace-id"] as string | undefined,
+      userId,
+      mode,
     };
 
     await requestContext.run(ctx, async () => {
@@ -127,7 +134,7 @@ app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) =>
         sessionIdGenerator: undefined,
       });
 
-      const server = createServer();
+      const server = createServer(mode);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
 

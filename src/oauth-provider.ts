@@ -24,6 +24,19 @@ function decodeJwtExp(jwt: string): number | undefined {
   }
 }
 
+/** Decode the `sub` claim from a JWT payload without verifying the signature. */
+export function decodeJwtSub(jwt: string): string | undefined {
+  const parts = jwt.split(".");
+  if (parts.length < 2) return undefined;
+  try {
+    const payload = Buffer.from(parts[1], "base64url").toString("utf8");
+    const claims = JSON.parse(payload) as { sub?: unknown };
+    return typeof claims.sub === "string" ? claims.sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function expiresInFromExp(exp: number | undefined): number | undefined {
   if (exp === undefined) return undefined;
   const remaining = exp - Math.floor(Date.now() / 1000);
