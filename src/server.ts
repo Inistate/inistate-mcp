@@ -16,8 +16,9 @@ export function createServer(initialMode?: Mode): McpServer {
   const { configureResources, frontendResources } = registerResources(server);
   const { configurePrompts } = registerPrompts(server);
 
-  // Initial mode: per-request override > env var > runtime default.
-  // INISTATE_MCP_MODE=configure|full exposes the configure surface on connect.
+  // Initial mode: per-request override > env var > configure default.
+  // Default exposes runtime CRUD + design (configure) tools on connect.
+  // INISTATE_MCP_MODE=runtime narrows to entry CRUD only.
   // INISTATE_MCP_MODE=frontend adds the frontend-guide resource on top.
   // initialMode lets the HTTP transport (stateless, fresh server per request)
   // restore a per-user choice from the mode store.
@@ -25,9 +26,9 @@ export function createServer(initialMode?: Mode): McpServer {
   const envResolved: Mode =
     envMode === "frontend"
       ? "frontend"
-      : envMode === "configure" || envMode === "full"
-        ? "configure"
-        : "runtime";
+      : envMode === "runtime"
+        ? "runtime"
+        : "configure";
   const startMode: Mode = initialMode ?? envResolved;
   const startConfigure = startMode === "configure" || startMode === "frontend";
   const startFrontend = startMode === "frontend";
@@ -47,7 +48,7 @@ export function createServer(initialMode?: Mode): McpServer {
     "switch_mode",
     {
       description:
-        "Switch tool surface. 'runtime' (default) exposes entry CRUD only. 'configure' adds module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas, get_module_schema) plus schema/configure and design-guide resources. 'frontend' is a superset of 'configure' that also exposes the inistate://frontend-guide resource — REST API reference for generating Vue/React UIs that call the Inistate API directly with a user-supplied token. Use 'frontend' when the user wants to build a custom UI (and optionally iterate on the schema in the same session). The tool/resource list refreshes via list_changed after this call.",
+        "Switch tool surface. 'configure' (default) exposes entry CRUD plus module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas, get_module_schema) and schema/configure and design-guide resources. 'runtime' narrows to entry CRUD only. 'frontend' is a superset of 'configure' that also exposes the inistate://frontend-guide resource — REST API reference for generating Vue/React UIs that call the Inistate API directly with a user-supplied token. Use 'frontend' when the user wants to build a custom UI (and optionally iterate on the schema in the same session). The tool/resource list refreshes via list_changed after this call.",
       inputSchema: {
         mode: z.enum(["runtime", "configure", "frontend"]).describe("Target mode"),
       },

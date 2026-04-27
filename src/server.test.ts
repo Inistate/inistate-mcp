@@ -23,6 +23,9 @@ beforeAll(async () => {
       ...process.env,
       // No API token — we only test local tools
       INISTATE_ACCESS_TOKEN: "",
+      // Pin to runtime so the discovery test exercises the narrowed surface;
+      // the default startup mode is now `configure`.
+      INISTATE_MCP_MODE: "runtime",
     },
   });
   client = new Client({ name: "test-client", version: "1.0.0" });
