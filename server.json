@@ -1,11 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.<org-or-user>/inistate-mcp",
+  "name": "io.github.inistate/inistate-mcp",
   "description": "MCP server for the Inistate platform: module discovery, entry management, and activity submission.",
   "title": "Inistate MCP",
-  "websiteUrl": "https://<your-docs-or-product-url>",
+  "websiteUrl": "https://inistate.com",
   "repository": {
-    "url": "https://github.com/<org-or-user>/<repo>",
+    "url": "https://github.com/inistate/inistate-mcp",
     "source": "github"
   },
   "version": "1.0.0",
@@ -29,7 +29,7 @@
         {
           "name": "INISTATE_API_URL",
           "description": "Inistate API base URL.",
-          "default": "https://app02.apps.inistate.com"
+          "default": "https://app.inistate.com"
         },
         {
           "name": "INISTATE_WORKSPACE_ID",
@@ -41,7 +41,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://<your-mcp-host>/mcp",
+      "url": "https://mcp.inistate.com/mcp",
       "headers": [
         {
           "name": "Authorization",

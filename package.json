@@ -1,5 +1,6 @@
 {
   "name": "inistate-mcp",
+  "mcpName": "io.github.inistate/inistate-mcp",
   "version": "1.0.0",
   "description": "MCP server for the Inistate platform — module discovery, entry management, and activity submission",
   "type": "module",
