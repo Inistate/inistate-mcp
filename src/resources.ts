@@ -24,7 +24,7 @@ export function registerResources(server: McpServer): {
     async (uri) => {
       const data = await api.get("/api/mcp/");
       return {
-        contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2) }],
+        contents: [{ uri: uri.href, text: JSON.stringify(data) }],
       };
     },
   );
@@ -46,7 +46,7 @@ export function registerResources(server: McpServer): {
         `/api/mcp/${api.enc(moduleName)}?tier=basic`,
       );
       return {
-        contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2) }],
+        contents: [{ uri: uri.href, text: JSON.stringify(data) }],
       };
     },
   );
@@ -68,9 +68,40 @@ export function registerResources(server: McpServer): {
         `/api/mcp/${api.enc(moduleName)}?tier=extended`,
       );
       return {
-        contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2) }],
+        contents: [{ uri: uri.href, text: JSON.stringify(data) }],
       };
     },
+  );
+
+  // 4. inistate://guardrails — server-side submit_activity rules
+  server.registerResource(
+    "guardrails",
+    "inistate://guardrails",
+    {
+      description:
+        "Server-enforced rules for submit_activity. Read once per session — they apply silently and only surface as structured errors when triggered.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          text: `# submit_activity guard rules
+
+The MCP server enforces four rules before forwarding submissions to the API.
+Each rule, when triggered, returns a structured error with an \`agent_action\`
+field telling you exactly what to do.
+
+1. **Human actor** — activities with \`actor: "human"\` are rejected. AI cannot execute them under any condition. \`confirmed\` does not unlock.
+2. **Hybrid actor** — activities with \`actor: "hybrid"\` require \`confirmed: true\`. Show the planned submission to the user, get explicit approval, then retry with \`confirmed: true\`.
+3. **State change** — \`activity: "changeStatus"\` and any \`state\` override require \`confirmed: true\`. Do not initiate state changes on your own.
+4. **Confidence inflation** — after a \`flagged: true\` response, resubmitting the same \`(module, entryId, activity)\` with higher confidence is rejected. Surface the flag to the user; only retry with \`confirmed: true\` if they explicitly authorize.
+
+Standard activities (\`create\`, \`edit\`, \`delete\`, \`comment\`, \`duplicate\`, \`manage\`, \`view\`) skip the actor check but still trigger the state-change and confidence-inflation rules where applicable.
+`,
+        },
+      ],
+    }),
   );
 
   // 4a. inistate://schema/runtime — runtime operations (default)
@@ -84,7 +115,7 @@ export function registerResources(server: McpServer): {
     },
     async (uri) => {
       return {
-        contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_RUNTIME, null, 2) }],
+        contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_RUNTIME) }],
       };
     },
   );
@@ -100,7 +131,7 @@ export function registerResources(server: McpServer): {
     },
     async (uri) => {
       return {
-        contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_CONFIGURE, null, 2) }],
+        contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_CONFIGURE) }],
       };
     },
   ));

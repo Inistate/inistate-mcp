@@ -122,14 +122,14 @@ async function handleResponse(res: Response): Promise<unknown> {
 
   // §14.8 — truncate large list responses to avoid blowing up agent context
   if (
-    text.length > 100_000 &&
+    text.length > 30_000 &&
     data &&
     typeof data === "object" &&
     Array.isArray(data.list)
   ) {
-    data.list = data.list.slice(0, 20);
+    data.list = data.list.slice(0, 10);
     data._truncated = true;
-    data._truncated_message = `Response truncated to 20 of ${data.totalItems ?? "unknown"} items. Use pagination (currentPage, pageSize) to retrieve more.`;
+    data._truncated_message = `Response truncated to 10 of ${data.totalItems ?? "unknown"} items. Use pagination (currentPage, pageSize) to retrieve more.`;
   }
 
   return data;

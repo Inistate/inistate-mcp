@@ -4,6 +4,12 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import * as api from "./api.js";
 import {
+  clearFlagged,
+  evaluateActivity,
+  getPriorFlag,
+  recordFlagged,
+} from "./activity-guard.js";
+import {
   designWorkflow,
   validateDesign,
 } from "./schema.js";
@@ -22,7 +28,7 @@ function log(tool: string, detail: string) {
 
 function ok(data: unknown) {
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(data) }],
   };
 }
 
@@ -33,7 +39,7 @@ function err(e: unknown) {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify((e as any).structured, null, 2),
+          text: JSON.stringify((e as any).structured),
         },
       ],
     };
@@ -378,7 +384,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "submit_activity",
     {
       description:
-        "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED for every submission (reasoning + model + confidence at minimum) — submissions without it are rejected. If ai.confidence < the activity's confidence_threshold, the state transition is suppressed and the entry is flagged for human review. See ActivitySubmission in inistate://schema/runtime for full input shapes.",
+        "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime.",
       inputSchema: {
         module: z.string(),
         activity: z.string().default("create"),
@@ -410,6 +416,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
             prompt_hash: z.string().optional(),
           })
           .describe("REQUIRED — AI agent traceability"),
+        confirmed: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true only after explicit user authorization. Required for: changeStatus, state override, hybrid actor, retry after flag. Does not unlock human-actor activities. See inistate://guardrails.",
+          ),
         workspaceId: wsParam,
       },
     },
@@ -424,10 +436,28 @@ Load resource inistate://schema before modifying to know valid field types, colo
       assignees,
       due,
       ai,
+      confirmed,
       workspaceId,
     }) => {
       try {
         applyWorkspace(workspaceId);
+        const guard = await evaluateActivity({
+          module: moduleName,
+          activity,
+          entryId,
+          entryIds,
+          state,
+          confidence: ai?.confidence ?? 0,
+          confirmed,
+        });
+        if (!guard.ok) {
+          const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+          log(
+            "submit_activity",
+            `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${guard.structured.error}`,
+          );
+          return err({ structured: guard.structured });
+        }
         // Normalize file field inputs: remap 'url' → 'path' if client sent { name, url } instead of { name, path }
         if (input) {
           for (const key of Object.keys(input)) {
@@ -466,11 +496,243 @@ Load resource inistate://schema before modifying to know valid field types, colo
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} payload=${JSON.stringify(body)}`);
         const data = await api.post("/api/mcp/activity", body);
-        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ok`);
+        const flagged =
+          data && typeof data === "object" && (data as Record<string, unknown>).flagged === true;
+        const flagTargets: Array<string | number | undefined> =
+          entryIds && entryIds.length > 0 ? entryIds : [entryId];
+        for (const t of flagTargets) {
+          if (flagged) {
+            recordFlagged(moduleName, t, activity, ai?.confidence ?? 0);
+          } else {
+            clearFlagged(moduleName, t, activity);
+          }
+        }
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ${flagged ? "flagged" : "ok"}`);
         return ok(data);
       } catch (e) {
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        return err(e);
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════
+  // 9b. submit_activities (bulk)
+  // ═══════════════════════════════════════════
+  server.registerTool(
+    "submit_activities",
+    {
+      description:
+        "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once — saves substantial agent tokens by collapsing N tool turns into one.\n\nShape: top-level `module`, `activity`, and a default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`). When an item supplies its own `ai`, it wholly replaces the top-level `ai` for that item — no partial merge.\n\nExecution: items run sequentially fail-soft on the server. One item's failure does not abort the rest; per-item outcomes (success/failure, entryId, flagged, validation details) are returned in `results`. Use `clientRef` to correlate items to your local plan.\n\nLimits: max 100 items per request. Beyond that, chunk and retry.\n\nGuardrails: same `submit_activity` rules apply at the batch level — actor='human' rejects the whole batch; actor='hybrid' or activity='changeStatus' or top-level `state` requires `confirmed: true`. Per-item state overrides also require `confirmed: true`.",
+      inputSchema: {
+        module: z.string(),
+        activity: z.string().default("create"),
+        ai: z
+          .object({
+            reasoning: z.string(),
+            model: z.string(),
+            confidence: z.number().min(0).max(1),
+            sources: z
+              .array(
+                z.object({
+                  type: z.string().optional(),
+                  reference: z.string().optional(),
+                  excerpt: z.string().optional(),
+                }),
+              )
+              .optional(),
+            model_version: z.string().optional(),
+            prompt_hash: z.string().optional(),
+          })
+          .describe("Default AI traceability applied to every item that does not specify its own."),
+        items: z
+          .array(
+            z.object({
+              entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
+              input: z
+                .record(z.unknown())
+                .optional()
+                .describe("Field values keyed by display name. Same shape as submit_activity.input."),
+              state: z.string().optional().describe("Per-item target state name"),
+              comment: z.string().optional(),
+              assignees: z.array(z.string()).optional(),
+              due: z.string().optional().describe("ISO 8601"),
+              ai: z
+                .object({
+                  reasoning: z.string(),
+                  model: z.string(),
+                  confidence: z.number().min(0).max(1),
+                  sources: z
+                    .array(
+                      z.object({
+                        type: z.string().optional(),
+                        reference: z.string().optional(),
+                        excerpt: z.string().optional(),
+                      }),
+                    )
+                    .optional(),
+                  model_version: z.string().optional(),
+                  prompt_hash: z.string().optional(),
+                })
+                .optional()
+                .describe("Optional per-item ai override. Wholly replaces top-level ai for this item."),
+              clientRef: z
+                .string()
+                .optional()
+                .describe("Optional caller-supplied correlation id, echoed back on the result."),
+            }),
+          )
+          .min(1)
+          .max(100)
+          .describe("1-100 items. Each item carries only what differs from the top-level activity."),
+        confirmed: z
+          .boolean()
+          .optional()
+          .describe(
+            "REQUIRED when the activity is 'changeStatus', any per-item or top-level `state` override is supplied, or the activity's actor is 'hybrid'. Set true ONLY after surfacing the planned bulk action to the user.",
+          ),
+        workspaceId: wsParam,
+      },
+    },
+    async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
+      try {
+        applyWorkspace(workspaceId);
+
+        // Batch-level guard for actor (human/hybrid) and changeStatus rules,
+        // which apply uniformly to the whole batch since module + activity are shared.
+        const guard = await evaluateActivity({
+          module: moduleName,
+          activity,
+          confidence: ai?.confidence ?? 0,
+          confirmed,
+        });
+        if (!guard.ok) {
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: ${guard.structured.error}`,
+          );
+          return err({ structured: guard.structured });
+        }
+
+        // Any per-item state override also requires explicit confirmation.
+        const itemsWithState = items
+          .map((it, i) => ({ idx: i, state: it.state }))
+          .filter((x) => !!x.state);
+        if (itemsWithState.length > 0 && !confirmed) {
+          const structured = {
+            error: "state_override_requires_confirmation",
+            message:
+              "One or more items pass a 'state' override. Bulk state changes require explicit user authorization — surface the planned changes and resubmit with confirmed: true.",
+            activity,
+            items: itemsWithState,
+            agent_action:
+              "Show the user the per-item state changes you intend to make, then resubmit with confirmed: true.",
+          };
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: state_override_requires_confirmation (${itemsWithState.length} items)`,
+          );
+          return err({ structured });
+        }
+
+        // Per-item confidence inflation: each item may override `ai`, so we
+        // can't fold this into the batch-level evaluateActivity call.
+        if (!confirmed) {
+          const inflated: Array<{ idx: number; entryId?: string | number; previous: number; current: number }> = [];
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const itemAi = item.ai ?? ai;
+            const conf = itemAi?.confidence ?? 0;
+            const prior = getPriorFlag(moduleName, item.entryId, activity);
+            if (prior && conf > prior.confidence + 1e-6) {
+              inflated.push({ idx: i, entryId: item.entryId, previous: prior.confidence, current: conf });
+            }
+          }
+          if (inflated.length > 0) {
+            const structured = {
+              error: "confidence_inflation_blocked",
+              message:
+                "One or more items target entries that were previously flagged for human review and would be resubmitted with a higher confidence. Surface the flag(s) to the user.",
+              activity,
+              items: inflated,
+              agent_action:
+                "Stop. Tell the user which entries were flagged. Do not retry these items with a higher confidence on your own. If the user explicitly authorizes proceeding, resubmit with confirmed: true.",
+            };
+            log(
+              "submit_activities",
+              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: confidence_inflation_blocked (${inflated.length} items)`,
+            );
+            return err({ structured });
+          }
+        }
+
+        // Normalize file fields per item: remap 'url' → 'path' if needed.
+        for (const item of items) {
+          if (!item.input) continue;
+          for (const key of Object.keys(item.input)) {
+            const val = (item.input as Record<string, unknown>)[key];
+            if (val && typeof val === "object" && !Array.isArray(val)) {
+              const obj = val as Record<string, unknown>;
+              if (obj.url && !obj.path) {
+                obj.path = obj.url;
+                delete obj.url;
+              }
+            } else if (Array.isArray(val)) {
+              for (const sub of val) {
+                if (sub && typeof sub === "object") {
+                  const obj = sub as Record<string, unknown>;
+                  if (obj.url && !obj.path) {
+                    obj.path = obj.url;
+                    delete obj.url;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        const body: Record<string, unknown> = {
+          module: moduleName,
+          activity,
+          items,
+        };
+        if (ai) body.ai = ai;
+
+        log(
+          "submit_activities",
+          `module=${moduleName} activity=${activity} count=${items.length}`,
+        );
+        const data = (await api.post("/api/mcp/activity/bulk", body)) as Record<string, unknown>;
+
+        // Update flag cache from per-item results so future submit_activity
+        // calls on the same entries see the prior flag.
+        const results = Array.isArray((data as { results?: unknown }).results)
+          ? ((data as { results: Array<Record<string, unknown>> }).results)
+          : [];
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          const itemAi = items[i]?.ai ?? ai;
+          const conf = itemAi?.confidence ?? 0;
+          const targetEntryId = (r.entryId as string | number | undefined) ?? items[i]?.entryId;
+          if (r.flagged === true) {
+            recordFlagged(moduleName, targetEntryId, activity, conf);
+          } else if (r.success === true) {
+            clearFlagged(moduleName, targetEntryId, activity);
+          }
+        }
+
+        const summary = (data as { summary?: { succeeded?: number; failed?: number; flagged?: number } }).summary;
+        log(
+          "submit_activities",
+          `module=${moduleName} activity=${activity} count=${items.length} → ok=${summary?.succeeded ?? "?"} fail=${summary?.failed ?? "?"} flagged=${summary?.flagged ?? "?"}`,
+        );
+        return ok(data);
+      } catch (e) {
+        log(
+          "submit_activities",
+          `module=${moduleName} activity=${activity} count=${items.length} → FAILED: ${e instanceof Error ? e.message : String(e)}`,
+        );
         return err(e);
       }
     },
@@ -755,7 +1017,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (flows) body.flows = flows;
         log("create_module", `name=${name}`);
         const data = await api.post(
-          `/api/configure/`,
+          `/api/configure/${api.enc(name)}`,
           body,
         );
         log("create_module", `name=${name} → ok`);
@@ -776,14 +1038,14 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       description:
         "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain stable ids, then validate_design before submitting.",
       inputSchema: {
-        id: z.string().describe("Module ID from get_module_canvas"),
+        module: z.string().describe("Current module name (used in URL path)"),
         name: z.string().optional().describe("New module name (for renaming)"),
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
     },
     async ({
-      id,
+      module: moduleName,
       name,
       icon,
       description: desc,
@@ -795,7 +1057,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     }) => {
       try {
         applyWorkspace(workspaceId);
-        const body: Record<string, unknown> = { id };
+        const body: Record<string, unknown> = {};
         if (name) body.name = name;
         if (icon) body.icon = icon;
         if (desc) body.description = desc;
@@ -803,15 +1065,15 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
-        log("update_module", `id=${id}${name ? ` name=${name}` : ""}`);
+        log("update_module", `module=${moduleName}${name ? ` newName=${name}` : ""}`);
         const data = await api.put(
-          `/api/configure/`,
+          `/api/configure/${api.enc(moduleName)}`,
           body,
         );
-        log("update_module", `id=${id} → ok`);
+        log("update_module", `module=${moduleName} → ok`);
         return ok(data);
       } catch (e) {
-        log("update_module", `id=${id} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        log("update_module", `module=${moduleName} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }
     },

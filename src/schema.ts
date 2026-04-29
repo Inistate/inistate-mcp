@@ -71,6 +71,7 @@ const RUNTIME_OPERATIONS = [
   "get_entry",
   "get_form",
   "submit_activity",
+  "submit_activities",
   "get_history",
   "request_upload_url",
   "confirm_upload",
