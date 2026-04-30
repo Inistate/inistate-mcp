@@ -136,6 +136,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
   server.registerTool(
     "list_workspaces",
     {
+      title: "List Workspaces",
       description:
         "List workspaces the current user has access to. Call set_workspace to select one before any module or entry tools. This is typically the first tool to call in any session.",
       inputSchema: {
@@ -144,6 +145,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
           .optional()
           .describe("Optional name filter (case-insensitive)"),
       },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
     async ({ search }) => {
       try {
@@ -162,6 +164,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
   server.registerTool(
     "set_workspace",
     {
+      title: "Set Active Workspace",
       description: `Set the active workspace for the current session. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
 
 Workflow sequences after workspace is set:
@@ -174,6 +177,7 @@ Workflow sequences after workspace is set:
           .string()
           .describe("Workspace ID from list_workspaces"),
       },
+      annotations: { readOnlyHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       try {
@@ -192,11 +196,13 @@ Workflow sequences after workspace is set:
   server.registerTool(
     "list_modules",
     {
+      title: "List Modules",
       description:
         "List all discoverable modules in the current workspace. Call this to find module names for execute, modify, and query operations.",
       inputSchema: {
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       try {
@@ -215,6 +221,7 @@ Workflow sequences after workspace is set:
   configureTools.push(server.registerTool(
     "get_module_schema",
     {
+      title: "Get Module Schema",
       description:
         "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.",
       inputSchema: {
@@ -227,6 +234,7 @@ Workflow sequences after workspace is set:
           ),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ module: moduleName, tier, workspaceId }) => {
       try {
@@ -247,6 +255,7 @@ Workflow sequences after workspace is set:
   configureTools.push(server.registerTool(
     "get_module_canvas",
     {
+      title: "Get Module Canvas",
       description: `Get the full module definition with stable IDs. The output is round-trippable — modify and send back via update_module. Use this when modifying a module to preserve IDs for renaming.
 
 Modify workflow: list_modules → get_module_canvas → (apply changes) → validate_design → update_module.
@@ -255,6 +264,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         module: z.string().describe("Module name or numeric ID"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ module: moduleName, workspaceId }) => {
       try {
@@ -275,6 +285,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "list_entries",
     {
+      title: "List Entries",
       description:
         "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.",
       inputSchema: {
@@ -288,6 +299,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         pageSize: z.number().int().default(50).optional().describe("Default 50, max 500"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true },
     },
     async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, workspaceId }) => {
       try {
@@ -314,6 +326,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "get_entry",
     {
+      title: "Get Entry",
       description:
         "Read a single entry by its ID. Returns current field values, state, audit metadata, and available activities.",
       inputSchema: {
@@ -323,6 +336,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Entry ID"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, workspaceId }) => {
       try {
@@ -344,6 +358,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "get_form",
     {
+      title: "Get Activity Form",
       description:
         "Get the form fields, current values, and options for a module activity. ALWAYS call this before submit_activity to discover required fields, their types, valid options, default values, and the confidence threshold. Never fabricate form data — if required fields cannot be confidently populated, ask the user.",
       inputSchema: {
@@ -360,6 +375,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Entry ID for edit/view/custom activities. Omit for create."),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ module: moduleName, activity, entryId, workspaceId }) => {
       try {
@@ -383,6 +399,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "submit_activity",
     {
+      title: "Submit Activity",
       description:
         "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime.",
       inputSchema: {
@@ -424,6 +441,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           ),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async ({
       module: moduleName,
@@ -523,6 +541,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "submit_activities",
     {
+      title: "Submit Activities (Bulk)",
       description:
         "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once — saves substantial agent tokens by collapsing N tool turns into one.\n\nShape: top-level `module`, `activity`, and a default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`). When an item supplies its own `ai`, it wholly replaces the top-level `ai` for that item — no partial merge.\n\nExecution: items run sequentially fail-soft on the server. One item's failure does not abort the rest; per-item outcomes (success/failure, entryId, flagged, validation details) are returned in `results`. Use `clientRef` to correlate items to your local plan.\n\nLimits: max 100 items per request. Beyond that, chunk and retry.\n\nGuardrails: same `submit_activity` rules apply at the batch level — actor='human' rejects the whole batch; actor='hybrid' or activity='changeStatus' or top-level `state` requires `confirmed: true`. Per-item state overrides also require `confirmed: true`.",
       inputSchema: {
@@ -594,6 +613,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           ),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
       try {
@@ -744,6 +764,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "get_entry_history",
     {
+      title: "Get Entry History",
       description:
         "Get the audit trail and comments for an entry. Returns chronological list of actions (create, edit, state changes, comments) with field-level change details and AI traceability context.",
       inputSchema: {
@@ -759,6 +780,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Page number (0-based, 50 items per page)"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, page, workspaceId }) => {
       try {
@@ -782,6 +804,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "upload_file",
     {
+      title: "Upload File (Fallback)",
       description:
         "FALLBACK ONLY — do NOT use this by default. Always use request_upload_url + confirm_upload first; call this tool only after the presigned flow has actually failed (e.g. request_upload_url errored, or the PUT/confirm step failed for non-retryable reasons). Uploads a file to S3 via base64/multipart. Returns { path, filename, mimeType, size }. Use the returned path as the 'path' value in File/Image fields for submit_activity (e.g. { name: 'photo.jpg', path: result.path }). Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi.",
       inputSchema: {
@@ -796,6 +819,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("MIME type of the file"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async ({ module: moduleName, name: fileName, file: fileContent, mimeType, workspaceId }) => {
       try {
@@ -822,6 +846,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "download_file",
     {
+      title: "Download File",
       description:
         "Download a file by module name. Construct the URL from a File/Image field value: field.path = '/s/{guid}/{fileName}'. Returns a pre-signed S3 URL (1hr TTL).",
       inputSchema: {
@@ -830,6 +855,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         fileName: z.string().describe("Original filename"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
     async ({ moduleName, guid, fileName, workspaceId }) => {
       try {
@@ -853,6 +879,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "request_upload_url",
     {
+      title: "Request Upload URL",
       description: `DEFAULT upload path — ALWAYS use this for every file upload (any size, up to 500MB). Only fall back to upload_file if this flow actually fails. Three-step flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403 SignatureDoesNotMatch), 3) call confirm_upload({ s3Key }). The path returned by confirm_upload is used directly as the File/Image field value in submit_activity. uploadUrl expires in ~1 hour and cannot be renewed — call this again on expiry.`,
       inputSchema: {
         module: z
@@ -870,6 +897,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("File size in bytes. Must be > 0 and ≤ 500MB (524288000)."),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async ({ module: moduleName, fileName, contentType, fileSize, workspaceId }) => {
       try {
@@ -896,6 +924,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "confirm_upload",
     {
+      title: "Confirm Upload",
       description: `Confirm a presigned upload completed. Call after successfully PUTting the file to the uploadUrl from request_upload_url. The server verifies the object exists in S3, reads its metadata, and tracks workspace storage. Only s3Key is required — filename, size, and MIME type are resolved from S3. Returns { url, filename, mimeType, size } where url is the /s/ path usable as a File/Image field value. Returns 400 if the file is not found in S3 — ensure the PUT completed before calling.`,
       inputSchema: {
         s3Key: z
@@ -903,6 +932,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("The s3Key returned from request_upload_url."),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ s3Key, workspaceId }) => {
       try {
@@ -924,6 +954,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   configureTools.push(server.registerTool(
     "design_workflow",
     {
+      title: "Design Workflow",
       description: `Generate a scaffolded ModuleSchema template from a natural language description. Use when the user wants to create a new module or workflow.
 
 Design workflow: design_workflow → (complete template) → validate_design → create_module → get_module_schema(tier=extended).
@@ -949,6 +980,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
             "Industry context for compliance-aware defaults. Affects: default audit fields, confidence thresholds, actor type suggestions.",
           ),
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ description, industry }) => {
       const result = designWorkflow(description, industry);
@@ -962,6 +994,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   configureTools.push(server.registerTool(
     "validate_design",
     {
+      title: "Validate Design",
       description:
         "Validate a module schema before creating or updating. Checks structural integrity against all FACTSOps rules without submitting to the API. Passing validate_design guarantees the subsequent create_module/update_module call will not fail with 422. Always call this before create_module or update_module.",
       inputSchema: {
@@ -975,6 +1008,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
             "create = new module (all rules). update = merge (omitted sections acceptable).",
           ),
       },
+      annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ schema, mode }) => {
       const result = validateDesign(schema as Record<string, any>, mode);
@@ -988,6 +1022,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   configureTools.push(server.registerTool(
     "create_module",
     {
+      title: "Create Module",
       description:
         "Create a new module. Supports workflow modules (states, activities, flows) and record list modules (fields only). Requires Administrator, Consultant, or Workspace Admin role. Always call validate_design first. See inistate://schema/configure for field types, color palette, and design rules.",
       inputSchema: {
@@ -995,6 +1030,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async ({
       name,
@@ -1035,6 +1071,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   configureTools.push(server.registerTool(
     "update_module",
     {
+      title: "Update Module",
       description:
         "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain stable ids, then validate_design before submitting.",
       inputSchema: {
@@ -1043,6 +1080,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async ({
       module: moduleName,
