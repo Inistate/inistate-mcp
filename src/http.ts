@@ -153,6 +153,14 @@ app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) =>
   }
 });
 
+app.get("/.well-known/openai-apps-challenge", (_, res) => {
+  const data = process.env.OPENAI_VERIFICATION_TOKEN;
+  if (!data) {
+    res.status(404).type('text/plain').send("Not found");
+  }
+  res.status(200).type("text/plain").send(data);
+})
+
 /* ------------------------------------------------------------------ */
 /*  Start                                                              */
 /* ------------------------------------------------------------------ */
