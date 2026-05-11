@@ -52,6 +52,7 @@ export function createServer(initialMode?: Mode): McpServer {
       inputSchema: {
         mode: z.enum(["runtime", "configure", "frontend"]).describe("Target mode"),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ mode }) => {
       const enableConfigure = mode === "configure" || mode === "frontend";
