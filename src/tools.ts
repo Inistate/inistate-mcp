@@ -1052,10 +1052,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         log("create_module", `name=${name}`);
-        const data = await api.post(
-          `/api/configure/${api.enc(name)}`,
-          body,
-        );
+        const data = await api.post(`/api/configure`, body);
         log("create_module", `name=${name} → ok`);
         return ok(data);
       } catch (e) {
@@ -1095,7 +1092,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     }) => {
       try {
         applyWorkspace(workspaceId);
-        const body: Record<string, unknown> = {};
+        const body: Record<string, unknown> = { module: moduleName };
         if (name) body.name = name;
         if (icon) body.icon = icon;
         if (desc) body.description = desc;
@@ -1104,10 +1101,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         log("update_module", `module=${moduleName}${name ? ` newName=${name}` : ""}`);
-        const data = await api.put(
-          `/api/configure/${api.enc(moduleName)}`,
-          body,
-        );
+        const data = await api.put(`/api/configure`, body);
         log("update_module", `module=${moduleName} → ok`);
         return ok(data);
       } catch (e) {
