@@ -3,12 +3,30 @@
   "version": "1.0.0",
   "description": "MCP server for the Inistate platform — module discovery, entry management, and activity submission",
   "type": "module",
+  "author": "Inistate",
+  "homepage": "https://github.com/Inistate/inistate-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Inistate/inistate-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Inistate/inistate-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "inistate",
+    "workflow",
+    "low-code",
+    "ai-agent",
+    "claude"
+  ],
   "bin": {
     "inistate-mcp": "./build/index.js",
     "inistate-mcp-http": "./build/http.js"
   },
   "files": [
-    "build"
+    "build/**/*.js"
   ],
   "scripts": {
     "build": "tsc",
@@ -36,5 +54,5 @@
     "typescript": "^5.8.0",
     "vitest": "^3.2.4"
   },
-  "license": "MIT"
+  "license": "Apache-2.0"
 }
