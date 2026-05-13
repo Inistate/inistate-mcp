@@ -1070,9 +1070,11 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     {
       title: "Update Module",
       description:
-        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain stable ids, then validate_design before submitting.",
+        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain the stable module id and item ids, then validate_design before submitting.",
       inputSchema: {
-        module: z.string().describe("Current module name (used in URL path)"),
+        id: z
+          .union([z.string(), z.number()])
+          .describe("Module id from get_module_canvas. Identifies which module to update."),
         name: z.string().optional().describe("New module name (for renaming)"),
         ...moduleSectionsShape,
         workspaceId: wsParam,
@@ -1080,7 +1082,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async ({
-      module: moduleName,
+      id,
       name,
       icon,
       description: desc,
@@ -1092,7 +1094,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     }) => {
       try {
         applyWorkspace(workspaceId);
-        const body: Record<string, unknown> = { module: moduleName };
+        const body: Record<string, unknown> = { id };
         if (name) body.name = name;
         if (icon) body.icon = icon;
         if (desc) body.description = desc;
@@ -1100,12 +1102,12 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
-        log("update_module", `module=${moduleName}${name ? ` newName=${name}` : ""}`);
+        log("update_module", `id=${id}${name ? ` newName=${name}` : ""}`);
         const data = await api.put(`/api/configure`, body);
-        log("update_module", `module=${moduleName} → ok`);
+        log("update_module", `id=${id} → ok`);
         return ok(data);
       } catch (e) {
-        log("update_module", `module=${moduleName} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        log("update_module", `id=${id} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }
     },
