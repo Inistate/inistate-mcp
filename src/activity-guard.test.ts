@@ -6,6 +6,7 @@ import {
   evaluateActivity,
   getPriorFlag,
   recordFlagged,
+  validateInputShapes,
 } from "./activity-guard.js";
 
 const SCHEMA = {
@@ -193,6 +194,105 @@ describe("evaluateActivity — confidence inflation", () => {
       confidence: 0.85,
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("validateInputShapes — User/Module pre-flight", () => {
+  const SCHEMA_WITH_REFS = {
+    activities: [],
+    information: [
+      { name: "Title", type: "Text" },
+      { name: "Assignee", type: "User" },
+      { name: "Reviewers", type: "Users" },
+      { name: "Linked Ticket", type: "Module" },
+      { name: "Related Tickets", type: "Modules" },
+    ],
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_REFS);
+  });
+
+  it("accepts well-shaped User and Module values", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Title: "hello",
+      Assignee: { id: 42, value: "Jane Doe" },
+      Reviewers: [{ id: 1, value: "Alice" }, { id: 2, value: "Bob" }],
+      "Linked Ticket": { id: "T-1", value: "Parent" },
+      "Related Tickets": [{ id: 7, value: "Sibling" }],
+    });
+    expect(errs).toEqual([]);
+  });
+
+  it("rejects a bare id for User", async () => {
+    const errs = await validateInputShapes("Ticket", { Assignee: 42 });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Assignee");
+    expect(errs[0].type).toBe("User");
+  });
+
+  it("rejects a bare string for Module", async () => {
+    const errs = await validateInputShapes("Ticket", { "Linked Ticket": "T-1" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].type).toBe("Module");
+  });
+
+  it("rejects an object missing 'value'", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Assignee: { id: 42 },
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/value/);
+  });
+
+  it("rejects an object missing 'id'", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Assignee: { value: "Jane Doe" },
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/id/);
+  });
+
+  it("rejects a non-array for Users (plural)", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Reviewers: { id: 1, value: "Alice" },
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/array/);
+  });
+
+  it("rejects a malformed element in a Users array", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Reviewers: [{ id: 1, value: "Alice" }, { id: 2 }],
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Reviewers");
+  });
+
+  it("allows null to clear a User field", async () => {
+    const errs = await validateInputShapes("Ticket", { Assignee: null });
+    expect(errs).toEqual([]);
+  });
+
+  it("allows empty array for Users", async () => {
+    const errs = await validateInputShapes("Ticket", { Reviewers: [] });
+    expect(errs).toEqual([]);
+  });
+
+  it("ignores non-reference field types", async () => {
+    const errs = await validateInputShapes("Ticket", { Title: "anything" });
+    expect(errs).toEqual([]);
+  });
+
+  it("returns [] when the schema cannot be loaded (lets server decide)", async () => {
+    vi.spyOn(api, "get").mockImplementation(async () => {
+      throw new Error("schema fetch failed");
+    });
+    const errs = await validateInputShapes("Ticket", {
+      Assignee: "definitely-wrong",
+    });
+    expect(errs).toEqual([]);
   });
 });
 

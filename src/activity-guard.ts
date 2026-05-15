@@ -19,9 +19,17 @@ interface ActivityDef {
   actor?: string;
 }
 
+interface FieldInfo {
+  name: string;
+  type: string;
+}
+
 interface ExtendedSchema {
   activities?: ActivityDef[];
+  information?: FieldInfo[];
 }
+
+const REF_FIELD_TYPES = new Set(["User", "Users", "Module", "Modules"]);
 
 // Standard activities are inherent platform operations and have no actor in the
 // module schema. They bypass the actor check (but state-change checks still run).
@@ -50,23 +58,26 @@ function cacheKey(prefix: string, parts: Array<string | number | undefined>): st
   return [prefix, user, wsid, ...parts.map((p) => String(p ?? "_"))].join("::");
 }
 
+async function getExtendedSchema(moduleName: string): Promise<ExtendedSchema | null> {
+  const key = cacheKey("schema", [moduleName]);
+  const now = Date.now();
+  const cached = schemaCache.get(key);
+  if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.schema;
+  try {
+    const schema = (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
+    schemaCache.set(key, { schema, at: now });
+    return schema;
+  } catch {
+    return null;
+  }
+}
+
 async function getActivityDef(
   moduleName: string,
   activity: string,
 ): Promise<ActivityDef | null> {
-  const key = cacheKey("schema", [moduleName]);
-  const now = Date.now();
-  const cached = schemaCache.get(key);
-  let schema: ExtendedSchema | undefined = cached && now - cached.at < SCHEMA_TTL_MS ? cached.schema : undefined;
-  if (!schema) {
-    try {
-      schema = (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
-      schemaCache.set(key, { schema, at: now });
-    } catch {
-      return null;
-    }
-  }
-  return schema.activities?.find((a) => a.name === activity) ?? null;
+  const schema = await getExtendedSchema(moduleName);
+  return schema?.activities?.find((a) => a.name === activity) ?? null;
 }
 
 interface FlaggedRecord {
@@ -219,6 +230,107 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
   }
 
   return { ok: true };
+}
+
+// ---------- Reference-shape pre-flight (User/Module fields) ----------
+//
+// User/Module fields require `{ id, value }` objects (plural variants take
+// arrays of them). The server enforces this too, but failing on the client
+// gives the agent a structured error it can self-correct on without a
+// network round trip. Strict: bare strings/numbers, missing `value`, or
+// missing `id` all reject.
+
+export interface RefShapeError {
+  field: string;
+  type: string;
+  message: string;
+  received: unknown;
+}
+
+function checkSingleRef(
+  field: string,
+  type: string,
+  value: unknown,
+  index?: number,
+): RefShapeError | null {
+  const locator = index !== undefined ? `${field}[${index}]` : field;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      field,
+      type,
+      received: value,
+      message: `${type} field '${locator}' must be an object with both 'id' and 'value' (e.g. { id: 42, value: "John Doe" }).`,
+    };
+  }
+  const obj = value as Record<string, unknown>;
+  const idOk =
+    (typeof obj.id === "string" && obj.id.length > 0) ||
+    (typeof obj.id === "number" && Number.isFinite(obj.id));
+  const valueOk = typeof obj.value === "string";
+  if (idOk && valueOk) return null;
+  const missing: string[] = [];
+  if (!idOk) missing.push("id (string|number)");
+  if (!valueOk) missing.push("value (string)");
+  return {
+    field,
+    type,
+    received: value,
+    message: `${type} field '${locator}' must include both 'id' and 'value'. Missing/invalid: ${missing.join(", ")}.`,
+  };
+}
+
+function checkRefValue(
+  field: string,
+  type: string,
+  value: unknown,
+): RefShapeError | null {
+  // null/undefined clears the field — allowed.
+  if (value === null || value === undefined) return null;
+
+  const isPlural = type === "Users" || type === "Modules";
+  if (isPlural) {
+    if (!Array.isArray(value)) {
+      return {
+        field,
+        type,
+        received: value,
+        message: `${type} field '${field}' must be an array of { id, value } objects.`,
+      };
+    }
+    for (let i = 0; i < value.length; i++) {
+      const e = checkSingleRef(field, type, value[i], i);
+      if (e) return e;
+    }
+    return null;
+  }
+  return checkSingleRef(field, type, value);
+}
+
+/**
+ * Validate that User/Module/Users/Modules fields in `input` carry
+ * { id, value } objects. Returns [] when shapes are correct, or when the
+ * module schema can't be loaded (let the server decide in that case).
+ */
+export async function validateInputShapes(
+  moduleName: string,
+  input: Record<string, unknown> | undefined | null,
+): Promise<RefShapeError[]> {
+  if (!input) return [];
+  const schema = await getExtendedSchema(moduleName);
+  const info = schema?.information;
+  if (!info || info.length === 0) return [];
+  const types = new Map<string, string>();
+  for (const f of info) {
+    if (f?.name && f?.type) types.set(f.name, f.type);
+  }
+  const errors: RefShapeError[] = [];
+  for (const [key, val] of Object.entries(input)) {
+    const type = types.get(key);
+    if (!type || !REF_FIELD_TYPES.has(type)) continue;
+    const e = checkRefValue(key, type, val);
+    if (e) errors.push(e);
+  }
+  return errors;
 }
 
 // Test-only helpers.

@@ -8,6 +8,7 @@ import {
   evaluateActivity,
   getPriorFlag,
   recordFlagged,
+  validateInputShapes,
 } from "./activity-guard.js";
 import {
   designWorkflow,
@@ -410,7 +411,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         input: z
           .record(z.unknown())
           .optional()
-          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {value,id}. User: {value,id,username}. Plural variants use arrays."),
+          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,...username optional}. Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids or strings will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional(),
         assignees: z.array(z.string()).optional().describe("Usernames"),
@@ -475,6 +476,27 @@ Load resource inistate://schema before modifying to know valid field types, colo
             `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${guard.structured.error}`,
           );
           return err({ structured: guard.structured });
+        }
+        // Reference-shape pre-flight: User/Module fields must be { id, value }.
+        if (input) {
+          const shapeErrors = await validateInputShapes(moduleName, input);
+          if (shapeErrors.length > 0) {
+            const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+            const structured = {
+              error: "invalid_reference_field_shape",
+              message:
+                "One or more User/Module fields were submitted with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+              activity,
+              fields: shapeErrors,
+              agent_action:
+                "Re-read the entry or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
+            };
+            log(
+              "submit_activity",
+              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: invalid_reference_field_shape (${shapeErrors.length} field${shapeErrors.length === 1 ? "" : "s"})`,
+            );
+            return err({ structured });
+          }
         }
         // Normalize file field inputs: remap 'url' → 'path' if client sent { name, url } instead of { name, path }
         if (input) {
@@ -685,6 +707,31 @@ Load resource inistate://schema before modifying to know valid field types, colo
             );
             return err({ structured });
           }
+        }
+
+        // Reference-shape pre-flight: User/Module fields must be { id, value }.
+        const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          if (!it.input) continue;
+          const errs = await validateInputShapes(moduleName, it.input as Record<string, unknown>);
+          if (errs.length > 0) shapeFailures.push({ idx: i, fields: errs });
+        }
+        if (shapeFailures.length > 0) {
+          const structured = {
+            error: "invalid_reference_field_shape",
+            message:
+              "One or more items submit User/Module fields with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+            activity,
+            items: shapeFailures,
+            agent_action:
+              "Re-read the entries or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
+          };
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: invalid_reference_field_shape (${shapeFailures.length} items)`,
+          );
+          return err({ structured });
         }
 
         // Normalize file fields per item: remap 'url' → 'path' if needed.
