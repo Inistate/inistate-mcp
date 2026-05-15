@@ -317,22 +317,36 @@ function checkRefValue(
 }
 
 /**
- * Validate that User/Module/Users/Modules fields in `input` carry
- * { id, value } objects. Returns [] when shapes are correct, or when the
- * module schema can't be loaded (let the server decide in that case).
+ * Build a field-name → field-type map for a module. Returns null when the
+ * schema cannot be loaded (callers should let the server decide). The
+ * underlying schema is cached by getExtendedSchema, so repeat calls are cheap.
+ *
+ * Split out so bulk callers (submit_activities) can fetch once and reuse the
+ * map across items via validateInputShapesWith.
  */
-export async function validateInputShapes(
+export async function getModuleFieldTypes(
   moduleName: string,
-  input: Record<string, unknown> | undefined | null,
-): Promise<RefShapeError[]> {
-  if (!input) return [];
+): Promise<Map<string, string> | null> {
   const schema = await getExtendedSchema(moduleName);
   const info = schema?.information;
-  if (!info || info.length === 0) return [];
+  if (!info || info.length === 0) return null;
   const types = new Map<string, string>();
   for (const f of info) {
     if (f?.name && f?.type) types.set(f.name, f.type);
   }
+  return types;
+}
+
+/**
+ * Synchronous shape check against a pre-built field-type map. Use this in
+ * bulk loops to avoid rebuilding the map per item. When `types` is null
+ * (schema unavailable), returns [] so the server makes the final call.
+ */
+export function validateInputShapesWith(
+  types: Map<string, string> | null,
+  input: Record<string, unknown> | undefined | null,
+): RefShapeError[] {
+  if (!input || !types) return [];
   const errors: RefShapeError[] = [];
   for (const [key, val] of Object.entries(input)) {
     const type = types.get(key);
@@ -341,6 +355,22 @@ export async function validateInputShapes(
     if (e) errors.push(e);
   }
   return errors;
+}
+
+/**
+ * Validate that User/Module/Users/Modules fields in `input` carry the
+ * correct shape. Convenience wrapper around getModuleFieldTypes +
+ * validateInputShapesWith — use this for one-shot calls (submit_activity).
+ * Bulk callers should fetch the map once and use validateInputShapesWith
+ * directly.
+ */
+export async function validateInputShapes(
+  moduleName: string,
+  input: Record<string, unknown> | undefined | null,
+): Promise<RefShapeError[]> {
+  if (!input) return [];
+  const types = await getModuleFieldTypes(moduleName);
+  return validateInputShapesWith(types, input);
 }
 
 // Test-only helpers.

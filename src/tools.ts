@@ -6,9 +6,11 @@ import * as api from "./api.js";
 import {
   clearFlagged,
   evaluateActivity,
+  getModuleFieldTypes,
   getPriorFlag,
   recordFlagged,
   validateInputShapes,
+  validateInputShapesWith,
 } from "./activity-guard.js";
 import {
   designWorkflow,
@@ -709,12 +711,15 @@ Load resource inistate://schema before modifying to know valid field types, colo
           }
         }
 
-        // Reference-shape pre-flight: User/Module fields must be { id, value }.
+        // Reference-shape pre-flight: User/Module fields must be { id, value }
+        // (User adds `username`). Fetch the field-type map once for the whole
+        // batch — the per-item check is then synchronous.
+        const fieldTypes = await getModuleFieldTypes(moduleName);
         const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           if (!it.input) continue;
-          const errs = await validateInputShapes(moduleName, it.input as Record<string, unknown>);
+          const errs = validateInputShapesWith(fieldTypes, it.input as Record<string, unknown>);
           if (errs.length > 0) shapeFailures.push({ idx: i, fields: errs });
         }
         if (shapeFailures.length > 0) {

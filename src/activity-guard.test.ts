@@ -4,9 +4,11 @@ import {
   __resetGuardCaches,
   clearFlagged,
   evaluateActivity,
+  getModuleFieldTypes,
   getPriorFlag,
   recordFlagged,
   validateInputShapes,
+  validateInputShapesWith,
 } from "./activity-guard.js";
 
 const SCHEMA = {
@@ -326,6 +328,69 @@ describe("validateInputShapes — User/Module pre-flight", () => {
       Assignee: "definitely-wrong",
     });
     expect(errs).toEqual([]);
+  });
+});
+
+describe("getModuleFieldTypes + validateInputShapesWith — bulk reuse", () => {
+  const SCHEMA_WITH_REFS = {
+    activities: [],
+    information: [
+      { name: "Title", type: "Text" },
+      { name: "Assignee", type: "User" },
+      { name: "Reviewers", type: "Users" },
+      { name: "Linked Ticket", type: "Module" },
+    ],
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+  });
+
+  it("returns a populated map for a known module", async () => {
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_REFS);
+    const types = await getModuleFieldTypes("Ticket");
+    expect(types).not.toBeNull();
+    expect(types!.get("Assignee")).toBe("User");
+    expect(types!.get("Reviewers")).toBe("Users");
+    expect(types!.get("Linked Ticket")).toBe("Module");
+    expect(types!.get("Title")).toBe("Text");
+  });
+
+  it("returns null when the schema cannot be loaded", async () => {
+    vi.spyOn(api, "get").mockImplementation(async () => {
+      throw new Error("nope");
+    });
+    expect(await getModuleFieldTypes("Ticket")).toBeNull();
+  });
+
+  it("validateInputShapesWith short-circuits to [] on null types", () => {
+    const errs = validateInputShapesWith(null, { Assignee: "wrong" });
+    expect(errs).toEqual([]);
+  });
+
+  it("bulk path fetches the schema only once across many items", async () => {
+    const apiGet = vi
+      .spyOn(api, "get")
+      .mockImplementation(async () => SCHEMA_WITH_REFS);
+
+    // Simulate submit_activities: fetch once, reuse per item.
+    const fieldTypes = await getModuleFieldTypes("Ticket");
+    const items = Array.from({ length: 50 }, (_, i) => ({
+      Title: `Row ${i}`,
+      // Half well-shaped, half malformed — exercise both paths.
+      Assignee:
+        i % 2 === 0
+          ? { id: i, value: `User ${i}`, username: `u${i}` }
+          : { id: i }, // missing value + username
+    }));
+    const failures: number[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const errs = validateInputShapesWith(fieldTypes, items[i]);
+      if (errs.length > 0) failures.push(i);
+    }
+
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    expect(failures.length).toBe(25);
   });
 });
 
