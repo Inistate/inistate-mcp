@@ -411,7 +411,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         input: z
           .record(z.unknown())
           .optional()
-          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,...username optional}. Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids or strings will be rejected."),
+          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional(),
         assignees: z.array(z.string()).optional().describe("Usernames"),

@@ -254,12 +254,16 @@ function checkSingleRef(
   index?: number,
 ): RefShapeError | null {
   const locator = index !== undefined ? `${field}[${index}]` : field;
+  const isUserType = type === "User" || type === "Users";
   if (!value || typeof value !== "object" || Array.isArray(value)) {
+    const shape = isUserType
+      ? `{ id, value, username } (e.g. { id: 42, value: "John Doe", username: "jdoe" })`
+      : `{ id, value } (e.g. { id: 42, value: "Acme Corp" })`;
     return {
       field,
       type,
       received: value,
-      message: `${type} field '${locator}' must be an object with both 'id' and 'value' (e.g. { id: 42, value: "John Doe" }).`,
+      message: `${type} field '${locator}' must be an object with ${shape}.`,
     };
   }
   const obj = value as Record<string, unknown>;
@@ -267,15 +271,20 @@ function checkSingleRef(
     (typeof obj.id === "string" && obj.id.length > 0) ||
     (typeof obj.id === "number" && Number.isFinite(obj.id));
   const valueOk = typeof obj.value === "string";
-  if (idOk && valueOk) return null;
+  const usernameOk =
+    !isUserType ||
+    (typeof obj.username === "string" && obj.username.length > 0);
+  if (idOk && valueOk && usernameOk) return null;
   const missing: string[] = [];
   if (!idOk) missing.push("id (string|number)");
   if (!valueOk) missing.push("value (string)");
+  if (!usernameOk) missing.push("username (string)");
+  const required = isUserType ? "'id', 'value', and 'username'" : "both 'id' and 'value'";
   return {
     field,
     type,
     received: value,
-    message: `${type} field '${locator}' must include both 'id' and 'value'. Missing/invalid: ${missing.join(", ")}.`,
+    message: `${type} field '${locator}' must include ${required}. Missing/invalid: ${missing.join(", ")}.`,
   };
 }
 
@@ -290,11 +299,12 @@ function checkRefValue(
   const isPlural = type === "Users" || type === "Modules";
   if (isPlural) {
     if (!Array.isArray(value)) {
+      const itemShape = type === "Users" ? "{ id, value, username }" : "{ id, value }";
       return {
         field,
         type,
         received: value,
-        message: `${type} field '${field}' must be an array of { id, value } objects.`,
+        message: `${type} field '${field}' must be an array of ${itemShape} objects.`,
       };
     }
     for (let i = 0; i < value.length; i++) {

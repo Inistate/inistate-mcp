@@ -217,8 +217,11 @@ describe("validateInputShapes — User/Module pre-flight", () => {
   it("accepts well-shaped User and Module values", async () => {
     const errs = await validateInputShapes("Ticket", {
       Title: "hello",
-      Assignee: { id: 42, value: "Jane Doe" },
-      Reviewers: [{ id: 1, value: "Alice" }, { id: 2, value: "Bob" }],
+      Assignee: { id: 42, value: "Jane Doe", username: "jdoe" },
+      Reviewers: [
+        { id: 1, value: "Alice", username: "alice" },
+        { id: 2, value: "Bob", username: "bob" },
+      ],
       "Linked Ticket": { id: "T-1", value: "Parent" },
       "Related Tickets": [{ id: 7, value: "Sibling" }],
     });
@@ -240,7 +243,7 @@ describe("validateInputShapes — User/Module pre-flight", () => {
 
   it("rejects an object missing 'value'", async () => {
     const errs = await validateInputShapes("Ticket", {
-      Assignee: { id: 42 },
+      Assignee: { id: 42, username: "jdoe" },
     });
     expect(errs.length).toBe(1);
     expect(errs[0].message).toMatch(/value/);
@@ -248,15 +251,42 @@ describe("validateInputShapes — User/Module pre-flight", () => {
 
   it("rejects an object missing 'id'", async () => {
     const errs = await validateInputShapes("Ticket", {
-      Assignee: { value: "Jane Doe" },
+      Assignee: { value: "Jane Doe", username: "jdoe" },
     });
     expect(errs.length).toBe(1);
     expect(errs[0].message).toMatch(/id/);
   });
 
+  it("rejects a User missing 'username'", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Assignee: { id: 42, value: "Jane Doe" },
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].type).toBe("User");
+    expect(errs[0].message).toMatch(/username/);
+  });
+
+  it("rejects a Users element missing 'username'", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Reviewers: [
+        { id: 1, value: "Alice", username: "alice" },
+        { id: 2, value: "Bob" },
+      ],
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/username/);
+  });
+
+  it("does NOT require username on Module fields", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      "Linked Ticket": { id: "T-1", value: "Parent" },
+    });
+    expect(errs).toEqual([]);
+  });
+
   it("rejects a non-array for Users (plural)", async () => {
     const errs = await validateInputShapes("Ticket", {
-      Reviewers: { id: 1, value: "Alice" },
+      Reviewers: { id: 1, value: "Alice", username: "alice" },
     });
     expect(errs.length).toBe(1);
     expect(errs[0].message).toMatch(/array/);
@@ -264,7 +294,10 @@ describe("validateInputShapes — User/Module pre-flight", () => {
 
   it("rejects a malformed element in a Users array", async () => {
     const errs = await validateInputShapes("Ticket", {
-      Reviewers: [{ id: 1, value: "Alice" }, { id: 2 }],
+      Reviewers: [
+        { id: 1, value: "Alice", username: "alice" },
+        { id: 2 },
+      ],
     });
     expect(errs.length).toBe(1);
     expect(errs[0].field).toBe("Reviewers");
