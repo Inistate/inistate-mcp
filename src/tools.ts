@@ -148,7 +148,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
           .optional()
           .describe("Optional name filter (case-insensitive)"),
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ search }) => {
       try {
@@ -180,7 +180,7 @@ Workflow sequences after workspace is set:
           .string()
           .describe("Workspace ID from list_workspaces"),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       try {
@@ -205,7 +205,7 @@ Workflow sequences after workspace is set:
       inputSchema: {
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       try {
@@ -237,7 +237,7 @@ Workflow sequences after workspace is set:
           ),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, tier, workspaceId }) => {
       try {
@@ -267,7 +267,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         module: z.string().describe("Module name or numeric ID"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, workspaceId }) => {
       try {
@@ -302,7 +302,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         pageSize: z.number().int().default(50).optional().describe("Default 50, max 500"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, workspaceId }) => {
       try {
@@ -339,7 +339,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Entry ID"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, workspaceId }) => {
       try {
@@ -378,7 +378,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Entry ID for edit/view/custom activities. Omit for create."),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, activity, entryId, workspaceId }) => {
       try {
@@ -444,7 +444,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           ),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async ({
       module: moduleName,
@@ -637,7 +637,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           ),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
       try {
@@ -832,7 +832,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Page number (0-based, 50 items per page)"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, page, workspaceId }) => {
       try {
@@ -871,7 +871,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("MIME type of the file"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ module: moduleName, name: fileName, file: fileContent, mimeType, workspaceId }) => {
       try {
@@ -907,7 +907,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         fileName: z.string().describe("Original filename"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ moduleName, guid, fileName, workspaceId }) => {
       try {
@@ -949,7 +949,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("File size in bytes. Must be > 0 and ≤ 500MB (524288000)."),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ module: moduleName, fileName, contentType, fileSize, workspaceId }) => {
       try {
@@ -984,7 +984,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("The s3Key returned from request_upload_url."),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ s3Key, workspaceId }) => {
       try {
@@ -1082,7 +1082,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({
       name,
@@ -1131,7 +1131,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async ({
       id,
