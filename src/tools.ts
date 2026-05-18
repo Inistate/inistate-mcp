@@ -422,12 +422,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .optional()
           .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
-        comment: z.string().optional(),
+        comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
         due: z.string().optional().describe("ISO 8601"),
         ai: z
           .object({
-            reasoning: z.string().describe("Why the AI chose this action"),
+            reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
             model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
             confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
             sources: z
@@ -580,7 +580,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         activity: z.string().default("create"),
         ai: z
           .object({
-            reasoning: z.string(),
+            reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
             model: z.string(),
             confidence: z.number().min(0).max(1),
             sources: z
@@ -605,12 +605,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
                 .optional()
                 .describe("Field values keyed by display name. Same shape as submit_activity.input."),
               state: z.string().optional().describe("Per-item target state name"),
-              comment: z.string().optional(),
+              comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
               assignees: z.array(z.string()).optional(),
               due: z.string().optional().describe("ISO 8601"),
               ai: z
                 .object({
-                  reasoning: z.string(),
+                  reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
                   model: z.string(),
                   confidence: z.number().min(0).max(1),
                   sources: z
