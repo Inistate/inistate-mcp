@@ -290,7 +290,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "List Entries",
       description:
-        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.",
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. System fields (id, state, audit metadata, etc.) are always returned regardless.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         state: z.string().optional(),
@@ -300,11 +300,17 @@ Load resource inistate://schema before modifying to know valid field types, colo
         sortDirection: z.enum(["asc", "desc"]).default("asc").optional(),
         currentPage: z.number().int().default(0).optional(),
         pageSize: z.number().int().default(50).optional().describe("Default 50, max 500"),
+        fields: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Field display names (or raw field names) to include in each entry's `data`. Strongly preferred over returning everything when the module has many or large fields — prunes both DB I/O and response tokens. Omit only when you actually need the full row. System fields are always returned.",
+          ),
         workspaceId: wsParam,
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, workspaceId }) => {
+    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
         const body: Record<string, unknown> = { module: moduleName };
@@ -315,6 +321,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if (sortDirection) body.sortDirection = sortDirection;
         if (currentPage !== undefined) body.currentPage = currentPage;
         if (pageSize !== undefined) body.pageSize = pageSize;
+        if (fields && fields.length > 0) body.fields = fields;
         const data = await api.post("/api/mcp/list", body);
         return ok(data);
       } catch (e) {

@@ -80,7 +80,7 @@ describe("runtime tool schemas", () => {
 
   it("list_entries", () => {
     expect(shape(tools, "list_entries")).toEqual({
-      props: ["currentPage", "filters", "module", "pageSize", "search", "sortBy", "sortDirection", "state", "workspaceId"],
+      props: ["currentPage", "fields", "filters", "module", "pageSize", "search", "sortBy", "sortDirection", "state", "workspaceId"],
       required: ["module"],
     });
   });
