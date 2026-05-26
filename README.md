@@ -26,6 +26,20 @@ npm install -g inistate-mcp
 inistate-mcp
 ```
 
+### Interactive setup (recommended)
+
+Run the binary in a terminal with no MCP client attached and it walks you through entering your API token and picks the right config file for your client:
+
+```bash
+npx -y inistate-mcp
+# or, explicitly:
+npx -y inistate-mcp setup
+```
+
+Supported clients: Claude Desktop, Claude Code (global or project-local `.mcp.json`), Cursor, Windsurf, Codex CLI, VS Code (user profile or workspace `.vscode/mcp.json`), Cline, Gemini CLI (global or workspace). Pick "Print config only" to get a JSON block to paste anywhere else.
+
+The wizard only runs when stdin is a TTY (i.e., you launched it yourself). When an MCP client spawns the binary via piped stdio, it skips the wizard and runs as a normal MCP server — set `INISTATE_MCP_NO_SETUP=1` if you need to force server mode from a terminal.
+
 ### Claude Desktop Configuration
 
 Add to your `claude_desktop_config.json`:
