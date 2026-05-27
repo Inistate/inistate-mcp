@@ -95,11 +95,28 @@ The MCP layer is the primary interface. A2A coordination is a future extension (
 
 | Mode | Example Request | Tool Chain |
 |---|---|---|
-| `design` | "Set up a KYC approval process" | `design_workflow` → `validate_design` → `create_module` → `get_module_schema` |
+| `design` | "Set up a KYC approval process" | `switch_mode(configure)` → `design_workflow` → `validate_design` → `create_module` → `get_module_schema` |
 | `execute` | "Approve Sarah's leave request" | `list_modules` → `list_entries` → `get_form` → `submit_activity` |
-| `modify` | "Add a compliance step to onboarding" | `list_modules` → `get_module_canvas` → `validate_design` → `update_module` |
+| `modify` | "Add a compliance step to onboarding" | `switch_mode(configure)` → `list_modules` → `get_module_canvas` → `validate_design` → `update_module` |
 | `query` | "Show overdue invoices" | `list_modules` → `list_entries` |
+| `frontend` | "Generate a Vue page for invoices" | `switch_mode(frontend)` → load `inistate://frontend-guide` → `get_module_schema(tier=extended)` |
 | `ambiguous` | "Handle the invoice thing" | Ask clarification questions before proceeding |
+
+### 1.5 Server Modes (runtime / configure / frontend)
+
+The MCP server exposes its full capability set behind three **server modes** that control which tools, resources, and prompts are visible to the agent at any moment. This is distinct from the agent-side *operational* modes in §1.4 and §6.1 — the server modes only control the surface area; the agent still chooses which of the visible tools to use.
+
+| Server mode | Default? | Exposed surface | When to select |
+|---|---|---|---|
+| `runtime` | **yes** | All auth/discovery/runtime tools (`login`, `list_workspaces`, `set_workspace`, `list_modules`, `list_entries`, `get_entry`, `get_form`, `submit_activity`, `get_entry_history`, `request_upload_url`, `confirm_upload`, `upload_file`, `download_file`) plus `inistate://schema/runtime`, `inistate://modules`, and the runtime prompts (`execute_activity`, `diagnose_entry`). | Executing or querying entries on existing modules. This covers the majority of sessions. |
+| `configure` | no | Runtime surface **plus** design/modify tools (`design_workflow`, `validate_design`, `create_module`, `update_module`, `get_module_canvas`, `get_module_schema`), `inistate://schema/configure`, `inistate://design-guide`, and the design prompts (`design_factsops_workflow`, `modify_module`). | Creating a new module or editing an existing module's schema. |
+| `frontend` | no | Full `configure` surface **plus** `inistate://frontend-guide` — REST API reference for generating Vue/React/etc. UIs that call `api.inistate.com` directly. | Hand-writing a custom UI (and optionally iterating on the module schema in the same session). |
+
+**Why modes matter.** Gating the configure and frontend surfaces keeps the on-connect tool/resource payload small for the common case. Measured on-connect cost drops roughly in half when a session stays in `runtime` (~5.5k tokens vs. ~11k for the full surface).
+
+**How to switch.** Every session starts in `runtime` unless the operator sets `INISTATE_MCP_MODE=configure` or `INISTATE_MCP_MODE=frontend` in the server environment (§14.2). Agents switch modes at runtime by calling the `switch_mode` tool (§2.4), which fires an `tools/list_changed` notification so clients refresh their local tool catalog.
+
+> **AGENT INSTRUCTION:** Stay in `runtime` unless the user explicitly asks to design, modify, or generate UI. When the user's intent requires configure- or frontend-only tools, call `switch_mode(mode)` once and re-read resources as needed. Switch back to `runtime` when the design/frontend task is complete to keep subsequent turns cheap.
 
 ---
 
@@ -114,27 +131,71 @@ All tools require valid authentication — either an API key (`fsk` prefix) or a
 
 ### Tool Summary
 
-| # | Tool | Resolver | Mode | Purpose |
-|---|---|---|---|---|
-| 0 | `login` | `POST /token` | All | Authenticate with username/password to obtain a JWT |
-| 1 | `list_workspaces` | `GET /api/workspace` | All | List accessible workspaces |
-| 2 | `set_workspace` | `GET /api/workspace/{id}` | All | Set active workspace for session |
-| 3 | `list_modules` | `GET /api/mcp/` | All | List all modules in workspace |
-| 4 | `get_module_schema` | `GET /api/mcp/{name}?tier=` | All | Get module fields, states, activities, flows |
-| 5 | `get_module_canvas` | `GET /api/configure/{name}` | modify | Get full module definition with stable IDs |
-| 6 | `list_entries` | `POST /api/mcp/list` | execute, query | Query entries with filters |
-| 7 | `get_entry` | `POST /api/mcp/entry` | execute, query | Read a single entry |
-| 8 | `get_form` | `POST /api/mcp/form` | execute | Get activity form fields and defaults |
-| 9 | `submit_activity` | `POST /api/mcp/activity` | execute | Perform create/edit/delete/custom activity |
-| 10 | `get_entry_history` | `POST /api/mcp/history` | query | Get audit trail for an entry |
-| 11 | `upload_file` | `POST /api/mcp/upload` | execute | Upload a file for File/Image fields |
-| 12 | `download_file` | `GET /api/mcp/download/{name}/s/{guid}/{file}` | query | Download a file by module name |
-| 13 | `design_workflow` | Server-side | design | AI generates a module schema from description |
-| 14 | `validate_design` | Server-side | design, modify | Validate a module schema before submission |
-| 15 | `create_module` | `POST /api/configure/{name}` | design | Create a new module |
-| 16 | `update_module` | `PUT /api/configure/{name}` | modify | Update existing module schema |
-| 17 | `request_upload_url` | `POST /api/mcp/request-upload-url` | execute | Request a presigned S3 PUT URL for direct large-file upload (up to 500MB) |
-| 18 | `confirm_upload` | `POST /api/mcp/confirm-upload` | execute | Finalize a presigned upload after the client PUTs the file to S3 |
+The **Surface** column indicates the server mode(s) in which the tool is visible (§1.5). Tools marked `runtime` are visible in all three modes; `configure+` tools are only visible after `switch_mode(configure)` or `switch_mode(frontend)`. The **Agent Mode** column is the agent's operational mode from §1.4 / §6.1.
+
+| # | Tool | Resolver | Surface | Agent Mode | Purpose |
+|---|---|---|---|---|---|
+| 0 | `login` | `POST /token` | runtime | All | Authenticate with username/password to obtain a JWT |
+| 1 | `list_workspaces` | `GET /api/workspace` | runtime | All | List accessible workspaces |
+| 2 | `set_workspace` | `GET /api/workspace/{id}` | runtime | All | Set active workspace for session |
+| 3 | `list_modules` | `GET /api/mcp/` | runtime | All | List all modules in workspace |
+| 4 | `switch_mode` | Server-side | runtime | All | Switch between `runtime` / `configure` / `frontend` server modes |
+| 5 | `get_module_schema` | `GET /api/mcp/{name}?tier=` | configure+ | design, modify | Get module fields, states, activities, flows |
+| 6 | `get_module_canvas` | `GET /api/configure/{name}` | configure+ | modify | Get full module definition with stable IDs |
+| 7 | `list_entries` | `POST /api/mcp/list` | runtime | execute, query | Query entries with filters |
+| 8 | `get_entry` | `POST /api/mcp/entry` | runtime | execute, query | Read a single entry |
+| 9 | `get_form` | `POST /api/mcp/form` | runtime | execute | Get activity form fields and defaults |
+| 10 | `submit_activity` | `POST /api/mcp/activity` | runtime | execute | Perform create/edit/delete/custom activity |
+| 11 | `get_entry_history` | `POST /api/mcp/history` | runtime | query | Get audit trail for an entry |
+| 12 | `upload_file` | `POST /api/mcp/upload` | runtime | execute | Upload a file for File/Image fields (fallback — use the presigned flow by default) |
+| 13 | `download_file` | `GET /api/mcp/download/{name}/s/{guid}/{file}` | runtime | query | Download a file by module name |
+| 14 | `design_workflow` | Server-side | configure+ | design | AI generates a module schema from description |
+| 15 | `validate_design` | Server-side | configure+ | design, modify | Validate a module schema before submission |
+| 16 | `create_module` | `POST /api/configure/{name}` | configure+ | design | Create a new module |
+| 17 | `update_module` | `PUT /api/configure/{name}` | configure+ | modify | Update existing module schema |
+| 18 | `request_upload_url` | `POST /api/mcp/request-upload-url` | runtime | execute | Request a presigned S3 PUT URL for direct large-file upload (up to 500MB) |
+| 19 | `confirm_upload` | `POST /api/mcp/confirm-upload` | runtime | execute | Finalize a presigned upload after the client PUTs the file to S3 |
+
+> **Note:** `get_module_schema` moved behind `configure+` when the mode-switching surface was introduced — runtime sessions discover activity shapes via `get_form` and entry `availableActivities` instead. Switch to `configure` if you need the full fields/states/activities/flows payload.
+
+---
+
+### 2.0a switch_mode
+
+Change the server's visible surface between `runtime`, `configure`, and `frontend` (§1.5). This is the only tool that reveals `configure+` tools/resources/prompts — without calling it, a default-start session can only perform runtime operations.
+
+**Resolver:** Server-side. After state changes, the server emits an `notifications/tools/list_changed` event so connected clients refresh their tool catalog. `notifications/resources/list_changed` and `notifications/prompts/list_changed` fire likewise.
+
+**Input Schema:**
+
+```json
+{
+  "type": "object",
+  "required": ["mode"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["runtime", "configure", "frontend"],
+      "description": "Target server mode. runtime = entry CRUD only. configure = adds module design tools and design-guide. frontend = configure + frontend-guide resource for generating custom UIs."
+    }
+  }
+}
+```
+
+**Response:**
+
+```json
+{ "mode": "configure", "message": "Switched to configure mode" }
+```
+
+**Behavior:**
+
+- Switching to `configure` enables `get_module_schema`, `get_module_canvas`, `design_workflow`, `validate_design`, `create_module`, `update_module`, the `inistate://schema/configure` and `inistate://design-guide` resources, and the `design_factsops_workflow` / `modify_module` prompts.
+- Switching to `frontend` additionally enables `inistate://frontend-guide`.
+- Switching back to `runtime` disables all `configure+` tools, resources, and prompts. Call this when the design/frontend task is complete to reduce per-turn tool-list payload.
+- Idempotent. Calling `switch_mode(runtime)` from `runtime` is a no-op (other than the `message` echo).
+
+> **AGENT INSTRUCTION:** Do not call `switch_mode` speculatively. Switch only when the user's next step actually needs the gated tools. Typical triggers: user asks to create/edit a module (`configure`), or to generate a custom frontend (`frontend`). After the switch, re-read the relevant mode resource (`inistate://schema/configure` + `inistate://design-guide`, or `inistate://frontend-guide`) if you have not already loaded it in this session.
 
 ---
 
@@ -1291,34 +1352,34 @@ The `path` field matches `FileFieldValue.path` / `PresignedUploadResult.path`, s
 
 Resources are read-only data sources that agents can load for background context without making tool calls. They provide ambient knowledge about the workspace and its modules.
 
-| Resource URI | Resolver | Description |
-|---|---|---|
-| `inistate://modules` | `GET /api/mcp/` | List of all modules — quick capability indexing |
-| `inistate://modules/{name}/canvas` | `GET /api/mcp/{name}?tier=basic` | Base schema (fields, states) |
-| `inistate://modules/{name}/canvas/extended` | `GET /api/mcp/{name}?tier=extended` | Full schema with activities and flows |
-| `inistate://schema/runtime` | Bundled file (filtered view) | **Default schema for runtime ops** — use-mode tools, entry/filter types, field value shapes |
-| `inistate://schema/configure` | Bundled file (filtered view) | **Design-mode schema** — ModuleSchema write format, state color palette, module_types, configure tools |
-| `inistate://schema` | Bundled file (read from disk) | Full schema (both modes). Prefer the filtered variants above. |
-| `inistate://design-guide` | Bundled file (read from disk) | FACTS Module Design Guide — requirements questions, state color system, SVG workflow diagrams, design rules |
+| Resource URI | Resolver | Surface | Description |
+|---|---|---|---|
+| `inistate://modules` | `GET /api/mcp/` | runtime | List of all modules — quick capability indexing |
+| `inistate://modules/{name}/canvas` | `GET /api/mcp/{name}?tier=basic` | runtime | Base schema (fields, states) |
+| `inistate://modules/{name}/canvas/extended` | `GET /api/mcp/{name}?tier=extended` | runtime | Full schema with activities and flows |
+| `inistate://schema/runtime` | Bundled file (filtered view) | runtime | **Default schema for runtime ops** — runtime tool specs, entry/filter types, field value shapes |
+| `inistate://schema/configure` | Bundled file (filtered view) | configure+ | **Design-mode schema** — ModuleSchema write format, state color palette, module_types, configure tools |
+| `inistate://design-guide` | Bundled file (read from disk) | configure+ | FACTS Module Design Guide — requirements questions, state color system, SVG workflow diagrams, design rules |
+| `inistate://frontend-guide` | Bundled file (read from disk) | frontend | Inistate REST API reference for hand-writing custom UIs (Vue/React/etc.) that call `api.inistate.com` directly |
 
-> **AGENT INSTRUCTION:** Load resources based on your current mode. Only load ONE schema variant — loading both doubles context cost without adding information.
-> - **Runtime / Execute / Query mode (default, most sessions):** Load `inistate://schema/runtime` + `inistate://modules`. This gives you the tool specs, entry/filter types, and file/module/user value shapes needed for listing, reading, and submitting. Do NOT load the configure variant unless the user asks to design/update a module.
-> - **Design / Modify mode:** Load `inistate://schema/configure` + `inistate://design-guide`. This gives you ModuleSchema, field/state/activity definitions, state color palette, and design rules.
-> - **Mixed session** (rare — runtime that escalates to design mid-conversation): load `inistate://schema/runtime` first; load `inistate://schema/configure` on demand when the user pivots, not pre-emptively.
->
-> This gives you the module vocabulary (field names, state names, activity names) needed to construct correct tool calls at the lowest context cost.
+The **Surface** column follows §1.5: `runtime` resources are visible in every mode; `configure+` resources appear after `switch_mode(configure)` or `switch_mode(frontend)`; the `frontend` resource appears only after `switch_mode(frontend)`. The legacy full-schema resource `inistate://schema` was removed in favor of the filtered variants.
+
+> **AGENT INSTRUCTION:** Load resources based on your current server mode. Only load ONE schema variant — loading both doubles context cost without adding information.
+> - **runtime mode (default, most sessions):** Load `inistate://schema/runtime` + `inistate://modules`. This gives you the runtime tool specs, entry/filter types, and file/module/user value shapes needed for listing, reading, and submitting. Do NOT call `switch_mode` unless the user pivots to design/frontend work.
+> - **configure mode:** Load `inistate://schema/configure` + `inistate://design-guide`. This gives you ModuleSchema, field/state/activity definitions, state color palette, and design rules.
+> - **frontend mode:** Load `inistate://frontend-guide` (plus `inistate://schema/configure` if you also need to iterate on the module schema in the same session). Pair with `get_module_schema(tier=extended)` for the target module so the generated UI knows its fields, states, and activities.
+> - **Mid-session escalation:** if the user pivots from runtime to design or UI-generation, call `switch_mode(configure)` or `switch_mode(frontend)` first, then read the newly-available resource.
 
 ### 3.1 The Schema Resources
 
-The schema is served as three resources with different scopes, all sourced from the same `inistate-schema.json` file:
+The machine-readable schema is served as two filtered views, both derived from the same `inistate-schema.json` file:
 
 | Resource | Approx size | Contents |
 |---|---|---|
 | `inistate://schema/runtime` | ~40 KB | Runtime tools (list/get/submit/upload/download/history), shared types (FieldType, FieldDefinition, StateDefinition, File/Module/User value shapes), entry types, filter operators, `confidence_gate` and `ai_audit_trail` workflow notes |
 | `inistate://schema/configure` | ~25 KB | Configure tools (get_module_schema, create_module, update_module), shared types, ActivityDefinition, FlowDefinition, ModuleSchema write format, `module_types` and `state_color_system` workflow notes |
-| `inistate://schema` | ~66 KB | Full file, both modes. Backward compat; prefer the filtered variants. |
 
-The filtered variants contain:
+The two variants partition the source schema so each mode carries only the content it needs:
 
 - **Valid field types** (`definitions.FieldType.enum`) — both variants
 - **State color palette** (`workflow_guide.state_color_system`) — **configure only**
@@ -1326,44 +1387,63 @@ The filtered variants contain:
 - **AI audit trail expectations** (`workflow_guide.ai_audit_trail`) — **runtime only**
 - **Key rules** (`workflow_guide.key_rules`) — both variants
 
-> **AGENT INSTRUCTION:** Load exactly one schema variant per session based on the user's intent. Most sessions are runtime — default to `inistate://schema/runtime`. Escalate to `inistate://schema/configure` (plus `inistate://design-guide`) only when the user explicitly asks to design or modify a module. Loading the full `inistate://schema` is only appropriate when a single session spans both modes and you cannot reload resources mid-task.
+> **AGENT INSTRUCTION:** Load exactly one schema variant per session based on the user's intent. Most sessions are runtime — default to `inistate://schema/runtime`. Escalate to `inistate://schema/configure` (plus `inistate://design-guide`) only when the user explicitly asks to design or modify a module, after calling `switch_mode(configure)`.
 
 **Implementation:**
 
 ```typescript
-// Register the schema resource
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const { uri } = request.params;
+// Register the schema resources — the configure variant is gated behind
+// switch_mode(configure|frontend) and starts disabled when the server
+// boots in runtime mode.
+server.registerResource(
+  "schema-runtime",
+  "inistate://schema/runtime",
+  { mimeType: "application/json", description: "..." },
+  async (uri) => ({
+    contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_RUNTIME, null, 2) }],
+  }),
+);
 
-  if (uri === "inistate://schema") {
-    return {
-      contents: [{
-        uri: "inistate://schema",
-        mimeType: "application/json",
-        text: JSON.stringify(SCHEMA, null, 2)  // SCHEMA loaded at startup (§14.5)
-      }]
-    };
-  }
-
-  // ... other resource handlers
-});
+const schemaConfigure = server.registerResource(
+  "schema-configure",
+  "inistate://schema/configure",
+  { mimeType: "application/json", description: "..." },
+  async (uri) => ({
+    contents: [{ uri: uri.href, text: JSON.stringify(SCHEMA_CONFIGURE, null, 2) }],
+  }),
+);
+if (!startConfigure) schemaConfigure.disable();   // see §14.4
 ```
 
-**Context window consideration:** The full schema is ~850 lines of JSON. For agents with limited context windows, a future optimization is to expose sub-resources that return only the sections needed:
+### 3.2 The Frontend Guide Resource
 
-| Sub-resource | Returns | Use case |
-|---|---|---|
-| `inistate://schema/field-types` | `definitions.FieldType.enum` | Agent needs to pick a field type |
-| `inistate://schema/colors` | `workflow_guide.state_color_system` | Agent needs to assign state colors |
-| `inistate://schema/validation` | `workflow_guide.key_rules` + all constraint definitions | Agent wants to self-check before calling `validate_design` |
+`inistate://frontend-guide` is exposed only in `frontend` mode (§1.5). It returns a Markdown reference (~13 KB) covering:
 
-These sub-resources are optional for v1.0 — the full `inistate://schema` resource is sufficient.
+- `Authorization` header formats (`fsk` API key and `Bearer` JWT) and the `wsid` workspace header
+- Workspace and module discovery (`/api/workspace`, `/api/mcp/`, `/api/mcp/{name}?tier=`)
+- List / read / form / submit / history endpoints and their request/response shapes
+- Filter operator syntax (mirrors §9)
+- Field value shapes — `Text`, `Number`, `Date`, `File/Image`, `User`, `Module`, `Table`, etc.
+- Two-step presigned uploads (`request-upload-url` → S3 PUT → `confirm-upload`)
+- Error response shape + HTTP status mapping
+- A framework-agnostic reference client plus minimal Vue and React patterns
+
+The guide is intentionally framework-agnostic — it covers the API contract only. The generated UI's look, feel, and component choices are up to the user. Tokens are **user-supplied at runtime** (login form, env var in the host app, OAuth callback) and never baked into generated source. Pair the guide with `get_module_schema(tier=extended)` for the target module to drive form generation.
 
 ---
 
 ## 4. MCP Prompts
 
 Prompts are guided workflows that the MCP server offers to agents. They provide structured templates for common multi-step operations.
+
+| Prompt | Surface | Agent Mode |
+|---|---|---|
+| `execute_activity` | runtime | execute |
+| `diagnose_entry` | runtime | query |
+| `design_factsops_workflow` | configure+ | design |
+| `modify_module` | configure+ | modify |
+
+The configure-gated prompts are hidden until `switch_mode(configure)` or `switch_mode(frontend)` is called (§1.5).
 
 ### 4.1 prompt: design_factsops_workflow
 
@@ -1487,7 +1567,7 @@ Rules:
 - Match existing items by their id field to enable renaming without data loss
 - Every new activity must be referenced by at least one flow
 - Every activity field must reference a field defined in information
-- Load inistate://schema resource if you need valid field types, colors, or actor types
+- Load inistate://schema/configure (plus inistate://design-guide) if you need valid field types, colors, or actor types — both are visible once you are in configure mode
 ```
 
 ---
@@ -1635,7 +1715,10 @@ submit_activity(module, activity, entryId, input, state, ai)
 ```
 list_workspaces() → set_workspace(workspaceId)
 
-[Load resources: inistate://schema, inistate://design-guide]
+switch_mode("configure")
+  → reveals design tools + design resources
+
+[Load resources: inistate://schema/configure, inistate://design-guide]
 
 design_workflow(description, industry)
   → generate ModuleSchema from natural language
@@ -1652,6 +1735,9 @@ create_module(schema)
 
 get_module_schema(module, tier="extended")
   → confirm the module was created correctly
+
+[Optional] switch_mode("runtime")
+  → when returning to entry operations
 ```
 
 ### 6.5 Modify Mode — Detailed Sequence
@@ -1659,7 +1745,10 @@ get_module_schema(module, tier="extended")
 ```
 list_workspaces() → set_workspace(workspaceId)
 
-[Load resource: inistate://schema]
+switch_mode("configure")
+  → reveals get_module_canvas, validate_design, update_module
+
+[Load resource: inistate://schema/configure]
 
 list_modules()
   → find target module
@@ -1674,6 +1763,35 @@ validate_design(modified_schema)
 
 update_module(module, modified_schema)
   → apply changes
+
+[Optional] switch_mode("runtime")
+  → when returning to entry operations
+```
+
+### 6.6 Frontend Mode — Detailed Sequence
+
+Used when the user asks to generate a custom UI (Vue, React, or any framework) that calls `api.inistate.com` directly. The MCP server does not serve the generated app at runtime — it only supplies schema + guide so the agent can emit source files.
+
+```
+list_workspaces() → set_workspace(workspaceId)
+
+switch_mode("frontend")
+  → reveals configure tools + inistate://frontend-guide
+
+[Load resources: inistate://frontend-guide, inistate://schema/configure]
+
+list_modules()
+  → confirm the target module exists
+
+get_module_schema(module, tier="extended")
+  → know the fields, states, activities, and flows the UI must render
+
+[Optional: design_workflow / validate_design / create_module / update_module
+ if the user also wants to iterate on the module schema in the same session.]
+
+[Emit framework-specific source files that use the §10 client pattern
+ from the frontend guide. The generated app reads the user's API token
+ + workspace ID from runtime config — never hard-coded.]
 ```
 
 ---
@@ -2547,6 +2665,12 @@ INISTATE_API_TOKEN=<api_key>
 INISTATE_USERNAME=<username>
 INISTATE_PASSWORD=<password>
 
+# Initial server mode (optional, defaults to "runtime"; see §1.5)
+# runtime   — entry CRUD only (default; smallest on-connect payload)
+# configure — adds module design tools, design-guide, configure prompts
+# frontend  — configure + inistate://frontend-guide
+INISTATE_MCP_MODE=runtime
+
 # HTTP transport port (only for http entry point)
 PORT=3000
 ```
@@ -2558,12 +2682,12 @@ inistate-mcp/
 ├── src/
 │   ├── index.ts        # stdio entry point (dotenv + StdioServerTransport)
 │   ├── http.ts         # Streamable HTTP entry point (dotenv + node:http + StreamableHTTPServerTransport)
-│   ├── server.ts       # createServer() factory — registers tools, resources, prompts
+│   ├── server.ts       # createServer() factory — registers tools, resources, prompts; owns switch_mode + mode gating
 │   ├── api.ts          # HTTP client: auth (API key / JWT / refresh), headers, wsid, request wrapper
-│   ├── tools.ts        # All 17 MCP tool registrations (login … update_module)
-│   ├── resources.ts    # MCP resource URI handlers
-│   ├── prompts.ts      # MCP prompt template definitions
-│   ├── schema.ts       # FACTSOps schema loading, design_workflow logic, validate_design logic
+│   ├── tools.ts        # MCP tool registrations (login … update_module); returns configureTools[]
+│   ├── resources.ts    # MCP resource handlers; returns configureResources[], frontendResources[]
+│   ├── prompts.ts      # MCP prompt templates; returns configurePrompts[]
+│   ├── schema.ts       # FACTSOps schema loading + filtered views, design_workflow logic, validate_design logic
 │   └── schema.test.ts  # Schema validation tests
 ├── package.json
 ├── tsconfig.json
@@ -2581,11 +2705,12 @@ Both entry points call `createServer()` from `server.ts`, which returns a fully 
 
 ### 14.4 Tool Registration Pattern
 
-The server uses the `McpServer` high-level API from `@modelcontextprotocol/sdk` with Zod schemas for input validation:
+The server uses the `McpServer` high-level API from `@modelcontextprotocol/sdk` with Zod schemas for input validation. The registration helpers return handles to the `configure+` tools, resources, and prompts so the `createServer` factory can disable them when the server boots in `runtime` mode and re-enable them on `switch_mode` (§1.5, §2.0a):
 
 ```typescript
 // server.ts — factory function
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { registerTools } from "./tools.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -2595,19 +2720,64 @@ export function createServer(): McpServer {
     name: "inistate-mcp",
     version: "1.0.0",
   });
-  registerTools(server);
-  registerResources(server);
-  registerPrompts(server);
+
+  const { configureTools } = registerTools(server);
+  const { configureResources, frontendResources } = registerResources(server);
+  const { configurePrompts } = registerPrompts(server);
+
+  // Initial mode: runtime by default. Set INISTATE_MCP_MODE=configure to expose
+  // the full configure surface on connect. Set INISTATE_MCP_MODE=frontend for
+  // configure + the frontend-guide resource.
+  const envMode = (process.env.INISTATE_MCP_MODE || "").toLowerCase();
+  const startConfigure = envMode === "configure" || envMode === "frontend";
+  const startFrontend = envMode === "frontend";
+
+  if (!startConfigure) {
+    for (const t of configureTools) t.disable();
+    for (const r of configureResources) r.disable();
+    for (const p of configurePrompts) p.disable();
+  }
+  if (!startFrontend) {
+    for (const r of frontendResources) r.disable();
+  }
+
+  server.registerTool(
+    "switch_mode",
+    {
+      description: "Switch tool surface between runtime / configure / frontend.",
+      inputSchema: {
+        mode: z.enum(["runtime", "configure", "frontend"]),
+      },
+    },
+    async ({ mode }) => {
+      const enableConfigure = mode === "configure" || mode === "frontend";
+      const enableFrontend = mode === "frontend";
+      for (const t of configureTools) enableConfigure ? t.enable() : t.disable();
+      for (const r of configureResources) enableConfigure ? r.enable() : r.disable();
+      for (const p of configurePrompts) enableConfigure ? p.enable() : p.disable();
+      for (const r of frontendResources) enableFrontend ? r.enable() : r.disable();
+      return {
+        content: [{ type: "text", text: JSON.stringify({ mode, message: `Switched to ${mode} mode` }, null, 2) }],
+      };
+    },
+  );
+
   return server;
 }
 ```
 
+`RegisteredTool.disable()` / `.enable()` (and the equivalent on resources and prompts) automatically fire `notifications/tools/list_changed`, `notifications/resources/list_changed`, and `notifications/prompts/list_changed` so connected clients refresh their local catalog without reconnecting. Measured on-connect payload for a `runtime` start: ~5.5k tokens (vs. ~11k for `configure` / `frontend`).
+
 ```typescript
-// tools.ts — tool registration example
+// tools.ts — tool registration returns handles for mode-gated tools
 import { z } from "zod";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as api from "./api.js";
 
-export function registerTools(server: McpServer) {
+export function registerTools(server: McpServer): { configureTools: RegisteredTool[] } {
+  const configureTools: RegisteredTool[] = [];
+
+  // Runtime-visible tool (always on)
   server.registerTool(
     "login",
     {
@@ -2623,20 +2793,28 @@ export function registerTools(server: McpServer) {
     },
   );
 
-  server.registerTool(
-    "list_workspaces",
-    {
-      description: "List workspaces the current user has access to...",
-      inputSchema: {},
-    },
-    async () => {
-      const data = await api.get("/api/workspace");
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    },
+  server.registerTool("list_workspaces", { /* ... */ }, async () => { /* ... */ });
+
+  // Configure-gated tool — returned to the factory so it can be disabled
+  // when the server starts in runtime mode.
+  configureTools.push(
+    server.registerTool(
+      "create_module",
+      {
+        description: "Create a new module from a ModuleSchema...",
+        inputSchema: { /* ... */ },
+      },
+      async (input) => { /* ... */ },
+    ),
   );
-  // ... remaining tools
+
+  // ... remaining tools (configureTools.push(...) for every configure-gated tool)
+
+  return { configureTools };
 }
 ```
+
+`registerResources` and `registerPrompts` follow the same pattern, returning `configureResources`, `frontendResources`, and `configurePrompts` respectively so the factory can toggle them together.
 
 ```typescript
 // index.ts — stdio entry point

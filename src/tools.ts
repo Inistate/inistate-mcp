@@ -4,6 +4,15 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import * as api from "./api.js";
 import {
+  clearFlagged,
+  evaluateActivity,
+  getModuleFieldTypes,
+  getPriorFlag,
+  recordFlagged,
+  validateInputShapes,
+  validateInputShapesWith,
+} from "./activity-guard.js";
+import {
   designWorkflow,
   validateDesign,
 } from "./schema.js";
@@ -22,7 +31,7 @@ function log(tool: string, detail: string) {
 
 function ok(data: unknown) {
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(data) }],
   };
 }
 
@@ -33,7 +42,7 @@ function err(e: unknown) {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify((e as any).structured, null, 2),
+          text: JSON.stringify((e as any).structured),
         },
       ],
     };
@@ -130,6 +139,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
   server.registerTool(
     "list_workspaces",
     {
+      title: "List Workspaces",
       description:
         "List workspaces the current user has access to. Call set_workspace to select one before any module or entry tools. This is typically the first tool to call in any session.",
       inputSchema: {
@@ -138,6 +148,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
           .optional()
           .describe("Optional name filter (case-insensitive)"),
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ search }) => {
       try {
@@ -156,6 +167,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
   server.registerTool(
     "set_workspace",
     {
+      title: "Set Active Workspace",
       description: `Set the active workspace for the current session. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
 
 Workflow sequences after workspace is set:
@@ -168,6 +180,7 @@ Workflow sequences after workspace is set:
           .string()
           .describe("Workspace ID from list_workspaces"),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       try {
@@ -186,11 +199,13 @@ Workflow sequences after workspace is set:
   server.registerTool(
     "list_modules",
     {
+      title: "List Modules",
       description:
         "List all discoverable modules in the current workspace. Call this to find module names for execute, modify, and query operations.",
       inputSchema: {
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       try {
@@ -209,6 +224,7 @@ Workflow sequences after workspace is set:
   configureTools.push(server.registerTool(
     "get_module_schema",
     {
+      title: "Get Module Schema",
       description:
         "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.",
       inputSchema: {
@@ -221,6 +237,7 @@ Workflow sequences after workspace is set:
           ),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, tier, workspaceId }) => {
       try {
@@ -241,6 +258,7 @@ Workflow sequences after workspace is set:
   configureTools.push(server.registerTool(
     "get_module_canvas",
     {
+      title: "Get Module Canvas",
       description: `Get the full module definition with stable IDs. The output is round-trippable — modify and send back via update_module. Use this when modifying a module to preserve IDs for renaming.
 
 Modify workflow: list_modules → get_module_canvas → (apply changes) → validate_design → update_module.
@@ -249,6 +267,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         module: z.string().describe("Module name or numeric ID"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, workspaceId }) => {
       try {
@@ -269,8 +288,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "list_entries",
     {
+      title: "List Entries",
       description:
-        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.",
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. System fields (id, state, audit metadata, etc.) are always returned regardless.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         state: z.string().optional(),
@@ -280,10 +300,17 @@ Load resource inistate://schema before modifying to know valid field types, colo
         sortDirection: z.enum(["asc", "desc"]).default("asc").optional(),
         currentPage: z.number().int().default(0).optional(),
         pageSize: z.number().int().default(50).optional().describe("Default 50, max 500"),
+        fields: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Field display names (or raw field names) to include in each entry's `data`. Strongly preferred over returning everything when the module has many or large fields — prunes both DB I/O and response tokens. Omit only when you actually need the full row. System fields are always returned.",
+          ),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, workspaceId }) => {
+    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
         const body: Record<string, unknown> = { module: moduleName };
@@ -294,6 +321,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if (sortDirection) body.sortDirection = sortDirection;
         if (currentPage !== undefined) body.currentPage = currentPage;
         if (pageSize !== undefined) body.pageSize = pageSize;
+        if (fields && fields.length > 0) body.fields = fields;
         const data = await api.post("/api/mcp/list", body);
         return ok(data);
       } catch (e) {
@@ -308,6 +336,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "get_entry",
     {
+      title: "Get Entry",
       description:
         "Read a single entry by its ID. Returns current field values, state, audit metadata, and available activities.",
       inputSchema: {
@@ -317,6 +346,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Entry ID"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, workspaceId }) => {
       try {
@@ -338,6 +368,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "get_form",
     {
+      title: "Get Activity Form",
       description:
         "Get the form fields, current values, and options for a module activity. ALWAYS call this before submit_activity to discover required fields, their types, valid options, default values, and the confidence threshold. Never fabricate form data — if required fields cannot be confidently populated, ask the user.",
       inputSchema: {
@@ -354,6 +385,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Entry ID for edit/view/custom activities. Omit for create."),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, activity, entryId, workspaceId }) => {
       try {
@@ -377,8 +409,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "submit_activity",
     {
+      title: "Submit Activity",
       description:
-        "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED for every submission (reasoning + model + confidence at minimum) — submissions without it are rejected. If ai.confidence < the activity's confidence_threshold, the state transition is suppressed and the entry is flagged for human review. See ActivitySubmission in inistate://schema/runtime for full input shapes.",
+        "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime.",
       inputSchema: {
         module: z.string(),
         activity: z.string().default("create"),
@@ -387,14 +420,14 @@ Load resource inistate://schema before modifying to know valid field types, colo
         input: z
           .record(z.unknown())
           .optional()
-          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {value,id}. User: {value,id,username}. Plural variants use arrays."),
+          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
-        comment: z.string().optional(),
+        comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
         due: z.string().optional().describe("ISO 8601"),
         ai: z
           .object({
-            reasoning: z.string().describe("Why the AI chose this action"),
+            reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
             model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
             confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
             sources: z
@@ -410,8 +443,15 @@ Load resource inistate://schema before modifying to know valid field types, colo
             prompt_hash: z.string().optional(),
           })
           .describe("REQUIRED — AI agent traceability"),
+        confirmed: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true only after explicit user authorization. Required for: changeStatus, state override, hybrid actor, retry after flag. Does not unlock human-actor activities. See inistate://guardrails.",
+          ),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async ({
       module: moduleName,
@@ -424,10 +464,49 @@ Load resource inistate://schema before modifying to know valid field types, colo
       assignees,
       due,
       ai,
+      confirmed,
       workspaceId,
     }) => {
       try {
         applyWorkspace(workspaceId);
+        const guard = await evaluateActivity({
+          module: moduleName,
+          activity,
+          entryId,
+          entryIds,
+          state,
+          confidence: ai?.confidence ?? 0,
+          confirmed,
+        });
+        if (!guard.ok) {
+          const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+          log(
+            "submit_activity",
+            `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${guard.structured.error}`,
+          );
+          return err({ structured: guard.structured });
+        }
+        // Reference-shape pre-flight: User/Module fields must be { id, value }.
+        if (input) {
+          const shapeErrors = await validateInputShapes(moduleName, input);
+          if (shapeErrors.length > 0) {
+            const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+            const structured = {
+              error: "invalid_reference_field_shape",
+              message:
+                "One or more User/Module fields were submitted with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+              activity,
+              fields: shapeErrors,
+              agent_action:
+                "Re-read the entry or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
+            };
+            log(
+              "submit_activity",
+              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: invalid_reference_field_shape (${shapeErrors.length} field${shapeErrors.length === 1 ? "" : "s"})`,
+            );
+            return err({ structured });
+          }
+        }
         // Normalize file field inputs: remap 'url' → 'path' if client sent { name, url } instead of { name, path }
         if (input) {
           for (const key of Object.keys(input)) {
@@ -466,11 +545,273 @@ Load resource inistate://schema before modifying to know valid field types, colo
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} payload=${JSON.stringify(body)}`);
         const data = await api.post("/api/mcp/activity", body);
-        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ok`);
+        const flagged =
+          data && typeof data === "object" && (data as Record<string, unknown>).flagged === true;
+        const flagTargets: Array<string | number | undefined> =
+          entryIds && entryIds.length > 0 ? entryIds : [entryId];
+        for (const t of flagTargets) {
+          if (flagged) {
+            recordFlagged(moduleName, t, activity, ai?.confidence ?? 0);
+          } else {
+            clearFlagged(moduleName, t, activity);
+          }
+        }
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ${flagged ? "flagged" : "ok"}`);
         return ok(data);
       } catch (e) {
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        return err(e);
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════
+  // 9b. submit_activities (bulk)
+  // ═══════════════════════════════════════════
+  server.registerTool(
+    "submit_activities",
+    {
+      title: "Submit Activities (Bulk)",
+      description:
+        "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once — saves substantial agent tokens by collapsing N tool turns into one.\n\nShape: top-level `module`, `activity`, and a default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`). When an item supplies its own `ai`, it wholly replaces the top-level `ai` for that item — no partial merge.\n\nExecution: items run sequentially fail-soft on the server. One item's failure does not abort the rest; per-item outcomes (success/failure, entryId, flagged, validation details) are returned in `results`. Use `clientRef` to correlate items to your local plan.\n\nLimits: max 100 items per request. Beyond that, chunk and retry.\n\nGuardrails: same `submit_activity` rules apply at the batch level — actor='human' rejects the whole batch; actor='hybrid' or activity='changeStatus' or top-level `state` requires `confirmed: true`. Per-item state overrides also require `confirmed: true`.",
+      inputSchema: {
+        module: z.string(),
+        activity: z.string().default("create"),
+        ai: z
+          .object({
+            reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
+            model: z.string(),
+            confidence: z.number().min(0).max(1),
+            sources: z
+              .array(
+                z.object({
+                  type: z.string().optional(),
+                  reference: z.string().optional(),
+                  excerpt: z.string().optional(),
+                }),
+              )
+              .optional(),
+            model_version: z.string().optional(),
+            prompt_hash: z.string().optional(),
+          })
+          .describe("Default AI traceability applied to every item that does not specify its own."),
+        items: z
+          .array(
+            z.object({
+              entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
+              input: z
+                .record(z.unknown())
+                .optional()
+                .describe("Field values keyed by display name. Same shape as submit_activity.input."),
+              state: z.string().optional().describe("Per-item target state name"),
+              comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
+              assignees: z.array(z.string()).optional(),
+              due: z.string().optional().describe("ISO 8601"),
+              ai: z
+                .object({
+                  reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
+                  model: z.string(),
+                  confidence: z.number().min(0).max(1),
+                  sources: z
+                    .array(
+                      z.object({
+                        type: z.string().optional(),
+                        reference: z.string().optional(),
+                        excerpt: z.string().optional(),
+                      }),
+                    )
+                    .optional(),
+                  model_version: z.string().optional(),
+                  prompt_hash: z.string().optional(),
+                })
+                .optional()
+                .describe("Optional per-item ai override. Wholly replaces top-level ai for this item."),
+              clientRef: z
+                .string()
+                .optional()
+                .describe("Optional caller-supplied correlation id, echoed back on the result."),
+            }),
+          )
+          .min(1)
+          .max(100)
+          .describe("1-100 items. Each item carries only what differs from the top-level activity."),
+        confirmed: z
+          .boolean()
+          .optional()
+          .describe(
+            "REQUIRED when the activity is 'changeStatus', any per-item or top-level `state` override is supplied, or the activity's actor is 'hybrid'. Set true ONLY after surfacing the planned bulk action to the user.",
+          ),
+        workspaceId: wsParam,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
+      try {
+        applyWorkspace(workspaceId);
+
+        // Batch-level guard for actor (human/hybrid) and changeStatus rules,
+        // which apply uniformly to the whole batch since module + activity are shared.
+        const guard = await evaluateActivity({
+          module: moduleName,
+          activity,
+          confidence: ai?.confidence ?? 0,
+          confirmed,
+        });
+        if (!guard.ok) {
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: ${guard.structured.error}`,
+          );
+          return err({ structured: guard.structured });
+        }
+
+        // Any per-item state override also requires explicit confirmation.
+        const itemsWithState = items
+          .map((it, i) => ({ idx: i, state: it.state }))
+          .filter((x) => !!x.state);
+        if (itemsWithState.length > 0 && !confirmed) {
+          const structured = {
+            error: "state_override_requires_confirmation",
+            message:
+              "One or more items pass a 'state' override. Bulk state changes require explicit user authorization — surface the planned changes and resubmit with confirmed: true.",
+            activity,
+            items: itemsWithState,
+            agent_action:
+              "Show the user the per-item state changes you intend to make, then resubmit with confirmed: true.",
+          };
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: state_override_requires_confirmation (${itemsWithState.length} items)`,
+          );
+          return err({ structured });
+        }
+
+        // Per-item confidence inflation: each item may override `ai`, so we
+        // can't fold this into the batch-level evaluateActivity call.
+        if (!confirmed) {
+          const inflated: Array<{ idx: number; entryId?: string | number; previous: number; current: number }> = [];
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const itemAi = item.ai ?? ai;
+            const conf = itemAi?.confidence ?? 0;
+            const prior = getPriorFlag(moduleName, item.entryId, activity);
+            if (prior && conf > prior.confidence + 1e-6) {
+              inflated.push({ idx: i, entryId: item.entryId, previous: prior.confidence, current: conf });
+            }
+          }
+          if (inflated.length > 0) {
+            const structured = {
+              error: "confidence_inflation_blocked",
+              message:
+                "One or more items target entries that were previously flagged for human review and would be resubmitted with a higher confidence. Surface the flag(s) to the user.",
+              activity,
+              items: inflated,
+              agent_action:
+                "Stop. Tell the user which entries were flagged. Do not retry these items with a higher confidence on your own. If the user explicitly authorizes proceeding, resubmit with confirmed: true.",
+            };
+            log(
+              "submit_activities",
+              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: confidence_inflation_blocked (${inflated.length} items)`,
+            );
+            return err({ structured });
+          }
+        }
+
+        // Reference-shape pre-flight: User/Module fields must be { id, value }
+        // (User adds `username`). Fetch the field-type map once for the whole
+        // batch — the per-item check is then synchronous.
+        const fieldTypes = await getModuleFieldTypes(moduleName);
+        const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          if (!it.input) continue;
+          const errs = validateInputShapesWith(fieldTypes, it.input as Record<string, unknown>);
+          if (errs.length > 0) shapeFailures.push({ idx: i, fields: errs });
+        }
+        if (shapeFailures.length > 0) {
+          const structured = {
+            error: "invalid_reference_field_shape",
+            message:
+              "One or more items submit User/Module fields with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+            activity,
+            items: shapeFailures,
+            agent_action:
+              "Re-read the entries or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
+          };
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: invalid_reference_field_shape (${shapeFailures.length} items)`,
+          );
+          return err({ structured });
+        }
+
+        // Normalize file fields per item: remap 'url' → 'path' if needed.
+        for (const item of items) {
+          if (!item.input) continue;
+          for (const key of Object.keys(item.input)) {
+            const val = (item.input as Record<string, unknown>)[key];
+            if (val && typeof val === "object" && !Array.isArray(val)) {
+              const obj = val as Record<string, unknown>;
+              if (obj.url && !obj.path) {
+                obj.path = obj.url;
+                delete obj.url;
+              }
+            } else if (Array.isArray(val)) {
+              for (const sub of val) {
+                if (sub && typeof sub === "object") {
+                  const obj = sub as Record<string, unknown>;
+                  if (obj.url && !obj.path) {
+                    obj.path = obj.url;
+                    delete obj.url;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        const body: Record<string, unknown> = {
+          module: moduleName,
+          activity,
+          items,
+        };
+        if (ai) body.ai = ai;
+
+        log(
+          "submit_activities",
+          `module=${moduleName} activity=${activity} count=${items.length}`,
+        );
+        const data = (await api.post("/api/mcp/activity/bulk", body)) as Record<string, unknown>;
+
+        // Update flag cache from per-item results so future submit_activity
+        // calls on the same entries see the prior flag.
+        const results = Array.isArray((data as { results?: unknown }).results)
+          ? ((data as { results: Array<Record<string, unknown>> }).results)
+          : [];
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          const itemAi = items[i]?.ai ?? ai;
+          const conf = itemAi?.confidence ?? 0;
+          const targetEntryId = (r.entryId as string | number | undefined) ?? items[i]?.entryId;
+          if (r.flagged === true) {
+            recordFlagged(moduleName, targetEntryId, activity, conf);
+          } else if (r.success === true) {
+            clearFlagged(moduleName, targetEntryId, activity);
+          }
+        }
+
+        const summary = (data as { summary?: { succeeded?: number; failed?: number; flagged?: number } }).summary;
+        log(
+          "submit_activities",
+          `module=${moduleName} activity=${activity} count=${items.length} → ok=${summary?.succeeded ?? "?"} fail=${summary?.failed ?? "?"} flagged=${summary?.flagged ?? "?"}`,
+        );
+        return ok(data);
+      } catch (e) {
+        log(
+          "submit_activities",
+          `module=${moduleName} activity=${activity} count=${items.length} → FAILED: ${e instanceof Error ? e.message : String(e)}`,
+        );
         return err(e);
       }
     },
@@ -482,6 +823,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "get_entry_history",
     {
+      title: "Get Entry History",
       description:
         "Get the audit trail and comments for an entry. Returns chronological list of actions (create, edit, state changes, comments) with field-level change details and AI traceability context.",
       inputSchema: {
@@ -497,6 +839,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("Page number (0-based, 50 items per page)"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, page, workspaceId }) => {
       try {
@@ -520,6 +863,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "upload_file",
     {
+      title: "Upload File (Fallback)",
       description:
         "FALLBACK ONLY — do NOT use this by default. Always use request_upload_url + confirm_upload first; call this tool only after the presigned flow has actually failed (e.g. request_upload_url errored, or the PUT/confirm step failed for non-retryable reasons). Uploads a file to S3 via base64/multipart. Returns { path, filename, mimeType, size }. Use the returned path as the 'path' value in File/Image fields for submit_activity (e.g. { name: 'photo.jpg', path: result.path }). Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi.",
       inputSchema: {
@@ -534,6 +878,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("MIME type of the file"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ module: moduleName, name: fileName, file: fileContent, mimeType, workspaceId }) => {
       try {
@@ -560,6 +905,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "download_file",
     {
+      title: "Download File",
       description:
         "Download a file by module name. Construct the URL from a File/Image field value: field.path = '/s/{guid}/{fileName}'. Returns a pre-signed S3 URL (1hr TTL).",
       inputSchema: {
@@ -568,6 +914,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         fileName: z.string().describe("Original filename"),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ moduleName, guid, fileName, workspaceId }) => {
       try {
@@ -591,6 +938,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "request_upload_url",
     {
+      title: "Request Upload URL",
       description: `DEFAULT upload path — ALWAYS use this for every file upload (any size, up to 500MB). Only fall back to upload_file if this flow actually fails. Three-step flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403 SignatureDoesNotMatch), 3) call confirm_upload({ s3Key }). The path returned by confirm_upload is used directly as the File/Image field value in submit_activity. uploadUrl expires in ~1 hour and cannot be renewed — call this again on expiry.`,
       inputSchema: {
         module: z
@@ -608,6 +956,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("File size in bytes. Must be > 0 and ≤ 500MB (524288000)."),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ module: moduleName, fileName, contentType, fileSize, workspaceId }) => {
       try {
@@ -634,6 +983,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   server.registerTool(
     "confirm_upload",
     {
+      title: "Confirm Upload",
       description: `Confirm a presigned upload completed. Call after successfully PUTting the file to the uploadUrl from request_upload_url. The server verifies the object exists in S3, reads its metadata, and tracks workspace storage. Only s3Key is required — filename, size, and MIME type are resolved from S3. Returns { url, filename, mimeType, size } where url is the /s/ path usable as a File/Image field value. Returns 400 if the file is not found in S3 — ensure the PUT completed before calling.`,
       inputSchema: {
         s3Key: z
@@ -641,6 +991,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("The s3Key returned from request_upload_url."),
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ s3Key, workspaceId }) => {
       try {
@@ -662,6 +1013,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
   configureTools.push(server.registerTool(
     "design_workflow",
     {
+      title: "Design Workflow",
       description: `Generate a scaffolded ModuleSchema template from a natural language description. Use when the user wants to create a new module or workflow.
 
 Design workflow: design_workflow → (complete template) → validate_design → create_module → get_module_schema(tier=extended).
@@ -687,6 +1039,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
             "Industry context for compliance-aware defaults. Affects: default audit fields, confidence thresholds, actor type suggestions.",
           ),
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ description, industry }) => {
       const result = designWorkflow(description, industry);
@@ -700,6 +1053,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   configureTools.push(server.registerTool(
     "validate_design",
     {
+      title: "Validate Design",
       description:
         "Validate a module schema before creating or updating. Checks structural integrity against all FACTSOps rules without submitting to the API. Passing validate_design guarantees the subsequent create_module/update_module call will not fail with 422. Always call this before create_module or update_module.",
       inputSchema: {
@@ -713,6 +1067,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
             "create = new module (all rules). update = merge (omitted sections acceptable).",
           ),
       },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ schema, mode }) => {
       const result = validateDesign(schema as Record<string, any>, mode);
@@ -726,6 +1081,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   configureTools.push(server.registerTool(
     "create_module",
     {
+      title: "Create Module",
       description:
         "Create a new module. Supports workflow modules (states, activities, flows) and record list modules (fields only). Requires Administrator, Consultant, or Workspace Admin role. Always call validate_design first. See inistate://schema/configure for field types, color palette, and design rules.",
       inputSchema: {
@@ -733,6 +1089,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({
       name,
@@ -754,10 +1111,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         log("create_module", `name=${name}`);
-        const data = await api.post(
-          `/api/configure/`,
-          body,
-        );
+        const data = await api.post(`/api/configure`, body);
         log("create_module", `name=${name} → ok`);
         return ok(data);
       } catch (e) {
@@ -773,14 +1127,18 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   configureTools.push(server.registerTool(
     "update_module",
     {
+      title: "Update Module",
       description:
-        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain stable ids, then validate_design before submitting.",
+        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain the stable module id and item ids, then validate_design before submitting.",
       inputSchema: {
-        id: z.string().describe("Module ID from get_module_canvas"),
+        id: z
+          .union([z.string(), z.number()])
+          .describe("Module id from get_module_canvas. Identifies which module to update."),
         name: z.string().optional().describe("New module name (for renaming)"),
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async ({
       id,
@@ -803,11 +1161,8 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
-        log("update_module", `id=${id}${name ? ` name=${name}` : ""}`);
-        const data = await api.put(
-          `/api/configure/`,
-          body,
-        );
+        log("update_module", `id=${id}${name ? ` newName=${name}` : ""}`);
+        const data = await api.put(`/api/configure`, body);
         log("update_module", `id=${id} → ok`);
         return ok(data);
       } catch (e) {

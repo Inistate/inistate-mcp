@@ -1,0 +1,15 @@
+src/
+.env
+.env.example
+.mcp.json
+.claude/
+*.test.ts
+tsconfig.json
+Dockerfile
+docker-compose.yml
+deploy-ec2.sh
+*.log
+build/*.log
+Inistate_MCP_Server_Specification.md
+inistate-sample.json
+.gitignore

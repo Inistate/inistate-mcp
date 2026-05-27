@@ -9,14 +9,36 @@ MCP server for the [Inistate](https://inistate.com) platform — module discover
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `INISTATE_API_TOKEN` | Yes | — | Bearer token for Inistate API authentication |
-| `INISTATE_API_URL` | No | `https://api.inistate.com` | API base URL |
+| `INISTATE_API_BASE` | No | `https://api.inistate.com` | API base URL |
 
-### Install & Build
+### Install from npm (recommended)
+
+No clone or build needed — `npx` will fetch and run the published package on demand:
 
 ```bash
-npm install
-npm run build
+npx -y inistate-mcp
 ```
+
+Or install globally:
+
+```bash
+npm install -g inistate-mcp
+inistate-mcp
+```
+
+### Interactive setup (recommended)
+
+Run the binary in a terminal with no MCP client attached and it walks you through entering your API token and picks the right config file for your client:
+
+```bash
+npx -y inistate-mcp
+# or, explicitly:
+npx -y inistate-mcp setup
+```
+
+Supported clients: Claude Desktop, Claude Code (global or project-local `.mcp.json`), Cursor, Windsurf, Codex CLI, VS Code (user profile or workspace `.vscode/mcp.json`), Cline, Gemini CLI (global or workspace). Pick "Print config only" to get a JSON block to paste anywhere else.
+
+The wizard only runs when stdin is a TTY (i.e., you launched it yourself). When an MCP client spawns the binary via piped stdio, it skips the wizard and runs as a normal MCP server — set `INISTATE_MCP_NO_SETUP=1` if you need to force server mode from a terminal.
 
 ### Claude Desktop Configuration
 
@@ -26,8 +48,8 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "inistate": {
-      "command": "node",
-      "args": ["/absolute/path/to/inistate-mcp/build/index.js"],
+      "command": "npx",
+      "args": ["-y", "inistate-mcp"],
       "env": {
         "INISTATE_API_TOKEN": "your-token-here"
       }
@@ -39,16 +61,24 @@ Add to your `claude_desktop_config.json`:
 ### Claude Code Configuration
 
 ```bash
-claude mcp add inistate -- node /absolute/path/to/inistate-mcp/build/index.js
+claude mcp add inistate -e INISTATE_API_TOKEN=your-token-here -- npx -y inistate-mcp
 ```
 
-Set the environment variable `INISTATE_API_TOKEN` before launching.
+### Install from source
+
+```bash
+git clone https://github.com/Inistate/inistate-mcp.git
+cd inistate-mcp
+npm install
+npm run build
+```
+
+Then point your MCP client at `node /absolute/path/to/inistate-mcp/build/index.js`.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `resolve_intent` | Classify a user request into design/execute/modify/query/ambiguous mode |
 | `list_workspaces` | List workspaces the user has access to |
 | `set_workspace` | Set the active workspace |
 | `list_modules` | List all discoverable modules in the workspace |
@@ -86,14 +116,13 @@ Set the environment variable `INISTATE_API_TOKEN` before launching.
 
 ## Typical Workflow
 
-1. `resolve_intent` — classify the user's request
-2. `list_workspaces` → `set_workspace` — select a workspace
-3. `list_modules` — find the module you need
-4. `get_module_schema` — understand its fields, states, and activities
-5. `get_form` — discover required fields before submitting
-6. `submit_activity` — create or update entries
-7. `list_entries` — query and browse data
-8. `get_entry_history` — review entry history
+1. `list_workspaces` → `set_workspace` — select a workspace
+2. `list_modules` — find the module you need
+3. `get_module_schema` — understand its fields, states, and activities
+4. `get_form` — discover required fields before submitting
+5. `submit_activity` — create or update entries
+6. `list_entries` — query and browse data
+7. `get_entry_history` — review entry history
 
 ## Development
 
@@ -201,7 +230,7 @@ Tests are in `src/` alongside the source files and use [Vitest](https://vitest.d
 
 | File | Type | What it covers |
 |------|------|----------------|
-| `src/schema.test.ts` | Unit tests (50) | `resolveIntent`, `designWorkflow`, `validateDesign`, helper functions (`isValidFieldType`, `isValidColor`, `isValidActor`, `suggestColorForState`) |
+| `src/schema.test.ts` | Unit tests (50) | `designWorkflow`, `validateDesign`, helper functions (`isValidFieldType`, `isValidColor`, `isValidActor`, `suggestColorForState`) |
 | `src/server.test.ts` | Integration tests (14) | Spins up the MCP server as a child process and exercises it through the official MCP SDK client — tool discovery, resource reads, prompt retrieval, and local tool calls |
 
 Unit tests cover:
@@ -213,7 +242,7 @@ Unit tests cover:
 
 Integration tests verify (no API token needed):
 - All 17 tools, 5 resources, and 3 prompts are registered
-- `resolve_intent`, `design_workflow`, `validate_design` work end-to-end through the MCP protocol
+- `design_workflow`, `validate_design` work end-to-end through the MCP protocol
 - Static resources (`inistate://schema`, `inistate://design-guide`) return valid content
 - All 3 prompts return correctly templated messages
 

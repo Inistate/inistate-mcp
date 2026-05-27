@@ -41,38 +41,65 @@ function rpc(child, id, method, params = {}) {
   });
 }
 
-async function main() {
+async function spawnServer(mode) {
   const child = spawn("node", [ENTRY], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env },
+    env: { ...process.env, INISTATE_MCP_MODE: mode },
   });
   child.stderr.on("data", () => { /* swallow logs */ });
-
-  // Initialize
   await rpc(child, 1, "initialize", {
     protocolVersion: "2024-11-05",
     capabilities: {},
     clientInfo: { name: "measure", version: "1" },
   });
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  return child;
+}
 
-  const tools = await rpc(child, 2, "tools/list");
-  const resources = await rpc(child, 3, "resources/list");
-  const prompts = await rpc(child, 4, "prompts/list");
+async function main() {
+  // Runtime mode — narrowed surface
+  const rt = await spawnServer("runtime");
+  const tools = await rpc(rt, 2, "tools/list");
+  const resources = await rpc(rt, 3, "resources/list");
+  const prompts = await rpc(rt, 4, "prompts/list");
 
-  // Switch to configure mode and re-fetch
-  await rpc(child, 5, "tools/call", { name: "switch_mode", arguments: { mode: "configure" } });
-  const toolsCfg = await rpc(child, 6, "tools/list");
-  const resourcesCfg = await rpc(child, 7, "resources/list");
-  const promptsCfg = await rpc(child, 8, "prompts/list");
+  // Read each resource to measure content cost (skip API-backed ones that need auth)
+  const STATIC_URIS = [
+    "inistate://schema/runtime",
+    "inistate://guardrails",
+  ];
+  const resourceReads = {};
+  for (const uri of STATIC_URIS) {
+    try {
+      const res = await rpc(rt, 100, "resources/read", { uri });
+      resourceReads[uri] = res.contents?.[0]?.text ?? "";
+    } catch (e) { resourceReads[uri] = ""; }
+  }
+  rt.kill();
 
-  child.kill();
+  // Configure mode — full surface
+  const cfg = await spawnServer("configure");
+  const toolsCfg = await rpc(cfg, 2, "tools/list");
+  const resourcesCfg = await rpc(cfg, 3, "resources/list");
+  const promptsCfg = await rpc(cfg, 4, "prompts/list");
+  const CFG_STATIC_URIS = [
+    "inistate://schema/configure",
+    "inistate://design-guide",
+  ];
+  for (const uri of CFG_STATIC_URIS) {
+    try {
+      const res = await rpc(cfg, 100, "resources/read", { uri });
+      resourceReads[uri] = res.contents?.[0]?.text ?? "";
+    } catch { resourceReads[uri] = ""; }
+  }
+  cfg.kill();
 
   function reportSurface(label, t, r, p) {
+    // Compact JSON = what the MCP SDK actually sends over the wire.
     const sections = {
-      tools: JSON.stringify(t, null, 2),
-      resources: JSON.stringify(r, null, 2),
-      prompts: JSON.stringify(p, null, 2),
+      tools: JSON.stringify(t),
+      resources: JSON.stringify(r),
+      prompts: JSON.stringify(p),
     };
     console.log(`\n=== ${label} ===\n`);
     let totalChars = 0;
@@ -91,13 +118,20 @@ async function main() {
     return totalChars;
   }
 
-  const runtimeChars = reportSurface("Runtime mode (default on connect)", tools, resources, prompts);
-  const cfgChars = reportSurface("Configure mode (after switch_mode)", toolsCfg, resourcesCfg, promptsCfg);
-  console.log(`\nDelta when switching to configure: +${cfgChars - runtimeChars} chars (~${Math.round((cfgChars - runtimeChars) / 4)} tokens)`);
+  const runtimeChars = reportSurface("Runtime mode (INISTATE_MCP_MODE=runtime)", tools, resources, prompts);
+  const cfgChars = reportSurface("Configure mode (default startup)", toolsCfg, resourcesCfg, promptsCfg);
+  console.log(`\nDelta runtime → configure: +${cfgChars - runtimeChars} chars (~${Math.round((cfgChars - runtimeChars) / 4)} tokens)`);
+
+  // Resource content cost (paid only when AI reads the resource)
+  console.log("\n=== Resource content (cost when AI reads the resource) ===\n");
+  for (const [uri, text] of Object.entries(resourceReads)) {
+    const tk = estimateTokens(text);
+    console.log(`  ${uri.padEnd(36)} chars=${String(tk.chars).padStart(6)}  tokens≈${tk.estimateMid}`);
+  }
 
   // Per-tool breakdown so we can see which tools cost the most
-  console.log("\n--- Per-tool breakdown (description + inputSchema) ---");
-  const rows = tools.tools.map((t) => {
+  console.log("\n=== Per-tool breakdown (configure mode, description + inputSchema) ===\n");
+  const rows = toolsCfg.tools.map((t) => {
     const text = JSON.stringify(t);
     return { name: t.name, chars: text.length, tokens: Math.round(text.length / 4) };
   }).sort((a, b) => b.chars - a.chars);
