@@ -174,12 +174,12 @@ npx changeset
 npm run release
 
 # This does:
-# build
+# install dependencies
 # test
-# bump version
-# update changelog
-# sync server.json
-# publish npm
+# bump version + update changelog + sync server.json
+# build (via npm prepare hook)
+# publish to npm
+# publish to MCP registry
 ```
 
 ## PM2 (Ubuntu/AWS)

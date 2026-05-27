@@ -8,8 +8,31 @@
     "url": "https://github.com/inistate/inistate-mcp",
     "source": "github"
   },
-  "version": "1.0.0",
-  "packages": [],
+  "version": "1.0.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "inistate-mcp",
+      "version": "1.0.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "INISTATE_API_TOKEN",
+          "description": "Bearer token for Inistate API authentication.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "INISTATE_API_BASE",
+          "description": "Inistate API base URL.",
+          "default": "https://api.inistate.com"
+        }
+      ]
+    }
+  ],
   "remotes": [
     {
       "type": "streamable-http",

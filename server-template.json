@@ -9,7 +9,30 @@
     "source": "github"
   },
   "version": "",
-  "packages": [],
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "",
+      "version": "",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "INISTATE_API_TOKEN",
+          "description": "Bearer token for Inistate API authentication.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "INISTATE_API_BASE",
+          "description": "Inistate API base URL.",
+          "default": "https://api.inistate.com"
+        }
+      ]
+    }
+  ],
   "remotes": [
     {
       "type": "streamable-http",
