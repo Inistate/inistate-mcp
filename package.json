@@ -1,7 +1,7 @@
 {
   "name": "inistate-mcp",
   "mcpName": "io.github.Inistate/inistate-mcp",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "MCP server for the Inistate platform — no-code apps creation powered by AI",
   "type": "module",
   "author": "Inistate",
@@ -33,7 +33,10 @@
     "build/**/*.js",
     "README.md",
     "LICENSE",
-    "server.json"
+    "server.json",
+    "inistate-schema.json",
+    "facts-module-design-guide.md",
+    "facts-frontend-guide.md"
   ],
   "scripts": {
     "clean": "rimraf build",
@@ -44,9 +47,9 @@
     "test:watch": "vitest",
     "changeset": "changeset",
     "version": "npx changeset version && node scripts/sync-server-json.js",
-    "release:mcp": "npm run version && mcp-publisher publish",
+    "release:mcp": "npm run test && npm run version && mcp-publisher login && mcp-publisher publish",
     "release:npm": "npm run build && npm run test && npm run version && npm publish",
-    "release": "npm i && npm run test && npm run version && mcp-publisher validate && npm publish --access public && mcp-publisher publish",
+    "release": "npm i && npm run test && npm run version && mcp-publisher validate && npm publish --access public && mcp-publisher-login && mcp-publisher publish",
     "sync:server": "node scripts/sync-server-json.js",
     "start:http": "node build/http.js",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",

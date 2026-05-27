@@ -177,6 +177,7 @@ npm run release
 # install dependencies
 # test
 # bump version + update changelog + sync server.json
+# validate MCP server config
 # build (via npm prepare hook)
 # publish to npm
 # publish to MCP registry
