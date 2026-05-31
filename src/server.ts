@@ -5,15 +5,25 @@ import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
 import { requestContext } from "./context.js";
 import { setUserMode, type Mode } from "./mode-store.js";
+import { Backend, CloudBackend } from "./backend.js";
 
-export function createServer(initialMode?: Mode): McpServer {
+export interface CreateServerOptions {
+  /** Data-plane backend. Defaults to CloudBackend (the hosted Inistate Platform). */
+  backend?: Backend;
+  /** Initial server mode (runtime / configure / frontend). */
+  initialMode?: Mode;
+}
+
+export function createServer(options: CreateServerOptions = {}): McpServer {
+  const { backend = new CloudBackend(), initialMode } = options;
+
   const server = new McpServer({
     name: "inistate-mcp",
     version: "1.0.0",
   });
 
-  const { configureTools } = registerTools(server);
-  const { configureResources, frontendResources } = registerResources(server);
+  const { configureTools } = registerTools(server, backend);
+  const { configureResources, frontendResources } = registerResources(server, backend);
   const { configurePrompts } = registerPrompts(server);
 
   // Initial mode: per-request override > env var > configure default.

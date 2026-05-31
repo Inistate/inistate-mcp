@@ -2,7 +2,7 @@ import { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.
 import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import * as api from "./api.js";
+import { Backend } from "./backend.js";
 import {
   clearFlagged,
   evaluateActivity,
@@ -56,11 +56,6 @@ function err(e: unknown) {
 }
 
 // ---------- Workspace helper ----------
-
-/** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
-function applyWorkspace(workspaceId?: string): void {
-  if (workspaceId) api.setWorkspaceId(workspaceId);
-}
 
 const wsParam = z
   .string()
@@ -131,8 +126,13 @@ const moduleSectionsShape = {
 
 // ---------- Tool registration ----------
 
-export function registerTools(server: McpServer): { configureTools: RegisteredTool[] } {
+export function registerTools(server: McpServer, backend: Backend): { configureTools: RegisteredTool[] } {
   const configureTools: RegisteredTool[] = [];
+
+  /** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
+  const applyWorkspace = (workspaceId?: string): void => {
+    if (workspaceId) backend.setActiveWorkspace(workspaceId);
+  };
   // ═══════════════════════════════════════════
   // 1. list_workspaces
   // ═══════════════════════════════════════════
@@ -152,8 +152,7 @@ export function registerTools(server: McpServer): { configureTools: RegisteredTo
     },
     async ({ search }) => {
       try {
-        const query = search ? `?search=${encodeURIComponent(search)}` : "";
-        const data = await api.get(`/api/workspace${query}`);
+        const data = await backend.listWorkspaces(search);
         return ok(data);
       } catch (e) {
         return err(e);
@@ -184,8 +183,8 @@ Workflow sequences after workspace is set:
     },
     async ({ workspaceId }) => {
       try {
-        api.setWorkspaceId(workspaceId);
-        const data = await api.get(`/api/workspace/${api.enc(workspaceId)}`);
+        backend.setActiveWorkspace(workspaceId);
+        const data = await backend.getWorkspace(workspaceId);
         return ok(data);
       } catch (e) {
         return err(e);
@@ -210,7 +209,7 @@ Workflow sequences after workspace is set:
     async ({ workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const data = await api.get("/api/mcp/");
+        const data = await backend.listModules();
         return ok(data);
       } catch (e) {
         return err(e);
@@ -242,9 +241,7 @@ Workflow sequences after workspace is set:
     async ({ module: moduleName, tier, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const data = await api.get(
-          `/api/mcp/${api.enc(moduleName)}?tier=${tier}`,
-        );
+        const data = await backend.getModuleSchema(moduleName, tier);
         return ok(data);
       } catch (e) {
         return err(e);
@@ -272,9 +269,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const data = await api.get(
-          `/api/configure/${api.enc(moduleName)}`,
-        );
+        const data = await backend.getModuleCanvas(moduleName);
         return ok(data);
       } catch (e) {
         return err(e);
@@ -313,16 +308,17 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const body: Record<string, unknown> = { module: moduleName };
-        if (state) body.state = state;
-        if (search) body.search = search;
-        if (filters) body.filters = filters;
-        if (sortBy) body.sortBy = sortBy;
-        if (sortDirection) body.sortDirection = sortDirection;
-        if (currentPage !== undefined) body.currentPage = currentPage;
-        if (pageSize !== undefined) body.pageSize = pageSize;
-        if (fields && fields.length > 0) body.fields = fields;
-        const data = await api.post("/api/mcp/list", body);
+        const data = await backend.listEntries({
+          module: moduleName,
+          state,
+          search,
+          filters,
+          sortBy,
+          sortDirection,
+          currentPage,
+          pageSize,
+          fields,
+        });
         return ok(data);
       } catch (e) {
         return err(e);
@@ -351,10 +347,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, entryId, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const data = await api.post("/api/mcp/entry", {
-          module: moduleName,
-          entryId,
-        });
+        const data = await backend.getEntry({ module: moduleName, entryId });
         return ok(data);
       } catch (e) {
         return err(e);
@@ -390,12 +383,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, activity, entryId, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const body: Record<string, unknown> = {
-          module: moduleName,
-          activity,
-        };
-        if (entryId !== undefined && entryId !== null) body.entryId = entryId;
-        const data = await api.post("/api/mcp/form", body);
+        const data = await backend.getForm({ module: moduleName, activity, entryId });
         return ok(data);
       } catch (e) {
         return err(e);
@@ -544,7 +532,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if (ai) body.ai = ai;
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} payload=${JSON.stringify(body)}`);
-        const data = await api.post("/api/mcp/activity", body);
+        const data = await backend.submitActivity(body);
         const flagged =
           data && typeof data === "object" && (data as Record<string, unknown>).flagged === true;
         const flagTargets: Array<string | number | undefined> =
@@ -782,7 +770,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           "submit_activities",
           `module=${moduleName} activity=${activity} count=${items.length}`,
         );
-        const data = (await api.post("/api/mcp/activity/bulk", body)) as Record<string, unknown>;
+        const data = (await backend.submitActivities(body)) as Record<string, unknown>;
 
         // Update flag cache from per-item results so future submit_activity
         // calls on the same entries see the prior flag.
@@ -844,12 +832,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, entryId, page, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const body: Record<string, unknown> = {
-          module: moduleName,
-          entryId,
-        };
-        if (page !== undefined) body.page = page;
-        const data = await api.post("/api/mcp/history", body);
+        const data = await backend.getEntryHistory({ module: moduleName, entryId, page });
         return ok(data);
       } catch (e) {
         return err(e);
@@ -884,12 +867,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
       try {
         applyWorkspace(workspaceId);
         log("upload_file", `module=${moduleName} file=${fileName} mime=${mimeType}`);
-        const buffer = Buffer.from(fileContent, "base64");
-        const blob = new Blob([buffer], { type: mimeType });
-        const formData = new FormData();
-        formData.append("file", blob, fileName);
-        formData.append("module", moduleName);
-        const raw = await api.uploadFormData("/api/mcp/upload", formData) as Record<string, unknown>;
+        const raw = (await backend.uploadFile({
+          module: moduleName,
+          name: fileName,
+          fileBase64: fileContent,
+          mimeType,
+        })) as Record<string, unknown>;
         log("upload_file", `module=${moduleName} file=${fileName} → ok`);
         return ok(raw);
       } catch (e) {
@@ -919,9 +902,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ moduleName, guid, fileName, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
-        const result = await api.getRaw(
-          `/api/mcp/download/${api.enc(moduleName)}/s/${api.enc(guid)}/${api.enc(fileName)}`,
-        );
+        const result = await backend.downloadFile({ moduleName, guid, fileName });
         if (result.redirectUrl) {
           return ok({ downloadUrl: result.redirectUrl, fileName });
         }
@@ -962,7 +943,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       try {
         applyWorkspace(workspaceId);
         log("request_upload_url", `module=${moduleName} file=${fileName} size=${fileSize} mime=${contentType}`);
-        const data = await api.post("/api/mcp/request-upload-url", {
+        const data = await backend.requestUploadUrl({
           module: moduleName,
           fileName,
           contentType,
@@ -997,7 +978,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       try {
         applyWorkspace(workspaceId);
         log("confirm_upload", `s3Key=${s3Key}`);
-        const data = await api.post("/api/mcp/confirm-upload", { s3Key });
+        const data = await backend.confirmUpload({ s3Key });
         log("confirm_upload", `s3Key=${s3Key} → ok`);
         return ok(data);
       } catch (e) {
@@ -1111,7 +1092,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         log("create_module", `name=${name}`);
-        const data = await api.post(`/api/configure`, body);
+        const data = await backend.createModule(body);
         log("create_module", `name=${name} → ok`);
         return ok(data);
       } catch (e) {
@@ -1162,7 +1143,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         log("update_module", `id=${id}${name ? ` newName=${name}` : ""}`);
-        const data = await api.put(`/api/configure`, body);
+        const data = await backend.updateModule(body);
         log("update_module", `id=${id} → ok`);
         return ok(data);
       } catch (e) {
