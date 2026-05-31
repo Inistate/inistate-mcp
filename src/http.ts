@@ -134,7 +134,7 @@ app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) =>
         sessionIdGenerator: undefined,
       });
 
-      const server = createServer(mode);
+      const server = createServer({ initialMode: mode });
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
 

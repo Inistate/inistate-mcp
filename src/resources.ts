@@ -3,10 +3,10 @@ import {
   RegisteredResource,
   ResourceTemplate,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
-import * as api from "./api.js";
+import { Backend } from "./backend.js";
 import { SCHEMA_RUNTIME, SCHEMA_CONFIGURE, DESIGN_GUIDE, FRONTEND_GUIDE } from "./schema.js";
 
-export function registerResources(server: McpServer): {
+export function registerResources(server: McpServer, backend: Backend): {
   configureResources: RegisteredResource[];
   frontendResources: RegisteredResource[];
 } {
@@ -22,7 +22,7 @@ export function registerResources(server: McpServer): {
       mimeType: "application/json",
     },
     async (uri) => {
-      const data = await api.get("/api/mcp/");
+      const data = await backend.listModules();
       return {
         contents: [{ uri: uri.href, text: JSON.stringify(data) }],
       };
@@ -42,9 +42,7 @@ export function registerResources(server: McpServer): {
     },
     async (uri, { name }) => {
       const moduleName = Array.isArray(name) ? name[0] : name;
-      const data = await api.get(
-        `/api/mcp/${api.enc(moduleName)}?tier=basic`,
-      );
+      const data = await backend.getModuleSchema(moduleName, "basic");
       return {
         contents: [{ uri: uri.href, text: JSON.stringify(data) }],
       };
@@ -64,9 +62,7 @@ export function registerResources(server: McpServer): {
     },
     async (uri, { name }) => {
       const moduleName = Array.isArray(name) ? name[0] : name;
-      const data = await api.get(
-        `/api/mcp/${api.enc(moduleName)}?tier=extended`,
-      );
+      const data = await backend.getModuleSchema(moduleName, "extended");
       return {
         contents: [{ uri: uri.href, text: JSON.stringify(data) }],
       };
