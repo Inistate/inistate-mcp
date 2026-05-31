@@ -23,11 +23,13 @@ export interface Capabilities {
   /** Multi-tenant workspaces (list_workspaces / set_workspace). */
   workspaces: boolean;
   /** Governed, append-only audit trail (get_entry_history). */
-  history: boolean;
+  governedHistory: boolean;
   /** File storage (upload / download / presigned URLs). */
   files: boolean;
   /** Identity and role-based authorization. */
   authorization: boolean;
+  /** switch_mode targets this backend allows (cloud: all three; local: runtime + configure). */
+  modes: Array<"runtime" | "configure" | "frontend">;
 }
 
 export interface ListEntriesParams {
@@ -99,6 +101,9 @@ export interface DownloadResult {
  * are passed through verbatim; documented keys mirror the tool input schemas.
  */
 export interface Backend {
+  /** Which backend this is — drives capability messages and diagnostics. */
+  readonly kind: "local" | "cloud";
+
   capabilities(): Capabilities;
 
   /** Set the active workspace for subsequent calls. Context op, no I/O. */
@@ -131,8 +136,17 @@ export interface Backend {
  * the same paths and request bodies the handlers used to construct inline.
  */
 export class CloudBackend implements Backend {
+  readonly kind = "cloud" as const;
+
   capabilities(): Capabilities {
-    return { workspaces: true, history: true, files: true, authorization: true };
+    // The hosted Platform serves the full governed surface.
+    return {
+      workspaces: true,
+      governedHistory: true,
+      files: true,
+      authorization: true,
+      modes: ["runtime", "configure", "frontend"],
+    };
   }
 
   setActiveWorkspace(wsid: string): void {

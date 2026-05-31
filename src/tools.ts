@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { Backend } from "./backend.js";
+import { capabilityMessage } from "./capability.js";
 import {
   clearFlagged,
   evaluateActivity,
@@ -128,6 +129,11 @@ const moduleSectionsShape = {
 
 export function registerTools(server: McpServer, backend: Backend): { configureTools: RegisteredTool[] } {
   const configureTools: RegisteredTool[] = [];
+  // Capability gating (MCP spec §1.6). Read once. Platform-only tools below
+  // return a capability message when the active backend cannot serve them.
+  // CloudBackend reports every capability true, so the gates are never hit and
+  // behavior is identical to before — this is the contract a reduced backend needs.
+  const caps = backend.capabilities();
 
   /** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
   const applyWorkspace = (workspaceId?: string): void => {
@@ -151,6 +157,7 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ search }) => {
+      if (!caps.workspaces) return ok(capabilityMessage("workspaces", backend.kind));
       try {
         const data = await backend.listWorkspaces(search);
         return ok(data);
@@ -182,6 +189,7 @@ Workflow sequences after workspace is set:
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
+      if (!caps.workspaces) return ok(capabilityMessage("workspaces", backend.kind));
       try {
         backend.setActiveWorkspace(workspaceId);
         const data = await backend.getWorkspace(workspaceId);
@@ -830,6 +838,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ module: moduleName, entryId, page, workspaceId }) => {
+      if (!caps.governedHistory) return ok(capabilityMessage("governed_history", backend.kind));
       try {
         applyWorkspace(workspaceId);
         const data = await backend.getEntryHistory({ module: moduleName, entryId, page });
@@ -864,6 +873,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ module: moduleName, name: fileName, file: fileContent, mimeType, workspaceId }) => {
+      if (!caps.files) return ok(capabilityMessage("files", backend.kind));
       try {
         applyWorkspace(workspaceId);
         log("upload_file", `module=${moduleName} file=${fileName} mime=${mimeType}`);
@@ -900,6 +910,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ moduleName, guid, fileName, workspaceId }) => {
+      if (!caps.files) return ok(capabilityMessage("files", backend.kind));
       try {
         applyWorkspace(workspaceId);
         const result = await backend.downloadFile({ moduleName, guid, fileName });
@@ -940,6 +951,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ module: moduleName, fileName, contentType, fileSize, workspaceId }) => {
+      if (!caps.files) return ok(capabilityMessage("files", backend.kind));
       try {
         applyWorkspace(workspaceId);
         log("request_upload_url", `module=${moduleName} file=${fileName} size=${fileSize} mime=${contentType}`);
@@ -975,6 +987,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     async ({ s3Key, workspaceId }) => {
+      if (!caps.files) return ok(capabilityMessage("files", backend.kind));
       try {
         applyWorkspace(workspaceId);
         log("confirm_upload", `s3Key=${s3Key}`);

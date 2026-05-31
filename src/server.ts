@@ -6,6 +6,7 @@ import { registerPrompts } from "./prompts.js";
 import { requestContext } from "./context.js";
 import { setUserMode, type Mode } from "./mode-store.js";
 import { Backend, CloudBackend } from "./backend.js";
+import { capabilityMessage } from "./capability.js";
 
 export interface CreateServerOptions {
   /** Data-plane backend. Defaults to CloudBackend (the hosted Inistate Platform). */
@@ -16,6 +17,7 @@ export interface CreateServerOptions {
 
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const { backend = new CloudBackend(), initialMode } = options;
+  const caps = backend.capabilities();
 
   const server = new McpServer({
     name: "inistate-mcp",
@@ -65,6 +67,15 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ mode }) => {
+      if (!caps.modes.includes(mode)) {
+        // The only mode a backend may withhold is `frontend` — its REST guide
+        // targets the Platform API. runtime/configure are always available.
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(capabilityMessage("frontend_guide", backend.kind)) },
+          ],
+        };
+      }
       const enableConfigure = mode === "configure" || mode === "frontend";
       const enableFrontend = mode === "frontend";
       for (const t of configureTools) enableConfigure ? t.enable() : t.disable();
