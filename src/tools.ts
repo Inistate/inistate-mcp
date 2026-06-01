@@ -12,6 +12,7 @@ import {
   recordFlagged,
   validateInputShapes,
   validateInputShapesWith,
+  type SchemaFetcher,
 } from "./activity-guard.js";
 import {
   designWorkflow,
@@ -135,10 +136,82 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   // behavior is identical to before — this is the contract a reduced backend needs.
   const caps = backend.capabilities();
 
+  // Route the guard's schema lookups through the active backend rather than
+  // api.ts directly, so shape validation (and, under governance, the actor
+  // checks) run against whatever backend is injected — cloud or local.
+  const fetchSchema: SchemaFetcher = async (moduleName) => {
+    try {
+      return (await backend.getModuleSchema(moduleName, "extended")) as Awaited<
+        ReturnType<SchemaFetcher>
+      >;
+    } catch {
+      return null;
+    }
+  };
+
   /** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
   const applyWorkspace = (workspaceId?: string): void => {
     if (workspaceId) backend.setActiveWorkspace(workspaceId);
   };
+
+  // ── Governance-conditional schema pieces ──
+  // On a governed backend (the hosted Platform) these resolve to EXACTLY the
+  // prior shapes/text, so the cloud tool schema is byte-identical. On a local
+  // runtime — no confidence/actor gating — `ai` becomes optional, the wording
+  // adjusts, and the reliability controls (idempotencyKey / expectedVersion)
+  // are exposed.
+  const gov = caps.governance;
+
+  const submitAiShape = z.object({
+    reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
+    model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
+    confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
+    sources: z
+      .array(z.object({ type: z.string().optional(), reference: z.string().optional(), excerpt: z.string().optional() }))
+      .optional(),
+    model_version: z.string().optional(),
+    prompt_hash: z.string().optional(),
+  });
+  const submitAiParam = gov
+    ? submitAiShape.describe("REQUIRED — AI agent traceability")
+    : submitAiShape.optional().describe("Optional on the local runtime — no confidence/actor gating is applied.");
+
+  const bulkAiShape = z.object({
+    reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
+    model: z.string(),
+    confidence: z.number().min(0).max(1),
+    sources: z
+      .array(z.object({ type: z.string().optional(), reference: z.string().optional(), excerpt: z.string().optional() }))
+      .optional(),
+    model_version: z.string().optional(),
+    prompt_hash: z.string().optional(),
+  });
+  const bulkAiParam = gov
+    ? bulkAiShape.describe("Default AI traceability applied to every item that does not specify its own.")
+    : bulkAiShape.optional().describe("Default AI traceability for items without their own. Optional on the local runtime.");
+
+  // Reliability controls — local-runtime only (the Platform governs via history).
+  const reliabilityParams: z.ZodRawShape = gov
+    ? {}
+    : {
+        idempotencyKey: z
+          .string()
+          .optional()
+          .describe("Replaying a submission with the same key applies the change at most once."),
+        expectedVersion: z
+          .number()
+          .int()
+          .optional()
+          .describe("Optimistic concurrency: the `version` from get_entry. The write fails with CONFLICT if the stored version differs."),
+      };
+
+  const submitActivityDescription = gov
+    ? "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime."
+    : "Perform an activity on a module entry: create (no entryId), edit, delete, or a custom activity that drives a state transition. ALWAYS call get_form first. A custom activity is accepted only if a flow permits it from the entry's current state — otherwise it is rejected (Illegal transition) and nothing is written. The local runtime applies no confidence/actor gating: `ai` is optional and there is no flagged outcome. Use idempotencyKey for safe retries and expectedVersion for optimistic concurrency.";
+
+  const submitActivitiesDescription = gov
+    ? "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once — saves substantial agent tokens by collapsing N tool turns into one.\n\nShape: top-level `module`, `activity`, and a default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`). When an item supplies its own `ai`, it wholly replaces the top-level `ai` for that item — no partial merge.\n\nExecution: items run sequentially fail-soft on the server. One item's failure does not abort the rest; per-item outcomes (success/failure, entryId, flagged, validation details) are returned in `results`. Use `clientRef` to correlate items to your local plan.\n\nLimits: max 100 items per request. Beyond that, chunk and retry.\n\nGuardrails: same `submit_activity` rules apply at the batch level — actor='human' rejects the whole batch; actor='hybrid' or activity='changeStatus' or top-level `state` requires `confirmed: true`. Per-item state overrides also require `confirmed: true`."
+    : "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once.\n\nShape: top-level `module`, `activity`, and an optional default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`).\n\nExecution: items run sequentially fail-soft. One item's failure does not abort the rest; per-item outcomes are returned in `results`. Use `clientRef` to correlate items to your local plan. Max 100 items per request. The local runtime applies no confidence/actor gating.";
   // ═══════════════════════════════════════════
   // 1. list_workspaces
   // ═══════════════════════════════════════════
@@ -406,8 +479,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "submit_activity",
     {
       title: "Submit Activity",
-      description:
-        "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime.",
+      description: submitActivityDescription,
       inputSchema: {
         module: z.string(),
         activity: z.string().default("create"),
@@ -421,30 +493,14 @@ Load resource inistate://schema before modifying to know valid field types, colo
         comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
         due: z.string().optional().describe("ISO 8601"),
-        ai: z
-          .object({
-            reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
-            model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
-            confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
-            sources: z
-              .array(
-                z.object({
-                  type: z.string().optional(),
-                  reference: z.string().optional(),
-                  excerpt: z.string().optional(),
-                }),
-              )
-              .optional(),
-            model_version: z.string().optional(),
-            prompt_hash: z.string().optional(),
-          })
-          .describe("REQUIRED — AI agent traceability"),
+        ai: submitAiParam,
         confirmed: z
           .boolean()
           .optional()
           .describe(
             "Set true only after explicit user authorization. Required for: changeStatus, state override, hybrid actor, retry after flag. Does not unlock human-actor activities. See inistate://guardrails.",
           ),
+        ...reliabilityParams,
         workspaceId: wsParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -462,29 +518,53 @@ Load resource inistate://schema before modifying to know valid field types, colo
       ai,
       confirmed,
       workspaceId,
+      ...extra
     }) => {
+      // Local-runtime-only reliability controls (absent from the cloud schema).
+      const idempotencyKey = (extra as Record<string, unknown>).idempotencyKey as string | undefined;
+      const expectedVersion = (extra as Record<string, unknown>).expectedVersion as number | undefined;
       try {
         applyWorkspace(workspaceId);
-        const guard = await evaluateActivity({
-          module: moduleName,
-          activity,
-          entryId,
-          entryIds,
-          state,
-          confidence: ai?.confidence ?? 0,
-          confirmed,
-        });
-        if (!guard.ok) {
-          const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
-          log(
-            "submit_activity",
-            `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${guard.structured.error}`,
+        // Actor/confidence/flag governance runs only on backends that declare it
+        // (the hosted Platform). A local runtime does no such gating — it either
+        // commits a legal transition or rejects it.
+        if (caps.governance) {
+          if (!ai) {
+            return err({
+              structured: {
+                error: "ai_required",
+                message:
+                  "This backend enforces AI traceability. Supply an `ai` block with reasoning, model, and confidence.",
+                activity,
+                agent_action:
+                  "Add ai: { reasoning, model, confidence } and resubmit.",
+              },
+            });
+          }
+          const guard = await evaluateActivity(
+            {
+              module: moduleName,
+              activity,
+              entryId,
+              entryIds,
+              state,
+              confidence: ai?.confidence ?? 0,
+              confirmed,
+            },
+            fetchSchema,
           );
-          return err({ structured: guard.structured });
+          if (!guard.ok) {
+            const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+            log(
+              "submit_activity",
+              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${guard.structured.error}`,
+            );
+            return err({ structured: guard.structured });
+          }
         }
         // Reference-shape pre-flight: User/Module fields must be { id, value }.
         if (input) {
-          const shapeErrors = await validateInputShapes(moduleName, input);
+          const shapeErrors = await validateInputShapes(moduleName, input, fetchSchema);
           if (shapeErrors.length > 0) {
             const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
             const structured = {
@@ -538,6 +618,8 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if (assignees) body.assignees = assignees;
         if (due) body.due = due;
         if (ai) body.ai = ai;
+        if (idempotencyKey) body.idempotencyKey = idempotencyKey;
+        if (expectedVersion !== undefined) body.expectedVersion = expectedVersion;
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} payload=${JSON.stringify(body)}`);
         const data = await backend.submitActivity(body);
@@ -545,11 +627,13 @@ Load resource inistate://schema before modifying to know valid field types, colo
           data && typeof data === "object" && (data as Record<string, unknown>).flagged === true;
         const flagTargets: Array<string | number | undefined> =
           entryIds && entryIds.length > 0 ? entryIds : [entryId];
-        for (const t of flagTargets) {
-          if (flagged) {
-            recordFlagged(moduleName, t, activity, ai?.confidence ?? 0);
-          } else {
-            clearFlagged(moduleName, t, activity);
+        if (caps.governance) {
+          for (const t of flagTargets) {
+            if (flagged) {
+              recordFlagged(moduleName, t, activity, ai?.confidence ?? 0);
+            } else {
+              clearFlagged(moduleName, t, activity);
+            }
           }
         }
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ${flagged ? "flagged" : "ok"}`);
@@ -569,29 +653,11 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "submit_activities",
     {
       title: "Submit Activities (Bulk)",
-      description:
-        "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once — saves substantial agent tokens by collapsing N tool turns into one.\n\nShape: top-level `module`, `activity`, and a default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`). When an item supplies its own `ai`, it wholly replaces the top-level `ai` for that item — no partial merge.\n\nExecution: items run sequentially fail-soft on the server. One item's failure does not abort the rest; per-item outcomes (success/failure, entryId, flagged, validation details) are returned in `results`. Use `clientRef` to correlate items to your local plan.\n\nLimits: max 100 items per request. Beyond that, chunk and retry.\n\nGuardrails: same `submit_activity` rules apply at the batch level — actor='human' rejects the whole batch; actor='hybrid' or activity='changeStatus' or top-level `state` requires `confirmed: true`. Per-item state overrides also require `confirmed: true`.",
+      description: submitActivitiesDescription,
       inputSchema: {
         module: z.string(),
         activity: z.string().default("create"),
-        ai: z
-          .object({
-            reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
-            model: z.string(),
-            confidence: z.number().min(0).max(1),
-            sources: z
-              .array(
-                z.object({
-                  type: z.string().optional(),
-                  reference: z.string().optional(),
-                  excerpt: z.string().optional(),
-                }),
-              )
-              .optional(),
-            model_version: z.string().optional(),
-            prompt_hash: z.string().optional(),
-          })
-          .describe("Default AI traceability applied to every item that does not specify its own."),
+        ai: bulkAiParam,
         items: z
           .array(
             z.object({
@@ -646,6 +712,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
       try {
         applyWorkspace(workspaceId);
 
+        // Actor/confidence/flag governance — only on backends that declare it
+        // (the hosted Platform). A local runtime skips the whole guard.
+        if (caps.governance) {
         // Batch-level guard for actor (human/hybrid) and changeStatus rules,
         // which apply uniformly to the whole batch since module + activity are shared.
         const guard = await evaluateActivity({
@@ -653,7 +722,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           activity,
           confidence: ai?.confidence ?? 0,
           confirmed,
-        });
+        }, fetchSchema);
         if (!guard.ok) {
           log(
             "submit_activities",
@@ -713,11 +782,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
             return err({ structured });
           }
         }
+        } // end governance gate
 
         // Reference-shape pre-flight: User/Module fields must be { id, value }
         // (User adds `username`). Fetch the field-type map once for the whole
         // batch — the per-item check is then synchronous.
-        const fieldTypes = await getModuleFieldTypes(moduleName);
+        const fieldTypes = await getModuleFieldTypes(moduleName, fetchSchema);
         const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
@@ -781,19 +851,21 @@ Load resource inistate://schema before modifying to know valid field types, colo
         const data = (await backend.submitActivities(body)) as Record<string, unknown>;
 
         // Update flag cache from per-item results so future submit_activity
-        // calls on the same entries see the prior flag.
-        const results = Array.isArray((data as { results?: unknown }).results)
-          ? ((data as { results: Array<Record<string, unknown>> }).results)
-          : [];
-        for (let i = 0; i < results.length; i++) {
-          const r = results[i];
-          const itemAi = items[i]?.ai ?? ai;
-          const conf = itemAi?.confidence ?? 0;
-          const targetEntryId = (r.entryId as string | number | undefined) ?? items[i]?.entryId;
-          if (r.flagged === true) {
-            recordFlagged(moduleName, targetEntryId, activity, conf);
-          } else if (r.success === true) {
-            clearFlagged(moduleName, targetEntryId, activity);
+        // calls on the same entries see the prior flag. Governance-only.
+        if (caps.governance) {
+          const results = Array.isArray((data as { results?: unknown }).results)
+            ? ((data as { results: Array<Record<string, unknown>> }).results)
+            : [];
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i];
+            const itemAi = items[i]?.ai ?? ai;
+            const conf = itemAi?.confidence ?? 0;
+            const targetEntryId = (r.entryId as string | number | undefined) ?? items[i]?.entryId;
+            if (r.flagged === true) {
+              recordFlagged(moduleName, targetEntryId, activity, conf);
+            } else if (r.success === true) {
+              clearFlagged(moduleName, targetEntryId, activity);
+            }
           }
         }
 
@@ -1161,6 +1233,49 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         return ok(data);
       } catch (e) {
         log("update_module", `id=${id} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        return err(e);
+      }
+    },
+  ));
+
+  // ═══════════════════════════════════════════
+  // 17. scaffold_module (configure mode) — local-runtime introspection
+  // ═══════════════════════════════════════════
+  // The inverse on-ramp: the user already has data in a Notion database, an
+  // Airtable table, or a local SQLite table. Capability-gated — only a backend
+  // that declares `scaffold` (the local runtime) serves it; the hosted Platform
+  // returns a capability message. The introspection itself lives behind the
+  // Backend so the closed-source engine owns it.
+  configureTools.push(server.registerTool(
+    "scaffold_module",
+    {
+      title: "Scaffold Module from Existing Data",
+      description:
+        "Design a module schema together with the user from data they ALREADY have — a Notion database, an Airtable table, or a local SQLite table. This is the inverse on-ramp: instead of designing from scratch, read the existing shape and refine it with the user. One container (a SQLite database, an Airtable base, a Notion workspace) can yield several modules — discover the tables, then model the chosen ones.\n\nFlow (use it conversationally):\n1. DISCOVER — call with just `source` pointed at the container: a SQLite database path, an `airtable://<baseId>` (no table), or a bare `notion://`. Returns { discovery: true, tables: [{ name, id?, columns, rows?, hasState, scaffold_source }] }. Show these to the user and ask which one(s) to model; each becomes its own module.\n2. DRAFT — call again with a chosen table's `scaffold_source` as `source` (or a SQLite `table`). Returns { schema, validation, suggestions } — columns become typed fields, a detected status/state/stage/phase column becomes states.\n3. REFINE together — confirm the inferred field types with the user, then define activities + flows (the governed transitions; design_workflow can scaffold a pattern).\n4. CREATE — validate_design → create_module, then point the runtime at the same data.\n\nTargets: notion://<databaseId> or bare notion:// (needs INISTATE_NOTION_TOKEN), airtable://<baseId>/<tableIdOrName> or airtable://<baseId> (needs INISTATE_AIRTABLE_TOKEN; listing a base's tables needs schema.bases:read), or a local SQLite path. Credentials are read from the environment — never pass tokens as arguments.",
+      inputSchema: {
+        source: z
+          .string()
+          .describe(
+            "The data source: `notion://<databaseId>`, `airtable://<baseId>/<tableIdOrName>`, or a local SQLite path (e.g. `./core.db` or `sqlite://./core.db?table=tasks`).",
+          ),
+        table: z
+          .string()
+          .optional()
+          .describe("Which table to model. Omit on a SQLite source to DISCOVER the available tables first; provide it to draft the schema. Optional for Airtable if already in the URI."),
+        name: z.string().optional().describe("Override the generated module name (defaults to the source table name)."),
+        state: z
+          .string()
+          .optional()
+          .describe("Promote a specific column to the workflow's state column (overrides auto-detection of a status/state/stage/phase column)."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+    },
+    async ({ source, table, name, state }) => {
+      if (!caps.scaffold) return ok(capabilityMessage("scaffold", backend.kind));
+      try {
+        const data = await backend.scaffoldModule({ source, table, name, state });
+        return ok(data);
+      } catch (e) {
         return err(e);
       }
     },

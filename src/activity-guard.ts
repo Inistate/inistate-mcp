@@ -58,25 +58,40 @@ function cacheKey(prefix: string, parts: Array<string | number | undefined>): st
   return [prefix, user, wsid, ...parts.map((p) => String(p ?? "_"))].join("::");
 }
 
-async function getExtendedSchema(moduleName: string): Promise<ExtendedSchema | null> {
+/**
+ * Source of a module's extended schema. Defaults to the cloud API; the MCP tool
+ * handlers pass a backend-routed fetcher so the same guard runs against whatever
+ * backend is injected (cloud or local) instead of always hitting api.ts.
+ */
+export type SchemaFetcher = (moduleName: string) => Promise<ExtendedSchema | null>;
+
+const defaultSchemaFetcher: SchemaFetcher = async (moduleName) => {
+  try {
+    return (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
+  } catch {
+    return null;
+  }
+};
+
+async function getExtendedSchema(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<ExtendedSchema | null> {
   const key = cacheKey("schema", [moduleName]);
   const now = Date.now();
   const cached = schemaCache.get(key);
   if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.schema;
-  try {
-    const schema = (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
-    schemaCache.set(key, { schema, at: now });
-    return schema;
-  } catch {
-    return null;
-  }
+  const schema = await fetchSchema(moduleName);
+  if (schema) schemaCache.set(key, { schema, at: now });
+  return schema;
 }
 
 async function getActivityDef(
   moduleName: string,
   activity: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
 ): Promise<ActivityDef | null> {
-  const schema = await getExtendedSchema(moduleName);
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
   return schema?.activities?.find((a) => a.name === activity) ?? null;
 }
 
@@ -137,7 +152,10 @@ export type GuardOutcome =
   | { ok: true }
   | { ok: false; structured: Record<string, unknown> };
 
-export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome> {
+export async function evaluateActivity(
+  input: GuardInput,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<GuardOutcome> {
   const { module: moduleName, activity, entryId, entryIds, state, confidence, confirmed } = input;
 
   // Rule 1 — confidence inflation after a prior flag.
@@ -196,7 +214,7 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
   // Rules 3 & 4 apply to custom (workflow-defined) activities only.
   if (STANDARD_ACTIVITIES.has(activity)) return { ok: true };
 
-  const def = await getActivityDef(moduleName, activity);
+  const def = await getActivityDef(moduleName, activity, fetchSchema);
   if (!def) return { ok: true }; // unknown activity — let the API decide.
 
   const actor = (def.actor || "").toLowerCase();
@@ -326,8 +344,9 @@ function checkRefValue(
  */
 export async function getModuleFieldTypes(
   moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
 ): Promise<Map<string, string> | null> {
-  const schema = await getExtendedSchema(moduleName);
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
   const info = schema?.information;
   if (!info || info.length === 0) return null;
   const types = new Map<string, string>();
@@ -367,9 +386,10 @@ export function validateInputShapesWith(
 export async function validateInputShapes(
   moduleName: string,
   input: Record<string, unknown> | undefined | null,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
 ): Promise<RefShapeError[]> {
   if (!input) return [];
-  const types = await getModuleFieldTypes(moduleName);
+  const types = await getModuleFieldTypes(moduleName, fetchSchema);
   return validateInputShapesWith(types, input);
 }
 

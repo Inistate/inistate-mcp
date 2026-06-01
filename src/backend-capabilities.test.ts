@@ -72,6 +72,8 @@ class FakeLocalBackend implements Backend {
       governedHistory: false,
       files: false,
       authorization: false,
+      governance: false,
+      scaffold: true,
       modes: ["runtime", "configure"],
     };
   }
@@ -86,6 +88,7 @@ class FakeLocalBackend implements Backend {
   async downloadFile(): Promise<DownloadResult> { return { redirectUrl: null, status: 200, body: {} }; }
   async requestUploadUrl(): Promise<unknown> { return {}; }
   async confirmUpload(): Promise<unknown> { return {}; }
+  async scaffoldModule(): Promise<unknown> { return { _fake: true, discovery: true, tables: [] }; }
 
   // `Both` verbs — served. listModules carries a sentinel so the pass-through
   // test can prove the real handler ran (not a capability message).
@@ -182,6 +185,8 @@ describe("CloudBackend capability contract", () => {
       governedHistory: true,
       files: true,
       authorization: true,
+      governance: true,
+      scaffold: false,
       modes: ["runtime", "configure", "frontend"],
     });
   });

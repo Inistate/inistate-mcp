@@ -13,15 +13,19 @@ export interface CreateServerOptions {
   backend?: Backend;
   /** Initial server mode (runtime / configure / frontend). */
   initialMode?: Mode;
+  /** Advertised server identity. Defaults to the open server's own name/version;
+   *  an embedder (e.g. inistate-core) overrides it to identify as itself. */
+  name?: string;
+  version?: string;
 }
 
 export function createServer(options: CreateServerOptions = {}): McpServer {
-  const { backend = new CloudBackend(), initialMode } = options;
+  const { backend = new CloudBackend(), initialMode, name = "inistate-mcp", version = "1.0.0" } = options;
   const caps = backend.capabilities();
 
   const server = new McpServer({
-    name: "inistate-mcp",
-    version: "1.0.0",
+    name,
+    version,
   });
 
   const { configureTools } = registerTools(server, backend);
