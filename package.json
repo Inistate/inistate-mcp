@@ -1,7 +1,8 @@
 {
   "name": "inistate-mcp",
-  "version": "1.0.0",
-  "description": "MCP server for the Inistate platform — module discovery, entry management, and activity submission",
+  "mcpName": "io.github.Inistate/inistate-mcp",
+  "version": "1.0.3",
+  "description": "MCP server for the Inistate platform — no-code apps creation powered by AI",
   "type": "module",
   "author": "Inistate",
   "homepage": "https://github.com/Inistate/inistate-mcp#readme",
@@ -22,18 +23,34 @@
     "claude"
   ],
   "bin": {
-    "inistate-mcp": "./build/index.js",
-    "inistate-mcp-http": "./build/http.js"
+    "inistate-mcp": "build/index.js",
+    "inistate-mcp-http": "build/http.js"
+  },
+  "exports": {
+    ".": "./build/index.js"
   },
   "files": [
-    "build/**/*.js"
+    "build/**/*.js",
+    "README.md",
+    "LICENSE",
+    "server.json",
+    "inistate-schema.json",
+    "facts-module-design-guide.md",
+    "facts-frontend-guide.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "rimraf build",
+    "build": "npm run clean && tsc",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "changeset": "changeset",
+    "version": "npx changeset version && node scripts/sync-server-json.js",
+    "release:mcp": "npm run test && npm run version && mcp-publisher login && mcp-publisher publish",
+    "release:npm": "npm run build && npm run test && npm run version && npm publish",
+    "release": "npm i && npm run test && npm run version && mcp-publisher validate && npm publish --access public && mcp-publisher-login && mcp-publisher publish",
+    "sync:server": "node scripts/sync-server-json.js",
     "start:http": "node build/http.js",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "pm2:start": "pm2 start ecosystem.config.cjs --env production",
@@ -49,9 +66,12 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.0",
     "@types/express": "^5.0.6",
     "@types/iarna__toml": "^2.0.5",
     "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "rimraf": "^6.0.0",
     "pm2": "^7.0.1",
     "typescript": "^5.8.0",
     "vitest": "^3.2.4"
