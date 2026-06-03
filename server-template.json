@@ -1,0 +1,42 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "",
+  "description": "MCP server for the Inistate platform: module discovery, entry management, and activity submission.",
+  "title": "Inistate MCP",
+  "websiteUrl": "https://inistate.com",
+  "repository": {
+    "url": "https://github.com/inistate/inistate-mcp",
+    "source": "github"
+  },
+  "version": "",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "",
+      "version": "",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "INISTATE_API_TOKEN",
+          "description": "Bearer token for Inistate API authentication.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "INISTATE_API_BASE",
+          "description": "Inistate API base URL.",
+          "default": "https://api.inistate.com"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.inistate.com/mcp"
+    }
+  ]
+}
