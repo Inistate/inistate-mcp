@@ -66,6 +66,20 @@ interface PendingAuth {
 class InMemoryClientsStore implements OAuthRegisteredClientsStore {
   private clients = new Map<string, OAuthClientInformationFull>();
 
+  constructor() {
+    const seed = process.env.OAUTH_KNOWN_CLIENTS;
+    if (seed) {
+      try {
+        for (const client of JSON.parse(seed) as OAuthClientInformationFull[]) {
+          this.clients.set(client.client_id, client);
+        }
+        console.log(`OAuth client store seeded with ${this.clients.size} client(s)`);
+      } catch {
+        console.error("Failed to parse OAUTH_KNOWN_CLIENTS — must be a JSON array");
+      }
+    }
+  }
+
   getClient(clientId: string): OAuthClientInformationFull | undefined {
     return this.clients.get(clientId);
   }
@@ -80,6 +94,10 @@ class InMemoryClientsStore implements OAuthRegisteredClientsStore {
     };
     this.clients.set(full.client_id, full);
     return full;
+  }
+
+  dump(): OAuthClientInformationFull[] {
+    return [...this.clients.values()];
   }
 }
 
