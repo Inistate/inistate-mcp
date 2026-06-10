@@ -117,6 +117,58 @@ npm run watch          # Watch mode for TypeScript compilation
 npm run inspector      # Test with MCP Inspector
 ```
 
+### MCP Setup
+1. Setup
+```bash
+curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher && sudo mv mcp-publisher /usr/local/bin/
+```
+
+or
+
+```powershell
+$arch = if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq "Arm64") { "arm64" } else { "amd64" }; Invoke-WebRequest -Uri "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_windows_$arch.tar.gz" -OutFile "mcp-publisher.tar.gz"; tar xf mcp-publisher.tar.gz mcp-publisher.exe; rm mcp-publisher.tar.gz
+
+```
+
+2. Verify
+```
+mcp-publisher --help
+```
+
+3. Authenticate
+```
+mcp-publisher login github
+```
+
+4. Publish: see below
+
+### Packaging & Versioning
+```bash
+# Example adding new feature
+git checkout -b feat/add-user-tool
+
+
+# After coding
+npx changeset
+
+# Choose:
+# 
+# minor
+# Added new user search tool
+
+# Release
+npm run release
+
+# This does:
+# install dependencies
+# test
+# bump version + update changelog + sync server.json
+# validate MCP server config
+# build (via npm prepare hook)
+# publish to npm
+# publish to MCP registry
+```
+
 ## PM2 (Ubuntu/AWS)
 
 Run the HTTP transport in production using PM2:
