@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { readFileSync } from "fs";
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 import { registerTools } from "./tools.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -9,7 +11,7 @@ import { setUserMode, type Mode } from "./mode-store.js";
 export function createServer(initialMode?: Mode): McpServer {
   const server = new McpServer({
     name: "inistate-mcp",
-    version: "1.0.0",
+    version,
   });
 
   const { configureTools } = registerTools(server);
