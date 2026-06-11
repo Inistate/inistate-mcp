@@ -58,8 +58,9 @@ describe("server discovery (runtime mode default)", () => {
     expect(names).toContain("request_upload_url");
     expect(names).toContain("confirm_upload");
     expect(names).toContain("switch_mode");
+    // get_module_schema is read-only and available in every mode
+    expect(names).toContain("get_module_schema");
     // configure-mode tools must be hidden
-    expect(names).not.toContain("get_module_schema");
     expect(names).not.toContain("get_module_canvas");
     expect(names).not.toContain("design_workflow");
     expect(names).not.toContain("validate_design");

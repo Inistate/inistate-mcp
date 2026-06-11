@@ -24,15 +24,24 @@ interface FieldInfo {
   type: string;
 }
 
+// The extended schema tier returns activities as plain strings (names only) —
+// the canvas is the source of actor data. Tolerate both shapes.
 interface ExtendedSchema {
-  activities?: ActivityDef[];
+  activities?: Array<ActivityDef | string>;
   information?: FieldInfo[];
+  states?: Array<string | { name?: string }>;
+}
+
+interface CanvasSchema {
+  activities?: ActivityDef[];
 }
 
 const REF_FIELD_TYPES = new Set(["User", "Users", "Module", "Modules"]);
 
 // Standard activities are inherent platform operations and have no actor in the
 // module schema. They bypass the actor check (but state-change checks still run).
+// The platform uses both names for the direct state change — availableActivities
+// lists "changeState" while forms and history say "changeStatus".
 const STANDARD_ACTIVITIES = new Set([
   "create",
   "edit",
@@ -42,6 +51,7 @@ const STANDARD_ACTIVITIES = new Set([
   "manage",
   "view",
   "changeStatus",
+  "changeState",
 ]);
 
 interface SchemaCacheEntry {
@@ -72,12 +82,44 @@ async function getExtendedSchema(moduleName: string): Promise<ExtendedSchema | n
   }
 }
 
+interface CanvasCacheEntry {
+  canvas: CanvasSchema | null;
+  at: number;
+}
+const canvasCache = new Map<string, CanvasCacheEntry>();
+
+async function getCanvasSchema(moduleName: string): Promise<CanvasSchema | null> {
+  const key = cacheKey("canvas", [moduleName]);
+  const now = Date.now();
+  const cached = canvasCache.get(key);
+  if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.canvas;
+  try {
+    const canvas = (await api.get(`/api/configure/${api.enc(moduleName)}`)) as CanvasSchema;
+    canvasCache.set(key, { canvas, at: now });
+    return canvas;
+  } catch {
+    // Cache the miss too — a caller without configure access would otherwise
+    // pay a failing round trip on every submit.
+    canvasCache.set(key, { canvas: null, at: now });
+    return null;
+  }
+}
+
 async function getActivityDef(
   moduleName: string,
   activity: string,
 ): Promise<ActivityDef | null> {
   const schema = await getExtendedSchema(moduleName);
-  return schema?.activities?.find((a) => a.name === activity) ?? null;
+  for (const a of schema?.activities ?? []) {
+    if (a && typeof a === "object" && a.name === activity) {
+      if (a.actor) return a;
+      break; // listed without actor info — consult the canvas
+    }
+  }
+  const canvas = await getCanvasSchema(moduleName);
+  return canvas?.activities?.find(
+    (a) => a && typeof a === "object" && a.name === activity,
+  ) ?? null;
 }
 
 interface FlaggedRecord {
@@ -162,14 +204,34 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
     }
   }
 
-  // Rule 2a — `changeStatus` is the explicit state-change override.
-  if (activity === "changeStatus" && !confirmed) {
+  // Rule 2 pre-flight — a target state must exist before any confirmation
+  // dance. The platform returns an opaque error for unknown states.
+  if (state) {
+    const states = await getModuleStates(moduleName);
+    if (states && !states.includes(state)) {
+      return {
+        ok: false,
+        structured: {
+          error: "unknown_state",
+          message: `State '${state}' does not exist on module '${moduleName}'. Available states: ${states.join(", ")}.`,
+          activity,
+          state,
+          agent_action:
+            "Use one of the listed states, or omit 'state' to follow the activity's normal flow.",
+        },
+      };
+    }
+  }
+
+  // Rule 2a — `changeStatus` (alias `changeState`) is the explicit
+  // state-change override.
+  if ((activity === "changeStatus" || activity === "changeState") && !confirmed) {
     return {
       ok: false,
       structured: {
         error: "state_change_requires_confirmation",
         message:
-          "The 'changeStatus' activity bypasses the workflow to change an entry's state directly. AI agents must not call it on their own initiative.",
+          `The '${activity}' activity bypasses the workflow to change an entry's state directly. AI agents must not call it on their own initiative.`,
         activity,
         agent_action:
           "Ask the user explicitly whether to change the entry's state. After they confirm, resubmit with confirmed: true.",
@@ -317,6 +379,20 @@ function checkRefValue(
 }
 
 /**
+ * State names for a module, from the cached extended schema. Tolerates both
+ * string[] and [{name}] shapes; null when unavailable (let the API decide).
+ */
+export async function getModuleStates(moduleName: string): Promise<string[] | null> {
+  const schema = await getExtendedSchema(moduleName);
+  const raw = schema?.states;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const names = raw
+    .map((s) => (typeof s === "string" ? s : s?.name))
+    .filter((n): n is string => typeof n === "string" && n.length > 0);
+  return names.length > 0 ? names : null;
+}
+
+/**
  * Build a field-name → field-type map for a module. Returns null when the
  * schema cannot be loaded (callers should let the server decide). The
  * underlying schema is cached by getExtendedSchema, so repeat calls are cheap.
@@ -373,8 +449,21 @@ export async function validateInputShapes(
   return validateInputShapesWith(types, input);
 }
 
+/**
+ * Annotation merged into platform responses that carry `flagged: true`. The
+ * platform itself returns the bare flag with no explanation — without this,
+ * agents loop retrying with higher confidence or `confirmed: true`.
+ */
+export const FLAGGED_ANNOTATION = {
+  flag_reason:
+    "Flagged submissions are recorded as intentions pending human review — the state transition did NOT occur. Causes: ai.confidence below the activity's confidence_threshold, or the activity's actor does not permit AI execution.",
+  agent_action:
+    "Do not retry with a higher confidence. Report the flag to the user; a human can complete the activity in Inistate.",
+} as const;
+
 // Test-only helpers.
 export function __resetGuardCaches(): void {
   schemaCache.clear();
+  canvasCache.clear();
   flaggedCache.clear();
 }

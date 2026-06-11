@@ -34,6 +34,10 @@
           "description": "Display name. Used as the key in all MCP input/output payloads (e.g. 'Leave Type', not 'xKfLmNpQ')."
         },
         "type": { "$ref": "#/definitions/FieldType" },
+        "connection": {
+          "type": "string",
+          "description": "Name of the module this field links to (e.g. 'Members' for workspace users). Required for Module/Modules/User/Users types; not allowed on other types. Not supported inside Table sub-fields."
+        },
         "options": {
           "type": "array",
           "items": { "type": "string" },

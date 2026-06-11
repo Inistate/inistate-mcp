@@ -62,7 +62,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     "switch_mode",
     {
       description:
-        "Switch tool surface. 'configure' (default) exposes entry CRUD plus module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas, get_module_schema) and schema/configure and design-guide resources. 'runtime' narrows to entry CRUD only. 'frontend' is a superset of 'configure' that also exposes the inistate://frontend-guide resource — REST API reference for generating Vue/React UIs that call the Inistate API directly with a user-supplied token. Use 'frontend' when the user wants to build a custom UI (and optionally iterate on the schema in the same session). The tool/resource list refreshes via list_changed after this call.",
+        "Switch tool surface. 'configure' (default) exposes entry CRUD plus module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas) and schema/configure and design-guide resources. 'runtime' narrows to entry CRUD plus get_module_schema (available in every mode). 'frontend' is a superset of 'configure' that also exposes the inistate://frontend-guide resource — REST API reference for generating Vue/React UIs that call the Inistate API directly with a user-supplied token. Use 'frontend' when the user wants to build a custom UI (and optionally iterate on the schema in the same session). The tool/resource list refreshes via list_changed after this call.",
       inputSchema: {
         mode: z.enum(["runtime", "configure", "frontend"]).describe("Target mode"),
       },

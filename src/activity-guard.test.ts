@@ -85,6 +85,132 @@ describe("evaluateActivity — actor enforcement", () => {
   });
 });
 
+// The production extended tier returns activities as plain strings (names
+// only) — actor data lives in the canvas. The guard must resolve actors
+// through the canvas or rules 3 & 4 never fire.
+describe("evaluateActivity — actor resolution via canvas fallback", () => {
+  const STRING_TIER = {
+    activities: ["create", "edit", "Approve", "Submit", "AutoTriage"],
+  };
+  const CANVAS = {
+    activities: [
+      { name: "Approve", actor: "human" },
+      { name: "Submit", actor: "hybrid" },
+      { name: "AutoTriage", actor: "ai" },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.spyOn(api, "get").mockImplementation(async (path: string) =>
+      path.startsWith("/api/configure/") ? CANVAS : STRING_TIER,
+    );
+  });
+
+  it("blocks human-actor activities when the extended tier has names only", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "Approve",
+      entryId: 1,
+      confidence: 0.99,
+      confirmed: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.structured.error).toBe("human_actor_blocked");
+    }
+  });
+
+  it("requires confirmation for hybrid activities resolved via canvas", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "Submit",
+      entryId: 1,
+      confidence: 0.9,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.structured.error).toBe("hybrid_requires_confirmation");
+    }
+  });
+
+  it("allows ai-actor activities resolved via canvas", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "AutoTriage",
+      entryId: 1,
+      confidence: 0.9,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("lets the API decide when the canvas is unavailable", async () => {
+    vi.spyOn(api, "get").mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/configure/")) throw new Error("403 Forbidden");
+      return STRING_TIER;
+    });
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "Approve",
+      entryId: 1,
+      confidence: 0.9,
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("evaluateActivity — target-state pre-flight", () => {
+  const SCHEMA_WITH_STATES = {
+    activities: [{ name: "Approve", actor: "human" }],
+    states: ["Draft", "Active", "Done"],
+  };
+
+  beforeEach(() => {
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_STATES);
+  });
+
+  it("rejects unknown target states before the confirmation dance", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "edit",
+      entryId: 1,
+      state: "On Hold",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.structured.error).toBe("unknown_state");
+      expect(String(result.structured.message)).toContain("Draft, Active, Done");
+    }
+  });
+
+  it("allows known target states when confirmed", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "edit",
+      entryId: 1,
+      state: "Active",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("blocks the 'changeState' alias without confirmation", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "changeState",
+      entryId: 1,
+      state: "Active",
+      confidence: 0.9,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.structured.error).toBe("state_change_requires_confirmation");
+    }
+  });
+});
+
 describe("evaluateActivity — state-change enforcement", () => {
   it("blocks 'changeStatus' without confirmation", async () => {
     const result = await evaluateActivity({

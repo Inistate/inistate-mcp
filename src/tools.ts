@@ -7,7 +7,9 @@ import { capabilityMessage } from "./capability.js";
 import {
   clearFlagged,
   evaluateActivity,
+  FLAGGED_ANNOTATION,
   getModuleFieldTypes,
+  getModuleStates,
   getPriorFlag,
   recordFlagged,
   validateInputShapes,
@@ -15,6 +17,8 @@ import {
 } from "./activity-guard.js";
 import {
   designWorkflow,
+  normalizeFieldType,
+  normalizeStateColor,
   validateDesign,
 } from "./schema.js";
 
@@ -78,6 +82,7 @@ const fieldShape = z.object({
   id: z.string().optional(),
   name: z.string(),
   type: z.string().optional(),
+  connection: z.string().optional().describe("Module to link to (e.g. \"Members\"). Required for User/Users/Module/Modules types."),
   options: z.array(z.string()).optional(),
   fields: z.array(subFieldShape).optional().describe("Sub-fields for Table type"),
   ai_hint: z.string().optional(),
@@ -86,7 +91,7 @@ const fieldShape = z.object({
 const stateShape = z.object({
   id: z.string().optional(),
   name: z.string(),
-  color: z.string().optional(),
+  color: z.string().optional().describe("Palette: #5A6070 #2968A8 #2A7B50 #A07828 #C0392B #6B4D91 #1E6B45 #8B2D2D. Names ('red', 'amber') and other hex are normalized to the nearest."),
   initial: z.boolean().optional(),
   ai_hint: z.string().optional(),
   ai_instruction: z.string().optional(),
@@ -124,6 +129,34 @@ const moduleSectionsShape = {
   activities: z.array(activityShape).optional().describe("Custom activities. Omit for record list modules."),
   flows: z.array(flowShape).optional().describe("State transition rules. Omit for record list modules."),
 };
+
+/**
+ * Apply the same type/color normalization validate_design reports, so the
+ * platform always receives canonical vocabulary regardless of what the agent
+ * sent ("Select" → "Selection", "gray" → "#5A6070", …).
+ */
+function normalizeModuleSections(body: Record<string, unknown>): void {
+  if (Array.isArray(body.information)) {
+    body.information = (body.information as Array<Record<string, unknown>>).map((f) => ({
+      ...f,
+      type: normalizeFieldType(f.type as string | undefined).type,
+      ...(Array.isArray(f.fields)
+        ? {
+            fields: (f.fields as Array<Record<string, unknown>>).map((sf) => ({
+              ...sf,
+              type: normalizeFieldType(sf.type as string | undefined).type,
+            })),
+          }
+        : {}),
+    }));
+  }
+  if (Array.isArray(body.states)) {
+    body.states = (body.states as Array<Record<string, unknown>>).map((s) => ({
+      ...s,
+      color: normalizeStateColor(s.color as string | undefined, (s.name as string) || "").color,
+    }));
+  }
+}
 
 // ---------- Tool registration ----------
 
@@ -226,9 +259,10 @@ Workflow sequences after workspace is set:
   );
 
   // ═══════════════════════════════════════════
-  // 4. get_module_schema (configure mode)
+  // 4. get_module_schema (always available — read-only;
+  //    runtime agents need it to plan submissions)
   // ═══════════════════════════════════════════
-  configureTools.push(server.registerTool(
+  server.registerTool(
     "get_module_schema",
     {
       title: "Get Module Schema",
@@ -255,10 +289,10 @@ Workflow sequences after workspace is set:
         return err(e);
       }
     },
-  ));
+  );
 
   // ═══════════════════════════════════════════
-  // 5. get_module_canvas (configure mode)
+  // 5. get_module_canvas (configure mode — admin view for modifying modules)
   // ═══════════════════════════════════════════
   configureTools.push(server.registerTool(
     "get_module_canvas",
@@ -552,6 +586,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
             clearFlagged(moduleName, t, activity);
           }
         }
+        if (flagged) {
+          // The platform returns the bare flag — explain it so agents stop retrying.
+          Object.assign(data as Record<string, unknown>, FLAGGED_ANNOTATION);
+        }
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ${flagged ? "flagged" : "ok"}`);
         return ok(data);
       } catch (e) {
@@ -662,10 +700,32 @@ Load resource inistate://schema before modifying to know valid field types, colo
           return err({ structured: guard.structured });
         }
 
-        // Any per-item state override also requires explicit confirmation.
+        // Any per-item state override must name a real state…
         const itemsWithState = items
           .map((it, i) => ({ idx: i, state: it.state }))
           .filter((x) => !!x.state);
+        if (itemsWithState.length > 0) {
+          const knownStates = await getModuleStates(moduleName);
+          if (knownStates) {
+            const unknown = itemsWithState.filter((x) => !knownStates.includes(x.state as string));
+            if (unknown.length > 0) {
+              const structured = {
+                error: "unknown_state",
+                message: `One or more items target states that do not exist on module '${moduleName}'. Available states: ${knownStates.join(", ")}.`,
+                activity,
+                items: unknown,
+                agent_action:
+                  "Use one of the listed states, or omit 'state' to follow the activity's normal flow.",
+              };
+              log(
+                "submit_activities",
+                `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: unknown_state (${unknown.length} items)`,
+              );
+              return err({ structured });
+            }
+          }
+        }
+        // …and requires explicit confirmation.
         if (itemsWithState.length > 0 && !confirmed) {
           const structured = {
             error: "state_override_requires_confirmation",
@@ -798,6 +858,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
         }
 
         const summary = (data as { summary?: { succeeded?: number; failed?: number; flagged?: number } }).summary;
+        if ((summary?.flagged ?? 0) > 0 || results.some((r) => r.flagged === true)) {
+          // The platform returns bare per-item flags — explain them so agents stop retrying.
+          Object.assign(data, FLAGGED_ANNOTATION);
+        }
         log(
           "submit_activities",
           `module=${moduleName} activity=${activity} count=${items.length} → ok=${summary?.succeeded ?? "?"} fail=${summary?.failed ?? "?"} flagged=${summary?.flagged ?? "?"}`,
@@ -1019,18 +1083,10 @@ Load resources inistate://schema and inistate://design-guide before designing fo
             "Natural language description of the desired workflow. Include: entity type, lifecycle states, activities, who performs each, what data is collected.",
           ),
         industry: z
-          .enum([
-            "financial_services",
-            "healthcare",
-            "legal",
-            "hr",
-            "procurement",
-            "it_service",
-            "general",
-          ])
-          .default("general")
+          .string()
+          .optional()
           .describe(
-            "Industry context for compliance-aware defaults. Affects: default audit fields, confidence thresholds, actor type suggestions.",
+            "Industry context, free text — mapped to financial_services, healthcare, legal, hr, procurement, it_service, or general (default). Affects audit fields, confidence thresholds, actor suggestions.",
           ),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -1104,6 +1160,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        normalizeModuleSections(body);
         log("create_module", `name=${name}`);
         const data = await backend.createModule(body);
         log("create_module", `name=${name} → ok`);
@@ -1155,6 +1212,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        normalizeModuleSections(body);
         log("update_module", `id=${id}${name ? ` newName=${name}` : ""}`);
         const data = await backend.updateModule(body);
         log("update_module", `id=${id} → ok`);
