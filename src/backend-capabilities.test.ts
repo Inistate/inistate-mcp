@@ -191,3 +191,88 @@ describe("CloudBackend capability contract", () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// Workspace orientation — auto-select + slim responses
+// ─────────────────────────────────────────────────────────────
+
+/** Workspace-capable fake: one workspace whose details carry the raw cloud
+ *  shape (vectors + UI noise), to prove the handlers slim it. */
+class SingleWorkspaceBackend extends FakeLocalBackend {
+  activatedWith: string | null = null;
+
+  override capabilities(): Capabilities {
+    return { ...super.capabilities(), workspaces: true };
+  }
+
+  override setActiveWorkspace(wsid?: string): void {
+    this.activatedWith = wsid ?? null;
+  }
+
+  override async listWorkspaces(): Promise<unknown> {
+    return [{ id: 42, name: "Solo" }];
+  }
+
+  override async getWorkspace(): Promise<unknown> {
+    return {
+      id: 42,
+      name: "Solo",
+      vectors: [
+        { id: "1", name: "Tasks", emoji: "📋", published: true, menus: [{ big: "noise" }] },
+        { id: "2", name: "Hidden", emoji: "🙈", published: false },
+      ],
+      users: [{ id: 1 }, { id: 2 }],
+      menus: ["junk"],
+      widgets: ["junk"],
+      theme: { lots: "of ui state" },
+    };
+  }
+}
+
+describe("workspace orientation — auto-select + slim responses", () => {
+  let wsClient: Client;
+  let wsBackend: SingleWorkspaceBackend;
+
+  beforeAll(async () => {
+    const [clientTransport, serverTransport] = LinkedTransport.createPair();
+    wsBackend = new SingleWorkspaceBackend();
+    const server = createServer({ backend: wsBackend, initialMode: "runtime" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await server.connect(serverTransport as any);
+    wsClient = new Client({ name: "ws-test", version: "1.0.0" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wsClient.connect(clientTransport as any);
+  });
+
+  afterAll(async () => {
+    await wsClient.close();
+  });
+
+  it("list_workspaces auto-selects a single workspace and returns slim modules", async () => {
+    const data = parse(await wsClient.callTool({ name: "list_workspaces", arguments: {} }));
+    expect(data.workspaces).toEqual([{ id: 42, name: "Solo" }]);
+    expect(wsBackend.activatedWith).toBe("42");
+    expect(data.autoSelected.workspaceId).toBe(42);
+    expect(data.autoSelected.name).toBe("Solo");
+    // Published modules only, slimmed to name + emoji
+    expect(data.autoSelected.modules).toEqual([{ name: "Tasks", emoji: "📋" }]);
+    // The UI noise must not leak through
+    expect(data.autoSelected.users).toBeUndefined();
+    expect(data.autoSelected.vectors).toBeUndefined();
+  });
+
+  it("set_workspace returns the slim shape, not the raw workspace object", async () => {
+    const data = parse(await wsClient.callTool({ name: "set_workspace", arguments: { workspaceId: "42" } }));
+    expect(data.workspaceId).toBe(42);
+    expect(data.modules).toEqual([{ name: "Tasks", emoji: "📋" }]);
+    expect(data.menus).toBeUndefined();
+    expect(data.widgets).toBeUndefined();
+  });
+
+  it("passes through workspace shapes without vectors untouched", async () => {
+    const plain = { id: 7, name: "Other", anything: "else" };
+    wsBackend.getWorkspace = async () => plain;
+    const data = parse(await wsClient.callTool({ name: "set_workspace", arguments: { workspaceId: "7" } }));
+    expect(data).toEqual(plain);
+  });
+});

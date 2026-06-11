@@ -277,12 +277,34 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       };
 
   const submitActivityDescription = gov
-    ? "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. ALWAYS call get_form first. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime."
-    : "Perform an activity on a module entry: create (no entryId), edit, delete, or a custom activity that drives a state transition. ALWAYS call get_form first. A custom activity is accepted only if a flow permits it from the entry's current state — otherwise it is rejected (Illegal transition) and nothing is written. The local runtime applies no confidence/actor gating: `ai` is optional and there is no flagged outcome. Use idempotencyKey for safe retries and expectedVersion for optimistic concurrency.";
+    ? "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. Call get_form before the first submission per (module, activity); reuse its schema for further entries. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime."
+    : "Perform an activity on a module entry: create (no entryId), edit, delete, or a custom activity that drives a state transition. Call get_form before the first submission per (module, activity); reuse its schema for further entries. A custom activity is accepted only if a flow permits it from the entry's current state — otherwise it is rejected (Illegal transition) and nothing is written. The local runtime applies no confidence/actor gating: `ai` is optional and there is no flagged outcome. Use idempotencyKey for safe retries and expectedVersion for optimistic concurrency.";
 
   const submitActivitiesDescription = gov
     ? "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows — one tool turn instead of N. A per-item `ai` wholly replaces the top-level default (no partial merge). Items run sequentially fail-soft on the server: one failure does not abort the rest; per-item outcomes (success, entryId, flagged, validation details) return in `results` — use `clientRef` to correlate. Max 100 items; chunk beyond that. Guardrails match submit_activity at batch level: actor='human' rejects the whole batch; actor='hybrid', activity='changeStatus', or any state override (top-level or per-item) requires `confirmed: true`."
     : "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows. A per-item `ai` wholly replaces the top-level default. Items run sequentially fail-soft: one failure does not abort the rest; per-item outcomes return in `results` — use `clientRef` to correlate. Max 100 items per request. The local runtime applies no confidence/actor gating.";
+  /**
+   * Slim a raw workspace payload to what an agent needs: identity + the module
+   * list (the platform's `vectors`). The raw object is ~24KB of UI state
+   * (menus, widgets, theme, users) — returning it cost ~6.8k tokens per
+   * session and still required a follow-up list_modules call. Pass through
+   * unknown shapes untouched so injected backends keep working.
+   */
+  const slimWorkspace = (workspaceId: string | number, data: unknown): unknown => {
+    if (!data || typeof data !== "object") return data;
+    const ws = data as Record<string, unknown>;
+    if (!Array.isArray(ws.vectors)) return data;
+    const modules = (ws.vectors as Array<Record<string, unknown>>)
+      .filter((v) => v && typeof v === "object" && v.published !== false)
+      .map((v) => ({ name: v.name, emoji: v.emoji }));
+    return {
+      workspaceId: ws.id ?? workspaceId,
+      name: ws.name,
+      modules,
+      hint: "Modules are listed above — no list_modules call needed.",
+    };
+  };
+
   // ═══════════════════════════════════════════
   // 1. list_workspaces
   // ═══════════════════════════════════════════
@@ -292,7 +314,7 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       title: "List Workspaces",
       description: gatedDesc(
         caps.workspaces,
-        "List workspaces the current user has access to. Call set_workspace to select one before any module or entry tools. This is typically the first tool to call in any session.",
+        "List workspaces the current user has access to. Typically the first call of a session. If exactly one workspace matches, it is selected automatically and its module list is returned — no set_workspace or list_modules needed; otherwise call set_workspace next.",
       ),
       inputSchema: {
         search: z
@@ -306,6 +328,24 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       if (!caps.workspaces) return ok(capabilityMessage("workspaces", backend.kind));
       try {
         const data = await backend.listWorkspaces(search);
+        // Exactly one workspace → selecting it is the agent's only possible
+        // next move; do it now and include the modules, saving two calls.
+        if (Array.isArray(data) && data.length === 1) {
+          const only = data[0] as Record<string, unknown>;
+          const wsid = only?.id;
+          if (wsid !== undefined && wsid !== null) {
+            backend.setActiveWorkspace(String(wsid));
+            try {
+              const details = await backend.getWorkspace(String(wsid));
+              return ok({
+                workspaces: data,
+                autoSelected: slimWorkspace(String(wsid), details),
+              });
+            } catch {
+              return ok({ workspaces: data, autoSelected: { workspaceId: wsid, name: only?.name } });
+            }
+          }
+        }
         return ok(data);
       } catch (e) {
         return err(e);
@@ -322,13 +362,13 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       title: "Set Active Workspace",
       description: gatedDesc(
         caps.workspaces,
-        `Set the active workspace for the current session. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
+        `Set the active workspace for the current session. The response includes the workspace's module list — go straight to list_entries / get_form / get_module_schema with those names; list_modules is only needed to refresh. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
 
 Workflow sequences after workspace is set:
-- Design: design_workflow → validate_design → create_module
-- Execute: list_modules → list_entries → get_form → submit_activity
-- Modify: list_modules → get_module_canvas → validate_design → update_module
-- Query: list_modules → list_entries → get_entry / get_entry_history`,
+- Design: design_workflow → create_module (validates internally)
+- Execute: list_entries → get_form → submit_activity
+- Modify: get_module_canvas → validate_design → update_module
+- Query: list_entries → get_entry / get_entry_history`,
       ),
       inputSchema: {
         workspaceId: z
@@ -342,7 +382,7 @@ Workflow sequences after workspace is set:
       try {
         backend.setActiveWorkspace(workspaceId);
         const data = await backend.getWorkspace(workspaceId);
-        return ok(data);
+        return ok(slimWorkspace(workspaceId, data));
       } catch (e) {
         return err(e);
       }
@@ -357,7 +397,7 @@ Workflow sequences after workspace is set:
     {
       title: "List Modules",
       description:
-        "List all discoverable modules in the current workspace. Call this to find module names for execute, modify, and query operations.",
+        "List all discoverable modules in the current workspace. set_workspace already returns this list — call this only to refresh it or when operating stateless without set_workspace.",
       inputSchema: {
         workspaceId: wsParam,
       },
@@ -523,7 +563,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "Get Activity Form",
       description:
-        "Get the form fields, current values, and options for a module activity. ALWAYS call this before submit_activity to discover required fields, their types, valid options, default values, and the confidence threshold. Never fabricate form data — if required fields cannot be confidently populated, ask the user.",
+        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). Never fabricate form data — if required fields cannot be confidently populated, ask the user.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         activity: z
@@ -1223,7 +1263,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     {
       title: "Validate Design",
       description:
-        "Validate a module schema before creating or updating. Checks structural integrity against all FACTSOps rules without submitting to the API. Passing validate_design guarantees the subsequent create_module/update_module call will not fail with 422. Always call this before create_module or update_module.",
+        "Validate a module schema without submitting anything. create_module (and update_module on full-canvas payloads) runs these same checks internally, so this tool is optional there — use it to iterate on a draft, or before a partial update_module where the merged canvas cannot be checked client-side.",
       inputSchema: {
         schema: z
           .record(z.unknown())
@@ -1251,7 +1291,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     {
       title: "Create Module",
       description:
-        "Create a new module. Supports workflow modules (states, activities, flows) and record list modules (fields only). Requires Administrator, Consultant, or Workspace Admin role. Always call validate_design first. See inistate://schema/configure for field types, color palette, and design rules.",
+        "Create a new module. Supports workflow modules (states, activities, flows) and record list modules (fields only). Requires Administrator, Consultant, or Workspace Admin role. Validates internally with the same rules as validate_design and returns structured errors without creating anything — a separate validate_design call beforehand is optional. See inistate://schema/configure for field types, color palette, and design rules.",
       inputSchema: {
         name: z.string().describe("Module name"),
         ...moduleSectionsShape,
@@ -1279,6 +1319,22 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         normalizeModuleSections(body);
+        // Validate post-normalization — the same rules validate_design applies,
+        // so a failing design costs a structured error, not an API 422 (and the
+        // agent no longer needs a separate validate_design round trip).
+        const validation = validateDesign(body as Record<string, any>, "create");
+        if (!validation.valid) {
+          log("create_module", `name=${name} → BLOCKED: validation_failed (${validation.errors.length} errors)`);
+          return err({
+            structured: {
+              error: "validation_failed",
+              message: "The schema failed pre-flight validation (same rules as validate_design). Nothing was created.",
+              errors: validation.errors,
+              warnings: validation.warnings,
+              agent_action: "Fix the listed errors and call create_module again — no separate validate_design call is needed.",
+            },
+          });
+        }
         log("create_module", `name=${name}`);
         const data = await backend.createModule(body);
         log("create_module", `name=${name} → ok`);
@@ -1298,7 +1354,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     {
       title: "Update Module",
       description:
-        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain the stable module id and item ids, then validate_design before submitting.",
+        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain the stable module id and item ids. Full-canvas payloads (information included) are validated internally like create_module; for partial payloads, validate the merged canvas with validate_design first.",
       inputSchema: {
         id: z
           .union([z.string(), z.number()])
@@ -1331,6 +1387,25 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         normalizeModuleSections(body);
+        // Pre-flight only full-canvas payloads. Partial updates (no
+        // `information`) can legitimately reference fields that live on the
+        // server-side canvas, which the validator cannot see — let the
+        // platform validate those.
+        if (information) {
+          const validation = validateDesign(body as Record<string, any>, "update");
+          if (!validation.valid) {
+            log("update_module", `id=${id} → BLOCKED: validation_failed (${validation.errors.length} errors)`);
+            return err({
+              structured: {
+                error: "validation_failed",
+                message: "The schema failed pre-flight validation (same rules as validate_design). Nothing was updated.",
+                errors: validation.errors,
+                warnings: validation.warnings,
+                agent_action: "Fix the listed errors and call update_module again.",
+              },
+            });
+          }
+        }
         log("update_module", `id=${id}${name ? ` newName=${name}` : ""}`);
         const data = await backend.updateModule(body);
         log("update_module", `id=${id} → ok`);

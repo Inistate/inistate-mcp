@@ -203,6 +203,45 @@ describe("configure mode", () => {
     });
   });
 
+  describe("create_module pre-flight validation", () => {
+    it("returns validation_failed locally without calling the API", async () => {
+      const result = await client.callTool({
+        name: "create_module",
+        arguments: {
+          name: "Broken Module",
+          information: [
+            { name: "Title", type: "Text" },
+            { name: "Title", type: "Text" },
+          ],
+          states: [{ name: "A" }, { name: "B" }],
+          activities: [{ name: "Go", actor: "human", fields: ["Missing"] }],
+          flows: [{ from: "A", to: "Ghost", activity: "Nope" }],
+        },
+      });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.error).toBe("validation_failed");
+      expect(data.errors.length).toBeGreaterThan(0);
+      expect(data.agent_action).toContain("create_module");
+    });
+  });
+
+  describe("update_module pre-flight validation", () => {
+    it("validates full-canvas payloads locally", async () => {
+      const result = await client.callTool({
+        name: "update_module",
+        arguments: {
+          id: 123,
+          information: [{ name: "Foo", type: "Bogus" }],
+        },
+      });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.error).toBe("validation_failed");
+      expect(data.errors.some((e: string) => e.includes("Bogus"))).toBe(true);
+    });
+  });
+
   describe("validate_design tool", () => {
     it("validates a correct workflow schema", async () => {
       const result = await client.callTool({

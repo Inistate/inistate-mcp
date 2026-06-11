@@ -141,13 +141,12 @@ Tools and resources marked **(configure)** / **(frontend)** are absent from the 
 
 ## Typical Workflow
 
-1. `list_workspaces` → `set_workspace` — select a workspace
-2. `list_modules` — find the module you need
-3. `get_module_schema` — understand its fields, states, and activities
-4. `get_form` — discover required fields before submitting
-5. `submit_activity` — create or update entries
-6. `list_entries` — query and browse data
-7. `get_entry_history` — review entry history
+1. `list_workspaces` → `set_workspace` — select a workspace (auto-selected when exactly one matches; both return the workspace's module list, so `list_modules` is only needed to refresh)
+2. `get_module_schema` — understand a module's fields, states, and activities
+3. `get_form` — discover required fields before the first submission per (module, activity); reuse its schema for further entries
+4. `submit_activity` — create or update entries (`submit_activities` for bulk)
+5. `list_entries` — query and browse data (use the `fields` parameter to keep payloads small)
+6. `get_entry_history` — review entry history
 
 ## Development
 

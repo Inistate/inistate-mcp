@@ -25,10 +25,24 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   const { backend = new CloudBackend(), initialMode, name = "inistate-mcp", version = pkgVersion } = options;
   const caps = backend.capabilities();
 
-  const server = new McpServer({
-    name,
-    version,
-  });
+  // Session-level orientation injected at initialize (clients that support
+  // MCP instructions surface it as context). Encodes the canonical flows so
+  // agents don't spend turns rediscovering them.
+  const instructions = `Inistate MCP — canonical flows (minimize tool calls):
+- Orient: list_workspaces (auto-selects if exactly one match) -> set_workspace. Both return the workspace's module list; list_modules is only for refreshing it.
+- Read: list_entries with the fields parameter (keeps payloads small) and filters; get_entry for one record.
+- Write: get_form once per (module, activity), then submit_activity; reuse the form schema for more entries of the same kind. Use submit_activities for bulk writes (max 100 per call).
+- Design: design_workflow -> create_module (validates internally; validate_design is an optional dry-run). Modify: get_module_canvas -> edit -> update_module (full-canvas payloads validate internally).
+- Files: request_upload_url -> PUT bytes -> confirm_upload (default); upload_file only if that flow fails.
+- Guardrails: actor='human' activities are never executable by AI; hybrid actors, changeStatus, and state overrides need confirmed:true after explicit user approval. Load inistate://schema/runtime for response shapes and filter operators.`;
+
+  const server = new McpServer(
+    {
+      name,
+      version,
+    },
+    { instructions },
+  );
 
   const { configureTools } = registerTools(server, backend);
   const { configureResources, frontendResources } = registerResources(server, backend);
