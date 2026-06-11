@@ -62,29 +62,6 @@ const CONFIGURE_DEFINITIONS = [
   "ModuleSchema",
 ];
 
-const RUNTIME_OPERATIONS = [
-  "list_workspaces",
-  "get_workspace",
-  "discover_modules",
-  "get_module",
-  "list_entries",
-  "get_entry",
-  "get_form",
-  "submit_activity",
-  "submit_activities",
-  "get_history",
-  "request_upload_url",
-  "confirm_upload",
-  "upload_file",
-  "download_file",
-];
-
-const CONFIGURE_OPERATIONS = [
-  "get_module_schema",
-  "create_module",
-  "update_module",
-];
-
 const RUNTIME_WORKFLOW_KEYS = [
   "_description",
   "steps",
@@ -109,9 +86,13 @@ function pickKeys(source: Record<string, any>, keys: string[]): Record<string, a
   return out;
 }
 
+// Tool inputs are documented authoritatively by the MCP tool schemas the agent
+// already holds — the views carry only what tools/list cannot: response/type
+// definitions and the workflow guide. (The JSON's `operations` section is
+// intentionally NOT included; re-documenting tools here doubled the context
+// cost of the resource and had drifted from the real tool surface.)
 function buildSchemaView(
   definitionKeys: string[],
-  operationKeys: string[],
   workflowKeys: string[],
 ): Record<string, any> {
   return {
@@ -120,23 +101,17 @@ function buildSchemaView(
     description: SCHEMA.description,
     version: SCHEMA.version,
     definitions: pickKeys(SCHEMA.definitions, definitionKeys),
-    operations: {
-      _description: SCHEMA.operations._description,
-      ...pickKeys(SCHEMA.operations, operationKeys),
-    },
     workflow_guide: pickKeys(SCHEMA.workflow_guide, workflowKeys),
   };
 }
 
 export const SCHEMA_RUNTIME = buildSchemaView(
   RUNTIME_DEFINITIONS,
-  RUNTIME_OPERATIONS,
   RUNTIME_WORKFLOW_KEYS,
 );
 
 export const SCHEMA_CONFIGURE = buildSchemaView(
   CONFIGURE_DEFINITIONS,
-  CONFIGURE_OPERATIONS,
   CONFIGURE_WORKFLOW_KEYS,
 );
 

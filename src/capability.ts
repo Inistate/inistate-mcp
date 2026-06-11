@@ -21,7 +21,8 @@ export type CapabilityCode =
   | "governed_history"
   | "files"
   | "authorization"
-  | "frontend_guide";
+  | "frontend_guide"
+  | "scaffold";
 
 export interface CapabilityMessage {
   error: "capability_unavailable";
@@ -42,6 +43,8 @@ const MESSAGES: Record<CapabilityCode, string> = {
     "Authentication and authorization are not available on this backend. A local runtime runs within a local trust boundary and has no user identity to authorize against.",
   frontend_guide:
     "The frontend guide targets the Inistate Platform REST API, which this backend does not serve.",
+  scaffold:
+    "Scaffolding a module from an existing table or database is a local-runtime introspection capability. This backend designs modules directly — use design_workflow to draft one here.",
 };
 
 const UPGRADE: Record<CapabilityCode, string> = {
@@ -51,6 +54,8 @@ const UPGRADE: Record<CapabilityCode, string> = {
   authorization:
     "Connect to the Inistate Platform to enable authentication and authorization.",
   frontend_guide: "Connect to the Inistate Platform to use the frontend guide.",
+  scaffold:
+    "Run the local runtime (inistate-core) to scaffold a module from an existing SQLite, Notion, or Airtable table.",
 };
 
 export function capabilityMessage(

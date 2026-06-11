@@ -28,6 +28,20 @@ export interface Capabilities {
   files: boolean;
   /** Identity and role-based authorization. */
   authorization: boolean;
+  /**
+   * Actor/confidence/flag governance on activity submission — the pre-flight
+   * guard (human-actor block, hybrid confirm, confidence-inflation, flagging)
+   * and the required `ai` traceability block. When false, submit_activity and
+   * submit_activities skip the guard entirely and `ai` is optional: the backend
+   * either commits a legal transition or rejects it, with no flagged outcome.
+   */
+  governance: boolean;
+  /**
+   * Scaffold a module schema from an existing table/database via local
+   * introspection (scaffold_module). A local-runtime capability; the hosted
+   * Platform designs modules directly and does not introspect external stores.
+   */
+  scaffold: boolean;
   /** switch_mode targets this backend allows (cloud: all three; local: runtime + configure). */
   modes: Array<"runtime" | "configure" | "frontend">;
 }
@@ -85,6 +99,17 @@ export interface ConfirmUploadParams {
   s3Key: string;
 }
 
+export interface ScaffoldModuleParams {
+  /** notion://<databaseId>, airtable://<baseId>/<table>, or a local SQLite path. */
+  source: string;
+  /** Which table to model. Omit to discover available tables first. */
+  table?: string;
+  /** Override the generated module name. */
+  name?: string;
+  /** Promote a specific column to the workflow's state column. */
+  state?: string;
+}
+
 export interface DownloadResult {
   redirectUrl: string | null;
   status: number;
@@ -129,6 +154,13 @@ export interface Backend {
   downloadFile(params: DownloadFileParams): Promise<DownloadResult>;
   requestUploadUrl(params: RequestUploadUrlParams): Promise<unknown>;
   confirmUpload(params: ConfirmUploadParams): Promise<unknown>;
+
+  /**
+   * Scaffold a module schema from an existing table/database. Only meaningful
+   * when capabilities().scaffold is true; the tool gates on that before calling,
+   * so backends without it may throw.
+   */
+  scaffoldModule(params: ScaffoldModuleParams): Promise<unknown>;
 }
 
 /**
@@ -145,6 +177,8 @@ export class CloudBackend implements Backend {
       governedHistory: true,
       files: true,
       authorization: true,
+      governance: true,
+      scaffold: false,
       modes: ["runtime", "configure", "frontend"],
     };
   }
@@ -245,5 +279,14 @@ export class CloudBackend implements Backend {
 
   confirmUpload(p: ConfirmUploadParams): Promise<unknown> {
     return api.post("/api/mcp/confirm-upload", { s3Key: p.s3Key });
+  }
+
+  // The hosted Platform designs modules directly and does not introspect
+  // external stores; capabilities().scaffold is false, so the tool gates this
+  // off and never calls it. Present only to satisfy the interface.
+  scaffoldModule(_p: ScaffoldModuleParams): Promise<unknown> {
+    return Promise.reject(
+      new Error("scaffold_module is not available on the hosted Platform backend."),
+    );
   }
 }

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFileSync } from "fs";
-const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+const { version: pkgVersion } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 import { registerTools } from "./tools.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -15,14 +15,18 @@ export interface CreateServerOptions {
   backend?: Backend;
   /** Initial server mode (runtime / configure / frontend). */
   initialMode?: Mode;
+  /** Advertised server identity. Defaults to the open server's own name/version;
+   *  an embedder (e.g. inistate-core) overrides it to identify as itself. */
+  name?: string;
+  version?: string;
 }
 
 export function createServer(options: CreateServerOptions = {}): McpServer {
-  const { backend = new CloudBackend(), initialMode } = options;
+  const { backend = new CloudBackend(), initialMode, name = "inistate-mcp", version = pkgVersion } = options;
   const caps = backend.capabilities();
 
   const server = new McpServer({
-    name: "inistate-mcp",
+    name,
     version,
   });
 
@@ -62,7 +66,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
     "switch_mode",
     {
       description:
-        "Switch tool surface. 'configure' (default) exposes entry CRUD plus module design tools (create_module, update_module, design_workflow, validate_design, get_module_canvas) and schema/configure and design-guide resources. 'runtime' narrows to entry CRUD plus get_module_schema (available in every mode). 'frontend' is a superset of 'configure' that also exposes the inistate://frontend-guide resource — REST API reference for generating Vue/React UIs that call the Inistate API directly with a user-supplied token. Use 'frontend' when the user wants to build a custom UI (and optionally iterate on the schema in the same session). The tool/resource list refreshes via list_changed after this call.",
+        "Switch tool surface. 'configure' (default) = entry CRUD + module design tools and design resources. 'runtime' = entry CRUD plus get_module_schema (available in every mode). 'frontend' = configure + the inistate://frontend-guide resource (REST reference for building Vue/React UIs that call the Inistate API directly) — use it when the user wants a custom UI. The tool/resource list refreshes via list_changed after this call.",
       inputSchema: {
         mode: z.enum(["runtime", "configure", "frontend"]).describe("Target mode"),
       },
@@ -94,7 +98,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ mode: currentMode, message: `Switched to ${mode} mode` }, null, 2),
+            text: JSON.stringify({ mode: currentMode, message: `Switched to ${mode} mode` }),
           },
         ],
       };

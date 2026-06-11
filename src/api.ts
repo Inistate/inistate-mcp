@@ -120,16 +120,33 @@ async function handleResponse(res: Response): Promise<unknown> {
   if (!text) return null;
   const data = JSON.parse(text);
 
-  // §14.8 — truncate large list responses to avoid blowing up agent context
+  // §14.8 — truncate large list responses to avoid blowing up agent context.
+  // Size-aware: keep as many items as fit the byte budget (a fixed item count
+  // either overshoots for wide rows or wastes refetches for narrow ones).
+  const TRUNCATE_BUDGET = 30_000;
   if (
-    text.length > 30_000 &&
+    text.length > TRUNCATE_BUDGET &&
     data &&
     typeof data === "object" &&
-    Array.isArray(data.list)
+    Array.isArray(data.list) &&
+    data.list.length > 1
   ) {
-    data.list = data.list.slice(0, 10);
-    data._truncated = true;
-    data._truncated_message = `Response truncated to 10 of ${data.totalItems ?? "unknown"} items. Use pagination (currentPage, pageSize) to retrieve more.`;
+    const items: unknown[] = data.list;
+    const overhead = text.length - JSON.stringify(items).length;
+    const budget = Math.max(TRUNCATE_BUDGET - overhead, 2_000);
+    let size = 2;
+    let keep = 0;
+    for (const item of items) {
+      const itemLen = JSON.stringify(item).length + 1;
+      if (keep > 0 && size + itemLen > budget) break;
+      size += itemLen;
+      keep++;
+    }
+    if (keep < items.length) {
+      data.list = items.slice(0, keep);
+      data._truncated = true;
+      data._truncated_message = `Response truncated to ${keep} of ${items.length} items on this page (~30KB cap; ${data.totalItems ?? "unknown"} total). Narrow the payload with the fields parameter (biggest saving) or filters, and paginate with currentPage/pageSize.`;
+    }
   }
 
   return data;

@@ -26,11 +26,18 @@
     "inistate-mcp": "build/index.js",
     "inistate-mcp-http": "build/http.js"
   },
+  "main": "./build/lib.js",
+  "types": "./build/lib.d.ts",
   "exports": {
-    ".": "./build/index.js"
+    ".": {
+      "types": "./build/lib.d.ts",
+      "import": "./build/lib.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "build/**/*.js",
+    "build/**/*.d.ts",
     "README.md",
     "LICENSE",
     "server.json",

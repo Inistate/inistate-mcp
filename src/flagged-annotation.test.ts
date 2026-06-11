@@ -71,6 +71,8 @@ class FakeBackend implements Backend {
       governedHistory: true,
       files: true,
       authorization: true,
+      governance: true,
+      scaffold: false,
       modes: ["runtime", "configure", "frontend"],
     };
   }
@@ -93,6 +95,7 @@ class FakeBackend implements Backend {
   async downloadFile(): Promise<DownloadResult> { return { redirectUrl: null, status: 200, body: {} }; }
   async requestUploadUrl(): Promise<unknown> { return {}; }
   async confirmUpload(): Promise<unknown> { return {}; }
+  async scaffoldModule(): Promise<unknown> { throw new Error("not available"); }
 }
 
 function parse(result: Awaited<ReturnType<Client["callTool"]>>): any {

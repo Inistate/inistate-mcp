@@ -10,6 +10,9 @@ MCP server for the [Inistate](https://inistate.com) platform — module discover
 |----------|----------|---------|-------------|
 | `INISTATE_API_TOKEN` | Yes | — | Bearer token for Inistate API authentication |
 | `INISTATE_API_BASE` | No | `https://api.inistate.com` | API base URL |
+| `INISTATE_MCP_MODE` | No | `configure` | Initial mode: `runtime`, `configure`, or `frontend` (see [Modes](#modes)) |
+| `INISTATE_MCP_NO_SETUP` | No | — | Set to `1` to force server mode from a terminal (skip the interactive wizard) |
+| `INISTATE_DEBUG_FILE` | No | — | Set to `1` to log write-path tool calls to `./debug.log`, or to a path to log there. Off by default; logs identifiers only, never field values |
 
 ### Install from npm (recommended)
 
@@ -77,24 +80,30 @@ Then point your MCP client at `node /absolute/path/to/inistate-mcp/build/index.j
 
 ## Tools
 
+Tools marked **(configure)** are only exposed in configure mode — see [Modes](#modes).
+
 | Tool | Description |
 |------|-------------|
 | `list_workspaces` | List workspaces the user has access to |
 | `set_workspace` | Set the active workspace |
 | `list_modules` | List all discoverable modules in the workspace |
-| `get_module_schema` | Get the canvas schema (basic or extended tier) |
-| `get_module_canvas` | Get full module definition with stable IDs (round-trippable) |
+| `get_module_schema` | Get the canvas schema (basic or extended tier) **(configure)** |
+| `get_module_canvas` | Get full module definition with stable IDs (round-trippable) **(configure)** |
 | `list_entries` | Query entries with filters, sorting, and pagination |
 | `get_entry` | Read a single entry by ID |
 | `get_form` | Get form fields and defaults for an activity |
 | `submit_activity` | Create, edit, delete, or run custom activities |
+| `submit_activities` | Bulk variant — same activity applied to up to 100 entries in one call |
 | `get_entry_history` | Get entry audit trail and comments |
-| `upload_file` | Upload a file to S3 storage |
+| `request_upload_url` | Default upload path — get a presigned S3 URL to PUT file bytes to |
+| `confirm_upload` | Confirm a presigned upload completed; returns the File/Image field path |
+| `upload_file` | Fallback upload via base64/multipart (use only if the presigned flow fails) |
 | `download_file` | Download a file (returns pre-signed URL) |
-| `design_workflow` | Generate a scaffolded module template from a description |
-| `validate_design` | Validate a module schema before creating or updating |
-| `create_module` | Create a new module with schema |
-| `update_module` | Update an existing module's schema |
+| `design_workflow` | Generate a scaffolded module template from a description **(configure)** |
+| `validate_design` | Validate a module schema before creating or updating **(configure)** |
+| `create_module` | Create a new module with schema **(configure)** |
+| `update_module` | Update an existing module's schema **(configure)** |
+| `switch_mode` | Switch the active mode (runtime / configure / frontend) |
 
 ## Resources
 
@@ -103,16 +112,32 @@ Then point your MCP client at `node /absolute/path/to/inistate-mcp/build/index.j
 | `inistate://modules` | List all modules |
 | `inistate://modules/{name}/canvas` | Basic module schema (fields + states) |
 | `inistate://modules/{name}/canvas/extended` | Extended schema with activities and flows |
-| `inistate://schema` | FACTSOps schema definition (field types, colors, validation rules) |
-| `inistate://design-guide` | FACTS Module Design Guide |
+| `inistate://guardrails` | Server-enforced `submit_activity` rules (read once per session) |
+| `inistate://schema/runtime` | Runtime schema — entry/activity/file types and filter operators (default) |
+| `inistate://schema/configure` | Module-design schema — write format, field types, colors **(configure)** |
+| `inistate://design-guide` | FACTS Module Design Guide **(configure)** |
+| `inistate://frontend-guide` | REST API reference for hand-written UIs **(frontend)** |
 
 ## Prompts
 
 | Prompt | Description |
 |--------|-------------|
-| `design_factsops_workflow` | Guide an agent through designing a complete workflow module |
+| `design_factsops_workflow` | Guide an agent through designing a complete workflow module **(configure)** |
 | `execute_activity` | Guide an agent through executing a specific activity |
 | `diagnose_entry` | Guide an agent through investigating an entry's state and history |
+| `modify_module` | Guide an agent through modifying an existing module's schema **(configure)** |
+
+## Modes
+
+The server exposes a focused tool/resource surface depending on the active mode, keeping agent context lean. Use `switch_mode` to change it, or set the initial mode via the `INISTATE_MCP_MODE` env var (default: `configure`).
+
+| Mode | Surface |
+|------|---------|
+| `runtime` | Entry and activity operations only — querying, reading, submitting, files, history. The leanest surface for using existing modules. |
+| `configure` | Everything in `runtime` plus the module-design tools, resources, and prompts (marked **(configure)** above). |
+| `frontend` | Everything in `configure` plus the `inistate://frontend-guide` resource for building hand-written UIs against the REST API. |
+
+Tools and resources marked **(configure)** / **(frontend)** are absent from the tool list in narrower modes — switch modes to reveal them.
 
 ## Typical Workflow
 
@@ -231,8 +256,11 @@ Tests are in `src/` alongside the source files and use [Vitest](https://vitest.d
 
 | File | Type | What it covers |
 |------|------|----------------|
-| `src/schema.test.ts` | Unit tests (50) | `designWorkflow`, `validateDesign`, helper functions (`isValidFieldType`, `isValidColor`, `isValidActor`, `suggestColorForState`) |
-| `src/server.test.ts` | Integration tests (14) | Spins up the MCP server as a child process and exercises it through the official MCP SDK client — tool discovery, resource reads, prompt retrieval, and local tool calls |
+| `src/schema.test.ts` | Unit tests (41) | `designWorkflow`, `validateDesign`, helper functions (`isValidFieldType`, `isValidColor`, `isValidActor`, `suggestColorForState`) |
+| `src/activity-guard.test.ts` | Unit tests (35) | `submit_activity` guard rules — human/hybrid actor, state-change confirmation, confidence-inflation, reference-shape validation |
+| `src/tools.schema.test.ts` | Unit tests (19) | Tool input-schema shapes and validation |
+| `src/backend-capabilities.test.ts` | Unit tests (6) | Capability gating — Platform-only tools return a capability message on reduced backends |
+| `src/server.test.ts` | Integration tests (15) | Spins up the MCP server as a child process and exercises it through the official MCP SDK client — mode-gated tool/resource/prompt discovery, `switch_mode`, resource reads, prompt retrieval, and local tool calls |
 
 Unit tests cover:
 - Field type and color validation against the schema
@@ -242,10 +270,10 @@ Unit tests cover:
 - Intent resolution: all 5 modes, context boosting, confidence scoring
 
 Integration tests verify (no API token needed):
-- All 17 tools, 5 resources, and 3 prompts are registered
+- All 20 tools, 8 resources, and 4 prompts are registered (in configure mode)
 - `design_workflow`, `validate_design` work end-to-end through the MCP protocol
-- Static resources (`inistate://schema`, `inistate://design-guide`) return valid content
-- All 3 prompts return correctly templated messages
+- Static resources (`inistate://schema/runtime`, `inistate://design-guide`) return valid content
+- All 4 prompts return correctly templated messages
 
 ### Interactive testing with MCP Inspector
 

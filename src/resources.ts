@@ -106,7 +106,7 @@ Standard activities (\`create\`, \`edit\`, \`delete\`, \`comment\`, \`duplicate\
     "inistate://schema/runtime",
     {
       description:
-        "DEFAULT resource — load this at session start for runtime operations: listing/reading entries, submitting activities, uploading/downloading files, reading history. Contains only the tools and types needed to USE existing modules: list_entries, get_entry, get_form, submit_activity, get_history, request_upload_url + confirm_upload (ALWAYS the default upload flow), download_file, upload_file (fallback only — use only if the presigned flow fails), plus field value shapes (File/Image/Module/User) and filter operators. Does NOT include module design content — if the user asks to create or update a module, load inistate://schema/configure + inistate://design-guide instead. Loading this AND configure together doubles context cost — pick one.",
+        "DEFAULT resource — load at session start for runtime work (reading/writing entries, files, history). Reference for what tool schemas don't carry: response/type definitions (entry, form, history), field value shapes (File/Image/Module/User), filter operators, and key workflow rules. Tool inputs are documented on the tools themselves. Does NOT include module design content — for creating/updating modules load inistate://schema/configure + inistate://design-guide instead; loading both doubles context cost, pick one.",
       mimeType: "application/json",
     },
     async (uri) => {
@@ -122,7 +122,7 @@ Standard activities (\`create\`, \`edit\`, \`delete\`, \`comment\`, \`duplicate\
     "inistate://schema/configure",
     {
       description:
-        "Load ONLY when the user asks to create a new module, edit a module schema, or design a workflow. Contains ModuleSchema write format, FieldDefinition/StateDefinition/ActivityDefinition/FlowDefinition, state color palette with decision rules and keyword hints, module_types (workflow vs record list), and the configure-mode tools (get_module_schema, create_module, update_module). Pair with inistate://design-guide for a complete design context. Do NOT load for runtime data operations — use inistate://schema/runtime instead.",
+        "Load ONLY when the user asks to create a new module, edit a module schema, or design a workflow. Contains the ModuleSchema write format (Field/State/Activity/Flow definitions), state color palette with decision rules and keyword hints, and module_types (workflow vs record list). Pair with inistate://design-guide for a complete design context. Do NOT load for runtime data operations — use inistate://schema/runtime instead.",
       mimeType: "application/json",
     },
     async (uri) => {

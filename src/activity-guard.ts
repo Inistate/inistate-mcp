@@ -68,18 +68,57 @@ function cacheKey(prefix: string, parts: Array<string | number | undefined>): st
   return [prefix, user, wsid, ...parts.map((p) => String(p ?? "_"))].join("::");
 }
 
-async function getExtendedSchema(moduleName: string): Promise<ExtendedSchema | null> {
+/**
+ * Source of a module's extended schema. Defaults to the cloud API; the MCP tool
+ * handlers pass a backend-routed fetcher so the same guard runs against whatever
+ * backend is injected (cloud or local) instead of always hitting api.ts.
+ */
+export type SchemaFetcher = (moduleName: string) => Promise<ExtendedSchema | null>;
+
+const defaultSchemaFetcher: SchemaFetcher = async (moduleName) => {
+  try {
+    return (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
+  } catch {
+    return null;
+  }
+};
+
+async function getExtendedSchema(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<ExtendedSchema | null> {
   const key = cacheKey("schema", [moduleName]);
   const now = Date.now();
   const cached = schemaCache.get(key);
   if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.schema;
-  try {
-    const schema = (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
-    schemaCache.set(key, { schema, at: now });
-    return schema;
-  } catch {
-    return null;
-  }
+  const schema = await fetchSchema(moduleName);
+  if (schema) schemaCache.set(key, { schema, at: now });
+  return schema;
+}
+
+/**
+ * Warm the schema cache in the background (fire-and-forget). Called from
+ * get_form so the guard/shape lookups on the submit_activity that typically
+ * follows hit cache instead of paying an extra round trip ahead of the write.
+ */
+export function primeSchemaCache(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): void {
+  void getExtendedSchema(moduleName, fetchSchema).catch(() => {});
+}
+
+/**
+ * Seed the schema cache with an extended schema the caller already fetched
+ * (e.g. the get_module_schema tool's own tier=extended response), so the
+ * guard does not re-fetch what just passed through this process.
+ */
+export function seedSchemaCache(moduleName: string, schema: unknown): void {
+  if (!schema || typeof schema !== "object") return;
+  schemaCache.set(cacheKey("schema", [moduleName]), {
+    schema: schema as ExtendedSchema,
+    at: Date.now(),
+  });
 }
 
 interface CanvasCacheEntry {
@@ -88,35 +127,50 @@ interface CanvasCacheEntry {
 }
 const canvasCache = new Map<string, CanvasCacheEntry>();
 
-async function getCanvasSchema(moduleName: string): Promise<CanvasSchema | null> {
+/**
+ * Source of a module's canvas (actor data). Like SchemaFetcher, the tool
+ * handlers pass a backend-routed fetcher so the actor fallback works against
+ * whatever backend is injected; the default hits the cloud API.
+ */
+export type CanvasFetcher = (moduleName: string) => Promise<CanvasSchema | null>;
+
+const defaultCanvasFetcher: CanvasFetcher = async (moduleName) => {
+  try {
+    return (await api.get(`/api/configure/${api.enc(moduleName)}`)) as CanvasSchema;
+  } catch {
+    return null;
+  }
+};
+
+async function getCanvasSchema(
+  moduleName: string,
+  fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
+): Promise<CanvasSchema | null> {
   const key = cacheKey("canvas", [moduleName]);
   const now = Date.now();
   const cached = canvasCache.get(key);
   if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.canvas;
-  try {
-    const canvas = (await api.get(`/api/configure/${api.enc(moduleName)}`)) as CanvasSchema;
-    canvasCache.set(key, { canvas, at: now });
-    return canvas;
-  } catch {
-    // Cache the miss too — a caller without configure access would otherwise
-    // pay a failing round trip on every submit.
-    canvasCache.set(key, { canvas: null, at: now });
-    return null;
-  }
+  // Cache the miss too — a caller without configure access would otherwise
+  // pay a failing round trip on every submit.
+  const canvas = await fetchCanvas(moduleName);
+  canvasCache.set(key, { canvas, at: now });
+  return canvas;
 }
 
 async function getActivityDef(
   moduleName: string,
   activity: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+  fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
 ): Promise<ActivityDef | null> {
-  const schema = await getExtendedSchema(moduleName);
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
   for (const a of schema?.activities ?? []) {
     if (a && typeof a === "object" && a.name === activity) {
       if (a.actor) return a;
       break; // listed without actor info — consult the canvas
     }
   }
-  const canvas = await getCanvasSchema(moduleName);
+  const canvas = await getCanvasSchema(moduleName, fetchCanvas);
   return canvas?.activities?.find(
     (a) => a && typeof a === "object" && a.name === activity,
   ) ?? null;
@@ -179,7 +233,11 @@ export type GuardOutcome =
   | { ok: true }
   | { ok: false; structured: Record<string, unknown> };
 
-export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome> {
+export async function evaluateActivity(
+  input: GuardInput,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+  fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
+): Promise<GuardOutcome> {
   const { module: moduleName, activity, entryId, entryIds, state, confidence, confirmed } = input;
 
   // Rule 1 — confidence inflation after a prior flag.
@@ -207,7 +265,7 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
   // Rule 2 pre-flight — a target state must exist before any confirmation
   // dance. The platform returns an opaque error for unknown states.
   if (state) {
-    const states = await getModuleStates(moduleName);
+    const states = await getModuleStates(moduleName, fetchSchema);
     if (states && !states.includes(state)) {
       return {
         ok: false,
@@ -258,7 +316,7 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
   // Rules 3 & 4 apply to custom (workflow-defined) activities only.
   if (STANDARD_ACTIVITIES.has(activity)) return { ok: true };
 
-  const def = await getActivityDef(moduleName, activity);
+  const def = await getActivityDef(moduleName, activity, fetchSchema, fetchCanvas);
   if (!def) return { ok: true }; // unknown activity — let the API decide.
 
   const actor = (def.actor || "").toLowerCase();
@@ -382,8 +440,11 @@ function checkRefValue(
  * State names for a module, from the cached extended schema. Tolerates both
  * string[] and [{name}] shapes; null when unavailable (let the API decide).
  */
-export async function getModuleStates(moduleName: string): Promise<string[] | null> {
-  const schema = await getExtendedSchema(moduleName);
+export async function getModuleStates(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<string[] | null> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
   const raw = schema?.states;
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const names = raw
@@ -402,8 +463,9 @@ export async function getModuleStates(moduleName: string): Promise<string[] | nu
  */
 export async function getModuleFieldTypes(
   moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
 ): Promise<Map<string, string> | null> {
-  const schema = await getExtendedSchema(moduleName);
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
   const info = schema?.information;
   if (!info || info.length === 0) return null;
   const types = new Map<string, string>();
@@ -443,9 +505,10 @@ export function validateInputShapesWith(
 export async function validateInputShapes(
   moduleName: string,
   input: Record<string, unknown> | undefined | null,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
 ): Promise<RefShapeError[]> {
   if (!input) return [];
-  const types = await getModuleFieldTypes(moduleName);
+  const types = await getModuleFieldTypes(moduleName, fetchSchema);
   return validateInputShapesWith(types, input);
 }
 
