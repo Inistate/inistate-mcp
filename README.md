@@ -12,6 +12,7 @@ MCP server for the [Inistate](https://inistate.com) platform — module discover
 | `INISTATE_API_BASE` | No | `https://api.inistate.com` | API base URL |
 | `INISTATE_MCP_MODE` | No | `configure` | Initial mode: `runtime`, `configure`, or `frontend` (see [Modes](#modes)) |
 | `INISTATE_MCP_NO_SETUP` | No | — | Set to `1` to force server mode from a terminal (skip the interactive wizard) |
+| `INISTATE_DEBUG_FILE` | No | — | Set to `1` to log write-path tool calls to `./debug.log`, or to a path to log there. Off by default; logs identifiers only, never field values |
 
 ### Install from npm (recommended)
 

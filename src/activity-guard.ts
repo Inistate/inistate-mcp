@@ -86,6 +86,31 @@ async function getExtendedSchema(
   return schema;
 }
 
+/**
+ * Warm the schema cache in the background (fire-and-forget). Called from
+ * get_form so the guard/shape lookups on the submit_activity that typically
+ * follows hit cache instead of paying an extra round trip ahead of the write.
+ */
+export function primeSchemaCache(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): void {
+  void getExtendedSchema(moduleName, fetchSchema).catch(() => {});
+}
+
+/**
+ * Seed the schema cache with an extended schema the caller already fetched
+ * (e.g. the get_module_schema tool's own tier=extended response), so the
+ * guard does not re-fetch what just passed through this process.
+ */
+export function seedSchemaCache(moduleName: string, schema: unknown): void {
+  if (!schema || typeof schema !== "object") return;
+  schemaCache.set(cacheKey("schema", [moduleName]), {
+    schema: schema as ExtendedSchema,
+    at: Date.now(),
+  });
+}
+
 async function getActivityDef(
   moduleName: string,
   activity: string,

@@ -1,5 +1,5 @@
 import { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { appendFileSync } from "node:fs";
+import { appendFile } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { Backend } from "./backend.js";
@@ -9,7 +9,9 @@ import {
   evaluateActivity,
   getModuleFieldTypes,
   getPriorFlag,
+  primeSchemaCache,
   recordFlagged,
+  seedSchemaCache,
   validateInputShapes,
   validateInputShapesWith,
   type SchemaFetcher,
@@ -20,13 +22,21 @@ import {
 } from "./schema.js";
 
 // ---------- Logging ----------
+//
+// Opt-in file log of write-path tool calls. Set INISTATE_DEBUG_FILE=1 to log
+// to ./debug.log, or to a path to log there. Off by default: the writes are
+// fire-and-forget (never block the event loop) and log identifiers/outcomes
+// only — never field values.
 
-const LOG_PATH = resolve(process.cwd(), "debug.log");
+const DEBUG_FILE = process.env.INISTATE_DEBUG_FILE;
+const LOG_PATH = DEBUG_FILE && DEBUG_FILE !== "1"
+  ? resolve(DEBUG_FILE)
+  : resolve(process.cwd(), "debug.log");
 
 function log(tool: string, detail: string) {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] ${tool}: ${detail}\n`;
-  try { appendFileSync(LOG_PATH, line); } catch { /* ignore */ }
+  if (!DEBUG_FILE) return;
+  const line = `[${new Date().toISOString()}] ${tool}: ${detail}\n`;
+  appendFile(LOG_PATH, line, () => { /* ignore */ });
 }
 
 // ---------- Response helpers ----------
@@ -59,10 +69,23 @@ function err(e: unknown) {
 
 // ---------- Workspace helper ----------
 
+// Serialized into every tool that takes workspaceId — keep it one short line.
 const wsParam = z
   .string()
   .optional()
-  .describe("Workspace ID. Required in stateless/remote mode. If set via env INISTATE_WORKSPACE_ID or prior set_workspace call, can be omitted.");
+  .describe("Workspace ID. Omit if set via env or set_workspace; required in stateless/remote mode.");
+
+/**
+ * Tool description for capability-gated tools. When the backend reports the
+ * capability unavailable at registration time, the tool stays listed (per the
+ * capability-message contract — never silently absent) but with a one-line
+ * stub instead of the full operating manual, cutting its standing token cost
+ * to a fraction. The handler still returns the structured capability message.
+ */
+const gatedDesc = (available: boolean, full: string, hint = ""): string =>
+  available
+    ? full
+    : `Not available on this backend — calls return a structured capability_unavailable message.${hint ? ` ${hint}` : ""}`;
 
 // ---------- Shared module-schema shapes (used by create_module + update_module) ----------
 // `id` is optional on both: ignored on create, used to match items on update (enables renaming).
@@ -162,13 +185,15 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   // are exposed.
   const gov = caps.governance;
 
+  const aiSourcesShape = z
+    .array(z.object({ type: z.string().optional(), reference: z.string().optional(), excerpt: z.string().optional() }))
+    .optional();
+
   const submitAiShape = z.object({
     reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
     model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
     confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
-    sources: z
-      .array(z.object({ type: z.string().optional(), reference: z.string().optional(), excerpt: z.string().optional() }))
-      .optional(),
+    sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
   });
@@ -176,18 +201,18 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     ? submitAiShape.describe("REQUIRED — AI agent traceability")
     : submitAiShape.optional().describe("Optional on the local runtime — no confidence/actor gating is applied.");
 
+  // Field semantics are documented once, on submit_activity's ai param — the
+  // bulk variants only restate the shape.
   const bulkAiShape = z.object({
-    reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
+    reasoning: z.string(),
     model: z.string(),
     confidence: z.number().min(0).max(1),
-    sources: z
-      .array(z.object({ type: z.string().optional(), reference: z.string().optional(), excerpt: z.string().optional() }))
-      .optional(),
+    sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
   });
   const bulkAiParam = gov
-    ? bulkAiShape.describe("Default AI traceability applied to every item that does not specify its own.")
+    ? bulkAiShape.describe("Default AI traceability applied to every item that does not specify its own. Same field semantics as submit_activity.ai.")
     : bulkAiShape.optional().describe("Default AI traceability for items without their own. Optional on the local runtime.");
 
   // Reliability controls — local-runtime only (the Platform governs via history).
@@ -210,8 +235,8 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     : "Perform an activity on a module entry: create (no entryId), edit, delete, or a custom activity that drives a state transition. ALWAYS call get_form first. A custom activity is accepted only if a flow permits it from the entry's current state — otherwise it is rejected (Illegal transition) and nothing is written. The local runtime applies no confidence/actor gating: `ai` is optional and there is no flagged outcome. Use idempotencyKey for safe retries and expectedVersion for optimistic concurrency.";
 
   const submitActivitiesDescription = gov
-    ? "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once — saves substantial agent tokens by collapsing N tool turns into one.\n\nShape: top-level `module`, `activity`, and a default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`). When an item supplies its own `ai`, it wholly replaces the top-level `ai` for that item — no partial merge.\n\nExecution: items run sequentially fail-soft on the server. One item's failure does not abort the rest; per-item outcomes (success/failure, entryId, flagged, validation details) are returned in `results`. Use `clientRef` to correlate items to your local plan.\n\nLimits: max 100 items per request. Beyond that, chunk and retry.\n\nGuardrails: same `submit_activity` rules apply at the batch level — actor='human' rejects the whole batch; actor='hybrid' or activity='changeStatus' or top-level `state` requires `confirmed: true`. Per-item state overrides also require `confirmed: true`."
-    : "Bulk variant of submit_activity: same module + same activity applied to multiple entries, each with its own input payload. Use this instead of N sequential submit_activity calls when creating/editing many rows at once.\n\nShape: top-level `module`, `activity`, and an optional default `ai` block; per-item `input` (and optional `entryId`, `state`, `comment`, `assignees`, `due`, `ai`, `clientRef`).\n\nExecution: items run sequentially fail-soft. One item's failure does not abort the rest; per-item outcomes are returned in `results`. Use `clientRef` to correlate items to your local plan. Max 100 items per request. The local runtime applies no confidence/actor gating.";
+    ? "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows — one tool turn instead of N. A per-item `ai` wholly replaces the top-level default (no partial merge). Items run sequentially fail-soft on the server: one failure does not abort the rest; per-item outcomes (success, entryId, flagged, validation details) return in `results` — use `clientRef` to correlate. Max 100 items; chunk beyond that. Guardrails match submit_activity at batch level: actor='human' rejects the whole batch; actor='hybrid', activity='changeStatus', or any state override (top-level or per-item) requires `confirmed: true`."
+    : "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows. A per-item `ai` wholly replaces the top-level default. Items run sequentially fail-soft: one failure does not abort the rest; per-item outcomes return in `results` — use `clientRef` to correlate. Max 100 items per request. The local runtime applies no confidence/actor gating.";
   // ═══════════════════════════════════════════
   // 1. list_workspaces
   // ═══════════════════════════════════════════
@@ -219,8 +244,10 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     "list_workspaces",
     {
       title: "List Workspaces",
-      description:
+      description: gatedDesc(
+        caps.workspaces,
         "List workspaces the current user has access to. Call set_workspace to select one before any module or entry tools. This is typically the first tool to call in any session.",
+      ),
       inputSchema: {
         search: z
           .string()
@@ -247,13 +274,16 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     "set_workspace",
     {
       title: "Set Active Workspace",
-      description: `Set the active workspace for the current session. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
+      description: gatedDesc(
+        caps.workspaces,
+        `Set the active workspace for the current session. In stateless/remote mode, prefer passing workspaceId directly to each tool instead.
 
 Workflow sequences after workspace is set:
 - Design: design_workflow → validate_design → create_module
 - Execute: list_modules → list_entries → get_form → submit_activity
 - Modify: list_modules → get_module_canvas → validate_design → update_module
 - Query: list_modules → list_entries → get_entry / get_entry_history`,
+      ),
       inputSchema: {
         workspaceId: z
           .string()
@@ -323,6 +353,8 @@ Workflow sequences after workspace is set:
       try {
         applyWorkspace(workspaceId);
         const data = await backend.getModuleSchema(moduleName, tier);
+        // The guard needs exactly this document — don't make it re-fetch.
+        if (tier === "extended") seedSchemaCache(moduleName, data);
         return ok(data);
       } catch (e) {
         return err(e);
@@ -464,6 +496,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, activity, entryId, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
+        // Warm the guard's schema cache while the agent reads the form, so the
+        // submit_activity that typically follows skips its pre-write schema fetch.
+        primeSchemaCache(moduleName, fetchSchema);
         const data = await backend.getForm({ module: moduleName, activity, entryId });
         return ok(data);
       } catch (e) {
@@ -621,7 +656,8 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if (idempotencyKey) body.idempotencyKey = idempotencyKey;
         if (expectedVersion !== undefined) body.expectedVersion = expectedVersion;
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
-        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} payload=${JSON.stringify(body)}`);
+        // Log identifiers only — field values stay out of the log file.
+        log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} inputKeys=${input ? Object.keys(input).join("|") : "-"}${state ? ` state=${state}` : ""}`);
         const data = await backend.submitActivity(body);
         const flagged =
           data && typeof data === "object" && (data as Record<string, unknown>).flagged === true;
@@ -670,23 +706,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
               comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
               assignees: z.array(z.string()).optional(),
               due: z.string().optional().describe("ISO 8601"),
-              ai: z
-                .object({
-                  reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
-                  model: z.string(),
-                  confidence: z.number().min(0).max(1),
-                  sources: z
-                    .array(
-                      z.object({
-                        type: z.string().optional(),
-                        reference: z.string().optional(),
-                        excerpt: z.string().optional(),
-                      }),
-                    )
-                    .optional(),
-                  model_version: z.string().optional(),
-                  prompt_hash: z.string().optional(),
-                })
+              ai: bulkAiShape
                 .optional()
                 .describe("Optional per-item ai override. Wholly replaces top-level ai for this item."),
               clientRef: z
@@ -892,8 +912,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "get_entry_history",
     {
       title: "Get Entry History",
-      description:
+      description: gatedDesc(
+        caps.governedHistory,
         "Get the audit trail and comments for an entry. Returns chronological list of actions (create, edit, state changes, comments) with field-level change details and AI traceability context.",
+      ),
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         entryId: z
@@ -928,8 +950,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "upload_file",
     {
       title: "Upload File (Fallback)",
-      description:
-        "FALLBACK ONLY — do NOT use this by default. Always use request_upload_url + confirm_upload first; call this tool only after the presigned flow has actually failed (e.g. request_upload_url errored, or the PUT/confirm step failed for non-retryable reasons). Uploads a file to S3 via base64/multipart. Returns { path, filename, mimeType, size }. Use the returned path as the 'path' value in File/Image fields for submit_activity (e.g. { name: 'photo.jpg', path: result.path }). Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi.",
+      description: gatedDesc(
+        caps.files,
+        "FALLBACK ONLY — use request_upload_url + confirm_upload first; call this only after that presigned flow has actually failed. Uploads via base64. Returns { path, filename, mimeType, size } — use path as the File/Image field value in submit_activity. Max 50MB. Blocked: .exe, .bat, .cmd, .dll, .msi.",
+      ),
       inputSchema: {
         module: z
           .string()
@@ -971,8 +995,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "download_file",
     {
       title: "Download File",
-      description:
+      description: gatedDesc(
+        caps.files,
         "Download a file by module name. Construct the URL from a File/Image field value: field.path = '/s/{guid}/{fileName}'. Returns a pre-signed S3 URL (1hr TTL).",
+      ),
       inputSchema: {
         moduleName: z.string().describe("Module name (resolved to vectorId internally)"),
         guid: z.string().describe("Short ID from the file URL"),
@@ -1003,7 +1029,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "request_upload_url",
     {
       title: "Request Upload URL",
-      description: `DEFAULT upload path — ALWAYS use this for every file upload (any size, up to 500MB). Only fall back to upload_file if this flow actually fails. Three-step flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403 SignatureDoesNotMatch), 3) call confirm_upload({ s3Key }). The path returned by confirm_upload is used directly as the File/Image field value in submit_activity. uploadUrl expires in ~1 hour and cannot be renewed — call this again on expiry.`,
+      description: gatedDesc(
+        caps.files,
+        "DEFAULT upload path for every file (up to 500MB); upload_file is only the fallback if this flow fails. Flow: 1) call this tool, 2) PUT the raw bytes to uploadUrl with Content-Type exactly matching contentType (S3 rejects mismatches with 403), 3) call confirm_upload({ s3Key }) — its returned path is the File/Image field value for submit_activity. uploadUrl expires in ~1 hour; call again on expiry.",
+      ),
       inputSchema: {
         module: z
           .string()
@@ -1049,7 +1078,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
     "confirm_upload",
     {
       title: "Confirm Upload",
-      description: `Confirm a presigned upload completed. Call after successfully PUTting the file to the uploadUrl from request_upload_url. The server verifies the object exists in S3, reads its metadata, and tracks workspace storage. Only s3Key is required — filename, size, and MIME type are resolved from S3. Returns { url, filename, mimeType, size } where url is the /s/ path usable as a File/Image field value. Returns 400 if the file is not found in S3 — ensure the PUT completed before calling.`,
+      description: gatedDesc(
+        caps.files,
+        "Confirm a presigned upload after the PUT to uploadUrl succeeded. The server verifies the object in S3 and returns { url, filename, mimeType, size } — url is the /s/ path usable as a File/Image field value. Returns 400 if the file is not in S3 (ensure the PUT completed first).",
+      ),
       inputSchema: {
         s3Key: z
           .string()
@@ -1246,13 +1278,11 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   // that declares `scaffold` (the local runtime) serves it; the hosted Platform
   // returns a capability message. The introspection itself lives behind the
   // Backend so the closed-source engine owns it.
-  configureTools.push(server.registerTool(
-    "scaffold_module",
-    {
-      title: "Scaffold Module from Existing Data",
-      description:
-        "Design a module schema together with the user from data they ALREADY have — a Notion database, an Airtable table, or a local SQLite table. This is the inverse on-ramp: instead of designing from scratch, read the existing shape and refine it with the user. One container (a SQLite database, an Airtable base, a Notion workspace) can yield several modules — discover the tables, then model the chosen ones.\n\nFlow (use it conversationally):\n1. DISCOVER — call with just `source` pointed at the container: a SQLite database path, an `airtable://<baseId>` (no table), or a bare `notion://`. Returns { discovery: true, tables: [{ name, id?, columns, rows?, hasState, scaffold_source }] }. Show these to the user and ask which one(s) to model; each becomes its own module.\n2. DRAFT — call again with a chosen table's `scaffold_source` as `source` (or a SQLite `table`). Returns { schema, validation, suggestions } — columns become typed fields, a detected status/state/stage/phase column becomes states.\n3. REFINE together — confirm the inferred field types with the user, then define activities + flows (the governed transitions; design_workflow can scaffold a pattern).\n4. CREATE — validate_design → create_module, then point the runtime at the same data.\n\nTargets: notion://<databaseId> or bare notion:// (needs INISTATE_NOTION_TOKEN), airtable://<baseId>/<tableIdOrName> or airtable://<baseId> (needs INISTATE_AIRTABLE_TOKEN; listing a base's tables needs schema.bases:read), or a local SQLite path. Credentials are read from the environment — never pass tokens as arguments.",
-      inputSchema: {
+  // Param descriptions follow the same gating as the tool description: a
+  // backend that cannot serve the tool registers the same shape (so the
+  // structural contract is stable) without the operating manual attached.
+  const scaffoldInput = caps.scaffold
+    ? {
         source: z
           .string()
           .describe(
@@ -1267,7 +1297,24 @@ Load resources inistate://schema and inistate://design-guide before designing fo
           .string()
           .optional()
           .describe("Promote a specific column to the workflow's state column (overrides auto-detection of a status/state/stage/phase column)."),
-      },
+      }
+    : {
+        source: z.string(),
+        table: z.string().optional(),
+        name: z.string().optional(),
+        state: z.string().optional(),
+      };
+
+  configureTools.push(server.registerTool(
+    "scaffold_module",
+    {
+      title: "Scaffold Module from Existing Data",
+      description: gatedDesc(
+        caps.scaffold,
+        "Design a module schema together with the user from data they ALREADY have — a Notion database, an Airtable table, or a local SQLite table. This is the inverse on-ramp: instead of designing from scratch, read the existing shape and refine it with the user. One container (a SQLite database, an Airtable base, a Notion workspace) can yield several modules — discover the tables, then model the chosen ones.\n\nFlow (use it conversationally):\n1. DISCOVER — call with just `source` pointed at the container: a SQLite database path, an `airtable://<baseId>` (no table), or a bare `notion://`. Returns { discovery: true, tables: [{ name, id?, columns, rows?, hasState, scaffold_source }] }. Show these to the user and ask which one(s) to model; each becomes its own module.\n2. DRAFT — call again with a chosen table's `scaffold_source` as `source` (or a SQLite `table`). Returns { schema, validation, suggestions } — columns become typed fields, a detected status/state/stage/phase column becomes states.\n3. REFINE together — confirm the inferred field types with the user, then define activities + flows (the governed transitions; design_workflow can scaffold a pattern).\n4. CREATE — validate_design → create_module, then point the runtime at the same data.\n\nTargets: notion://<databaseId> or bare notion:// (needs INISTATE_NOTION_TOKEN), airtable://<baseId>/<tableIdOrName> or airtable://<baseId> (needs INISTATE_AIRTABLE_TOKEN; listing a base's tables needs schema.bases:read), or a local SQLite path. Credentials are read from the environment — never pass tokens as arguments.",
+        "Local-runtime only; use design_workflow to draft a module here.",
+      ),
+      inputSchema: scaffoldInput,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
     },
     async ({ source, table, name, state }) => {
