@@ -80,14 +80,14 @@ Then point your MCP client at `node /absolute/path/to/inistate-mcp/build/index.j
 
 ## Tools
 
-Tools marked **(configure)** are only exposed in configure mode — see [Modes](#modes).
+Tools marked **(configure)** are only exposed in configure mode — see [Modes](#modes). Tools the active backend cannot serve (e.g. `scaffold_module` on the hosted Platform) stay registered but return a structured capability message instead of failing silently.
 
 | Tool | Description |
 |------|-------------|
 | `list_workspaces` | List workspaces the user has access to |
 | `set_workspace` | Set the active workspace |
 | `list_modules` | List all discoverable modules in the workspace |
-| `get_module_schema` | Get the canvas schema (basic or extended tier) **(configure)** |
+| `get_module_schema` | Get the canvas schema (basic or extended tier) — available in every mode |
 | `get_module_canvas` | Get full module definition with stable IDs (round-trippable) **(configure)** |
 | `list_entries` | Query entries with filters, sorting, and pagination |
 | `get_entry` | Read a single entry by ID |
@@ -103,6 +103,7 @@ Tools marked **(configure)** are only exposed in configure mode — see [Modes](
 | `validate_design` | Validate a module schema before creating or updating **(configure)** |
 | `create_module` | Create a new module with schema **(configure)** |
 | `update_module` | Update an existing module's schema **(configure)** |
+| `scaffold_module` | Draft a module schema from existing data (SQLite, Notion, or Airtable table) **(configure)** — served by the local runtime (inistate-core); on the hosted Platform backend it returns a capability message pointing to `design_workflow` |
 | `switch_mode` | Switch the active mode (runtime / configure / frontend) |
 
 ## Resources
@@ -233,7 +234,7 @@ npm run pm2:logs
 npm run pm2:stop
 ```
 
-Set required environment variables (`INISTATE_API_TOKEN`, and optionally `INISTATE_API_URL`, `INISTATE_WORKSPACE_ID`, `OAUTH_ISSUER_URL`, `INISTATE_APP_URL`) in your shell, PM2 ecosystem `env`, or deployment secret manager before starting.
+Set required environment variables (`INISTATE_API_TOKEN`, and optionally `INISTATE_API_BASE`, `INISTATE_WORKSPACE_ID`, `OAUTH_ISSUER_URL`, `INISTATE_APP_URL`) in your shell, PM2 ecosystem `env`, or deployment secret manager before starting.
 
 ## Testing
 
@@ -255,21 +256,22 @@ Tests are in `src/` alongside the source files and use [Vitest](https://vitest.d
 
 | File | Type | What it covers |
 |------|------|----------------|
-| `src/schema.test.ts` | Unit tests (41) | `designWorkflow`, `validateDesign`, helper functions (`isValidFieldType`, `isValidColor`, `isValidActor`, `suggestColorForState`) |
-| `src/activity-guard.test.ts` | Unit tests (35) | `submit_activity` guard rules — human/hybrid actor, state-change confirmation, confidence-inflation, reference-shape validation |
+| `src/schema.test.ts` | Unit tests (76) | `designWorkflow`, `validateDesign` (including platform parity and input normalization), helper functions (`isValidFieldType`, `isValidColor`, `isValidActor`, `suggestColorForState`) |
+| `src/activity-guard.test.ts` | Unit tests (42) | `submit_activity` guard rules — human/hybrid actor, state-change confirmation, confidence-inflation, reference-shape validation |
 | `src/tools.schema.test.ts` | Unit tests (19) | Tool input-schema shapes and validation |
-| `src/backend-capabilities.test.ts` | Unit tests (6) | Capability gating — Platform-only tools return a capability message on reduced backends |
-| `src/server.test.ts` | Integration tests (15) | Spins up the MCP server as a child process and exercises it through the official MCP SDK client — mode-gated tool/resource/prompt discovery, `switch_mode`, resource reads, prompt retrieval, and local tool calls |
+| `src/backend-capabilities.test.ts` | Unit tests (9) | Capability gating — tools the active backend cannot serve return a capability message |
+| `src/flagged-annotation.test.ts` | Integration tests (5) | Flagged-response annotation — suppressed transitions are explained (`flag_reason` + `agent_action`) so agents stop retrying with higher confidence |
+| `src/server.test.ts` | Integration tests (17) | Spins up the MCP server as a child process and exercises it through the official MCP SDK client — mode-gated tool/resource/prompt discovery, `switch_mode`, resource reads, prompt retrieval, and local tool calls |
 
 Unit tests cover:
 - Field type and color validation against the schema
 - State color suggestion logic
 - Design validation: duplicate names, invalid types/colors/actors, initial state rules, flow integrity, unreachable states, unused activities, AI confidence warnings
+- Input normalization: field-type, state-color, and industry aliases; parsing states from a description
 - Workflow design: pattern detection (approval, ticket, pipeline, record list), industry defaults
-- Intent resolution: all 5 modes, context boosting, confidence scoring
 
 Integration tests verify (no API token needed):
-- All 20 tools, 8 resources, and 4 prompts are registered (in configure mode)
+- Mode-gated tool/resource/prompt discovery — runtime mode hides the configure surface, `switch_mode` reveals and collapses it
 - `design_workflow`, `validate_design` work end-to-end through the MCP protocol
 - Static resources (`inistate://schema/runtime`, `inistate://design-guide`) return valid content
 - All 4 prompts return correctly templated messages
