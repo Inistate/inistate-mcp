@@ -23,6 +23,7 @@ import {
   designWorkflow,
   normalizeFieldType,
   normalizeStateColor,
+  resolveDesignRefs,
   validateDesign,
 } from "./schema.js";
 
@@ -72,11 +73,18 @@ function err(e: unknown) {
   };
 }
 
+// System columns present on every entry — valid sort keys even though they
+// never appear in a module's `information` list.
+const SYSTEM_ENTRY_FIELDS = new Set([
+  "entryid", "documentid", "date", "state",
+  "createdby", "createddate", "updatedby", "updateddate",
+]);
+
 // ---------- Workspace helper ----------
 
 // Serialized into every tool that takes workspaceId — keep it one short line.
 const wsParam = z
-  .string()
+  .union([z.string(), z.number()])
   .optional()
   .describe("Workspace ID. Omit if set via env or set_workspace; required in stateless/remote mode.");
 
@@ -136,7 +144,7 @@ const activityShape = z.object({
   fields: z.array(z.union([z.string(), activityFieldRefShape])).optional(),
   ai_hint: z.string().optional(),
   ai_instruction: z.string().optional(),
-  confidence_threshold: z.number().min(0).max(1).optional(),
+  confidence_threshold: z.number().min(0).max(100).optional().describe("0-1; values above 1 are read as percent"),
 });
 
 const flowShape = z.object({
@@ -181,6 +189,16 @@ function normalizeModuleSections(body: Record<string, unknown>): void {
       color: normalizeStateColor(s.color as string | undefined, (s.name as string) || "").color,
     }));
   }
+  if (Array.isArray(body.activities)) {
+    body.activities = (body.activities as Array<Record<string, unknown>>).map((a) =>
+      typeof a.confidence_threshold === "number" && a.confidence_threshold > 1
+        ? { ...a, confidence_threshold: a.confidence_threshold / 100 }
+        : a,
+    );
+  }
+  // Flows/field refs that point at locally declared ids (s1, a1, f1) are
+  // rewritten to names — the platform only accepts names.
+  resolveDesignRefs(body);
 }
 
 // ---------- Tool registration ----------
@@ -219,8 +237,8 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   };
 
   /** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
-  const applyWorkspace = (workspaceId?: string): void => {
-    if (workspaceId) backend.setActiveWorkspace(workspaceId);
+  const applyWorkspace = (workspaceId?: string | number): void => {
+    if (workspaceId) backend.setActiveWorkspace(String(workspaceId));
   };
 
   // ── Governance-conditional schema pieces ──
@@ -238,7 +256,7 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   const submitAiShape = z.object({
     reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
     model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
-    confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
+    confidence: z.number().min(0).max(100).describe("0-1; values above 1 are read as percent (100 → 1). Gated against the activity's confidence_threshold"),
     sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
@@ -252,11 +270,17 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   const bulkAiShape = z.object({
     reasoning: z.string(),
     model: z.string(),
-    confidence: z.number().min(0).max(1),
+    confidence: z.number().min(0).max(100),
     sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
   });
+
+  /** Agents send confidence as 0-1 or as percent (e.g. 100) — normalize to 0-1 in place. */
+  const normalizeAiConfidence = <T extends { confidence: number } | undefined>(ai: T): T => {
+    if (ai && ai.confidence > 1) ai.confidence = ai.confidence / 100;
+    return ai;
+  };
   const bulkAiParam = gov
     ? bulkAiShape.describe("Default AI traceability applied to every item that does not specify its own. Same field semantics as submit_activity.ai.")
     : bulkAiShape.optional().describe("Default AI traceability for items without their own. Optional on the local runtime.");
@@ -372,17 +396,44 @@ Workflow sequences after workspace is set:
       ),
       inputSchema: {
         workspaceId: z
-          .string()
-          .describe("Workspace ID from list_workspaces"),
+          .union([z.string(), z.number()])
+          .describe("Workspace ID (or exact name) from list_workspaces"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       if (!caps.workspaces) return ok(capabilityMessage("workspaces", backend.kind));
       try {
-        backend.setActiveWorkspace(workspaceId);
-        const data = await backend.getWorkspace(workspaceId);
-        return ok(slimWorkspace(workspaceId, data));
+        // Verify the workspace exists before mutating session state, so a bad
+        // id never leaves the session pointing at a nonexistent workspace.
+        const requested = String(workspaceId).trim();
+        let resolved = requested;
+        let data: unknown;
+        try {
+          data = await backend.getWorkspace(resolved);
+        } catch {
+          // Id lookup failed — the agent may have sent a name. Resolve it.
+          const list = await backend.listWorkspaces().catch(() => null);
+          const all = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : [];
+          const lower = requested.toLowerCase();
+          const match =
+            all.find((w) => String(w?.id) === requested) ??
+            all.find((w) => typeof w?.name === "string" && (w.name as string).toLowerCase() === lower);
+          if (!match) {
+            return err({
+              structured: {
+                error: "workspace_not_found",
+                message: `No workspace with id or name '${requested}'. The active workspace is unchanged.`,
+                available: all.map((w) => ({ id: w?.id, name: w?.name })),
+                agent_action: "Call set_workspace again with an id from `available`.",
+              },
+            });
+          }
+          resolved = String(match.id);
+          data = await backend.getWorkspace(resolved);
+        }
+        backend.setActiveWorkspace(resolved);
+        return ok(slimWorkspace(resolved, data));
       } catch (e) {
         return err(e);
       }
@@ -519,6 +570,31 @@ Load resource inistate://schema before modifying to know valid field types, colo
           pageSize,
           fields,
         });
+        // A typo'd state or sortBy matches nothing and returns an empty page,
+        // which agents read as "no data". Only on empty results, verify the
+        // names against the module schema and say so.
+        if (
+          data && typeof data === "object" &&
+          (data as Record<string, unknown>).totalItems === 0 &&
+          (state || sortBy)
+        ) {
+          const issues: string[] = [];
+          if (state) {
+            const states = await getModuleStates(moduleName, fetchSchema);
+            if (states && !states.includes(state)) {
+              issues.push(`state '${state}' does not exist — states: ${states.join(", ")}`);
+            }
+          }
+          if (sortBy && !SYSTEM_ENTRY_FIELDS.has(sortBy.toLowerCase())) {
+            const types = await getModuleFieldTypes(moduleName, fetchSchema);
+            if (types && !types.has(sortBy)) {
+              issues.push(`sortBy '${sortBy}' is not a field — fields: ${[...types.keys()].join(", ")}`);
+            }
+          }
+          if (issues.length > 0) {
+            (data as Record<string, unknown>).hint = `0 results; check: ${issues.join("; ")}`;
+          }
+        }
         return ok(data);
       } catch (e) {
         return err(e);
@@ -647,6 +723,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       const expectedVersion = (extra as Record<string, unknown>).expectedVersion as number | undefined;
       try {
         applyWorkspace(workspaceId);
+        normalizeAiConfidence(ai);
         // Actor/confidence/flag governance runs only on backends that declare it
         // (the hosted Platform). A local runtime does no such gating — it either
         // commits a legal transition or rejects it.
@@ -823,6 +900,8 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
+        normalizeAiConfidence(ai);
+        for (const item of items) normalizeAiConfidence(item.ai);
 
         // Actor/confidence/flag governance — only on backends that declare it
         // (the hosted Platform). A local runtime skips the whole guard.

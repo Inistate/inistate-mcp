@@ -273,6 +273,60 @@ export function suggestColorForState(stateName: string): string {
 
 // ---------- validate_design ----------
 
+/**
+ * Resolve local-id references to names, in place. Agents commonly tag
+ * states/activities/fields with short ids (s1, a1, f1) and then point flows or
+ * activity field refs at those ids; the platform wants names. A ref is only
+ * rewritten when it matches a declared id and no declared name, so names
+ * always win. Returns one note per rewritten reference.
+ */
+export function resolveDesignRefs(schema: Record<string, any>): string[] {
+  const notes: string[] = [];
+  const states: any[] = Array.isArray(schema.states) ? schema.states : [];
+  const activities: any[] = Array.isArray(schema.activities) ? schema.activities : [];
+  const information: any[] = Array.isArray(schema.information) ? schema.information : [];
+  const flows: any[] = Array.isArray(schema.flows) ? schema.flows : [];
+
+  const resolver = (kind: string, items: any[]) => {
+    const names = new Set(items.map((it) => it?.name));
+    const ids = new Map<string, string>();
+    for (const it of items) {
+      if (it && typeof it.id === "string" && it.id !== "" && typeof it.name === "string") {
+        ids.set(it.id, it.name);
+      }
+    }
+    return (ref: unknown): string | null => {
+      if (typeof ref !== "string" || names.has(ref) || !ids.has(ref)) return null;
+      const name = ids.get(ref)!;
+      notes.push(`Reference '${ref}' resolved to ${kind} '${name}' via its id — reference names directly.`);
+      return name;
+    };
+  };
+
+  const toState = resolver("state", states);
+  const toActivity = resolver("activity", activities);
+  const toField = resolver("field", information);
+
+  for (const f of flows) {
+    if (!f || typeof f !== "object") continue;
+    f.from = toState(f.from) ?? f.from;
+    f.to = toState(f.to) ?? f.to;
+    f.activity = toActivity(f.activity) ?? f.activity;
+  }
+  for (const a of activities) {
+    if (!a || !Array.isArray(a.fields)) continue;
+    a.fields = a.fields.map((ref: any) => {
+      if (typeof ref === "string") return toField(ref) ?? ref;
+      if (ref && typeof ref === "object") {
+        const name = toField(ref.name);
+        if (name !== null) return { ...ref, name };
+      }
+      return ref;
+    });
+  }
+  return notes;
+}
+
 interface ValidationResult {
   valid: boolean;
   errors: string[];
@@ -286,6 +340,11 @@ export function validateDesign(
 ): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // Resolve id-style references (flows pointing at state/activity ids, field
+  // refs pointing at field ids) before any checks, mirroring what
+  // create_module/update_module send to the platform.
+  warnings.push(...resolveDesignRefs(schema));
 
   const name: string = schema.name || "";
   const information: any[] = schema.information || [];
@@ -448,14 +507,19 @@ export function validateDesign(
         );
       }
 
-      // Confidence threshold
+      // Confidence threshold. Values in (1, 100] are read as percentages —
+      // create_module/update_module normalize them the same way.
       if (
         a.confidence_threshold !== undefined &&
         a.confidence_threshold !== null
       ) {
-        if (a.confidence_threshold < 0 || a.confidence_threshold > 1) {
+        if (a.confidence_threshold < 0 || a.confidence_threshold > 100) {
           errors.push(
             `Activity '${a.name}' confidence_threshold must be between 0 and 1.`,
+          );
+        } else if (a.confidence_threshold > 1) {
+          warnings.push(
+            `Activity '${a.name}' confidence_threshold ${a.confidence_threshold} read as a percentage — normalized to ${a.confidence_threshold / 100}.`,
           );
         }
       }

@@ -266,6 +266,68 @@ describe("validateDesign", () => {
     expect(result.errors.some((e) => e.includes("'Ghost'"))).toBe(true);
   });
 
+  it("resolves flows that reference state/activity ids to names", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { id: "s1", name: "Open", color: "#5A6070", initial: true },
+        { id: "s2", name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ id: "a1", name: "Close", actor: "human", fields: ["Title"] }],
+      flows: [{ from: "s1", to: "s2", activity: "a1" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.warnings.some((w) => w.includes("'s1'") && w.includes("'Open'"))).toBe(true);
+  });
+
+  it("never resolves an id when it collides with a declared name", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { id: "s1", name: "Open", color: "#5A6070", initial: true },
+        { name: "s1", color: "#1E6B45" },
+      ],
+      flows: [{ from: "Open", to: "s1", activity: "Close" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.every((w) => !w.includes("resolved"))).toBe(true);
+  });
+
+  it("resolves activity field refs that reference field ids", () => {
+    const schema = {
+      ...minimalWorkflow,
+      information: [{ id: "f1", name: "Title", type: "Text" }],
+      activities: [{ name: "Close", actor: "human", fields: ["f1"] }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("reads confidence_threshold above 1 as a percentage", () => {
+    const schema = {
+      ...minimalWorkflow,
+      activities: [
+        { name: "Close", actor: "ai", ai_hint: "close it", fields: ["Title"], confidence_threshold: 80 },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("normalized to 0.8"))).toBe(true);
+  });
+
+  it("rejects confidence_threshold above 100", () => {
+    const schema = {
+      ...minimalWorkflow,
+      activities: [{ name: "Close", actor: "human", confidence_threshold: 101 }],
+    };
+    const result = validateDesign(schema);
+    expect(result.errors.some((e) => e.includes("confidence_threshold"))).toBe(true);
+  });
+
   it("warns about unreachable states", () => {
     const schema = {
       ...minimalWorkflow,
