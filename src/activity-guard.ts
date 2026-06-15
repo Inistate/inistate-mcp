@@ -30,6 +30,7 @@ interface ExtendedSchema {
   activities?: Array<ActivityDef | string>;
   information?: FieldInfo[];
   states?: Array<string | { name?: string }>;
+  flows?: Record<string, { activities?: Record<string, string> }>;
 }
 
 interface CanvasSchema {
@@ -219,6 +220,58 @@ export function getPriorFlag(
   return rec;
 }
 
+// ---------- Human-actor bypass detection ----------
+//
+// Observed gaming pattern: an AI is blocked on a human-only activity, then
+// immediately reaches the same target state via `changeState` + a
+// self-attested `confirmed: true`. Blocking a human-only activity records its
+// flow target states for that entry; an explicit state change to one of those
+// states is then refused outright — `confirmed` does not unlock human-only
+// transitions, so it must not unlock their state-override equivalent either.
+
+interface HumanBlockRecord {
+  activity: string;
+  states: Set<string>;
+  at: number;
+}
+const HUMAN_BLOCK_TTL_MS = 30 * 60 * 1000;
+const humanBlockCache = new Map<string, HumanBlockRecord>();
+
+function humanBlockKey(moduleName: string, entryId: unknown): string {
+  return cacheKey("humanblock", [moduleName, String(entryId)]);
+}
+
+/** Target states an activity can transition to, per the module's flows. */
+async function activityTargetStates(
+  moduleName: string,
+  activity: string,
+  fetchSchema: SchemaFetcher,
+): Promise<string[]> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
+  const out: string[] = [];
+  for (const from of Object.values(schema?.flows ?? {})) {
+    const target = from?.activities?.[activity];
+    if (typeof target === "string" && !out.includes(target)) out.push(target);
+  }
+  return out;
+}
+
+/** The human-actor block recorded for an entry, if still fresh. */
+export function getHumanBlockedStates(
+  moduleName: string,
+  entryId: unknown,
+): { activity: string; states: Set<string> } | undefined {
+  if (entryId === undefined || entryId === null) return undefined;
+  const k = humanBlockKey(moduleName, entryId);
+  const rec = humanBlockCache.get(k);
+  if (!rec) return undefined;
+  if (Date.now() - rec.at > HUMAN_BLOCK_TTL_MS) {
+    humanBlockCache.delete(k);
+    return undefined;
+  }
+  return rec;
+}
+
 export interface GuardInput {
   module: string;
   activity: string;
@@ -281,6 +334,31 @@ export async function evaluateActivity(
     }
   }
 
+  // Rule 2c — bypass detection. Once a human-only activity was blocked for an
+  // entry, an explicit state change that reaches the same target state is the
+  // same transition wearing different clothes. Runs before the `confirmed`
+  // shortcuts: confirmed does not unlock human-only transitions.
+  if (state) {
+    for (const target of targets) {
+      const blocked = getHumanBlockedStates(moduleName, target);
+      if (blocked?.states.has(state)) {
+        return {
+          ok: false,
+          structured: {
+            error: "human_actor_bypass_blocked",
+            message: `Activity '${blocked.activity}' (actor='human') was blocked for this entry, and this state change reaches its target state '${state}'. confirmed: true does not unlock human-only transitions.`,
+            activity,
+            state,
+            entryId: target,
+            blocked_activity: blocked.activity,
+            agent_action:
+              "Stop and do not work around this. A human must perform the transition in Inistate — report it to the user.",
+          },
+        };
+      }
+    }
+  }
+
   // Rule 2a — `changeStatus` (alias `changeState`) is the explicit
   // state-change override.
   if ((activity === "changeStatus" || activity === "changeState") && !confirmed) {
@@ -322,6 +400,19 @@ export async function evaluateActivity(
   const actor = (def.actor || "").toLowerCase();
 
   if (actor === "human") {
+    // Remember which states this activity would have reached, so a follow-up
+    // changeState/state-override to the same state is caught (Rule 2c).
+    const targetStates = await activityTargetStates(moduleName, activity, fetchSchema);
+    if (targetStates.length > 0) {
+      for (const target of targets) {
+        if (target === undefined || target === null) continue;
+        humanBlockCache.set(humanBlockKey(moduleName, target), {
+          activity,
+          states: new Set(targetStates),
+          at: Date.now(),
+        });
+      }
+    }
     return {
       ok: false,
       structured: {
@@ -330,7 +421,7 @@ export async function evaluateActivity(
         activity,
         actor: "human",
         agent_action:
-          "Do not retry — confirmed: true does NOT unlock this. Tell the user the activity must be performed by a human, then stop.",
+          "Do not retry — confirmed: true does NOT unlock this, and neither does changeState. Tell the user the activity must be performed by a human, then stop.",
       },
     };
   }
@@ -394,7 +485,21 @@ function checkSingleRef(
   const usernameOk =
     !isUserType ||
     (typeof obj.username === "string" && obj.username.length > 0);
-  if (idOk && valueOk && usernameOk) return null;
+  if (idOk && valueOk && usernameOk) {
+    // A display name standing in for the id ({ id: "carol" }) passes the key
+    // checks but the platform stores it as-is — a silently dangling reference.
+    // Real ids are numeric or document ids ("CLN00001"); a string id with
+    // whitespace or no digit at all is a name, not an id.
+    if (typeof obj.id === "string" && (/\s/.test(obj.id) || !/\d/.test(obj.id))) {
+      return {
+        field,
+        type,
+        received: value,
+        message: `${type} field '${locator}' id '${obj.id}' looks like a display name, not an entry id. Look up the entry with list_entries on the connected module and round-trip its reference object unchanged.`,
+      };
+    }
+    return null;
+  }
   const missing: string[] = [];
   if (!idOk) missing.push("id (string|number)");
   if (!valueOk) missing.push("value (string)");
@@ -495,6 +600,54 @@ export function validateInputShapesWith(
   return errors;
 }
 
+// ---------- Input key resolution ----------
+
+/** Case/space/underscore-insensitive key for field-name matching. */
+function fieldKey(name: string): string {
+  return name.trim().toLowerCase().replace(/[\s_-]/g, "");
+}
+
+export interface InputKeyResolution {
+  /** Near-miss keys (casing/spacing/underscores) rewritten in place to the exact field name. */
+  remapped: Array<{ from: string; to: string }>;
+  /** Keys matching no field at all — the platform silently drops these, losing the data. */
+  unknown: string[];
+}
+
+/**
+ * Match input keys against the module's field names, in place. Exact names
+ * pass; a key that differs only in case/spacing/underscores is rewritten to
+ * the exact field name; anything else is reported so the caller can reject
+ * it — the platform discards unmatched keys without any signal, which turns
+ * a key typo into silent data loss. Fail-open on a null map (schema
+ * unavailable): the server makes the final call.
+ */
+export function resolveInputKeys(
+  types: Map<string, string> | null,
+  input: Record<string, unknown> | undefined | null,
+): InputKeyResolution {
+  const result: InputKeyResolution = { remapped: [], unknown: [] };
+  if (!input || !types) return result;
+  // null marks a collision — two fields fold to the same key; never remap those.
+  const byKey = new Map<string, string | null>();
+  for (const name of types.keys()) {
+    const k = fieldKey(name);
+    byKey.set(k, byKey.has(k) ? null : name);
+  }
+  for (const key of Object.keys(input)) {
+    if (types.has(key)) continue;
+    const match = byKey.get(fieldKey(key));
+    if (match && !Object.prototype.hasOwnProperty.call(input, match)) {
+      input[match] = input[key];
+      delete input[key];
+      result.remapped.push({ from: key, to: match });
+    } else {
+      result.unknown.push(key);
+    }
+  }
+  return result;
+}
+
 /**
  * Validate that User/Module/Users/Modules fields in `input` carry the
  * correct shape. Convenience wrapper around getModuleFieldTypes +
@@ -529,4 +682,5 @@ export function __resetGuardCaches(): void {
   schemaCache.clear();
   canvasCache.clear();
   flaggedCache.clear();
+  humanBlockCache.clear();
 }

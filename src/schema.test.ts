@@ -625,6 +625,83 @@ describe("validateDesign — input normalization", () => {
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("'Priority'") && e.includes("no options"))).toBe(true);
   });
+
+  it("normalizes {value,label} option objects to strings with a warning", () => {
+    const schema = {
+      ...base,
+      information: [
+        {
+          name: "Priority",
+          type: "Selection",
+          options: [{ value: "low", label: "Low" }, { value: "High" }, "Medium"],
+        },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(schema.information[0].options).toEqual(["Low", "High", "Medium"]);
+    expect(result.warnings.some((w) => w.includes("'Priority'") && w.includes("normalized to plain strings"))).toBe(true);
+  });
+
+  it("aliases fromState/toState flow keys instead of erroring on 'undefined'", () => {
+    const schema = {
+      ...base,
+      information: [{ name: "Title", type: "Text" }],
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Close", actor: "human" }],
+      flows: [{ fromState: "Open", toState: "Closed", activity: "Close" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'fromState'/'toState'"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("undefined"))).toBe(false);
+  });
+
+  it("reports flows missing from/to/activity once, not as 'undefined' states", () => {
+    const schema = {
+      ...base,
+      information: [{ name: "Title", type: "Text" }],
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Close", actor: "human" }],
+      flows: [{ source: "Open", target: "Closed" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(false);
+    const missing = result.errors.filter((e) => e.includes("is missing"));
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain("'from', 'to', 'activity'");
+    expect(result.errors.some((e) => e.includes("'undefined'"))).toBe(false);
+  });
+
+  it("uses displayName/label as the name when name is missing", () => {
+    const schema = {
+      ...base,
+      information: [
+        { displayName: "Project Name", type: "Text" },
+        { label: "Notes", type: "MultiText" },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(schema.information[0]).toMatchObject({ name: "Project Name" });
+    expect(schema.information[1]).toMatchObject({ name: "Notes" });
+    expect(result.warnings.some((w) => w.includes("'displayName' is not a schema key"))).toBe(true);
+  });
+
+  it("warns that label is ignored when name is also present", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "projectName", label: "Project Name", type: "Text" }],
+    });
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'projectName'") && w.includes("'label' is ignored"))).toBe(true);
+  });
 });
 
 // ──────────────────────────────────────────────

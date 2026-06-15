@@ -4,6 +4,9 @@ build/
 .mcp.json
 debug.log
 
+# Local eval harness — mcp-config.json carries a live API token.
+bench/
+
 # CONFIDENTIAL — internal spec for the closed inistate-core product.
 # Must NOT be published in this open-source (MIT) repo. See the file's header.
 Inistate_Core_Specification.md

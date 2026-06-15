@@ -188,6 +188,108 @@ export function normalizeFieldType(
   return { type: normalized, changed: normalized !== type };
 }
 
+/** Coerce one option entry to its display string. Agents send {value,label}
+ * objects (or numbers); the platform takes plain strings. Display text wins:
+ * label, then value, then name. Unrecognized shapes pass through unchanged
+ * so validation can report them. */
+function optionToString(option: unknown): unknown {
+  if (typeof option === "string") return option;
+  if (typeof option === "number") return String(option);
+  if (option && typeof option === "object" && !Array.isArray(option)) {
+    const o = option as Record<string, unknown>;
+    const s = o.label ?? o.value ?? o.name;
+    if (typeof s === "string") return s;
+    if (typeof s === "number") return String(s);
+  }
+  return option;
+}
+
+export function normalizeOptionList(options: unknown): { options: unknown; changed: boolean } {
+  if (!Array.isArray(options)) return { options, changed: false };
+  let changed = false;
+  const out = options.map((o) => {
+    const v = optionToString(o);
+    if (v !== o) changed = true;
+    return v;
+  });
+  return { options: changed ? out : options, changed };
+}
+
+const asArray = (v: unknown): any[] => (Array.isArray(v) ? v : []);
+
+/**
+ * Fold common agent near-misses into canonical shape, in place, before
+ * validation: `displayName`/`label` used instead of `name`, `{value,label}`
+ * option objects, and `fromState`/`toState` flow keys. Returns one warning
+ * per repair so agents learn the canonical vocabulary. create_module /
+ * update_module apply the same repairs at the input boundary, so this is a
+ * no-op on their payloads — it exists so validate_design (which takes raw
+ * objects) stays a faithful dry-run.
+ */
+export function repairDesignInput(schema: Record<string, any>): string[] {
+  const warnings: string[] = [];
+
+  const fixName = (it: any, kind: string) => {
+    if (!it || typeof it !== "object") return;
+    const aliasKey = it.displayName !== undefined ? "displayName" : it.label !== undefined ? "label" : null;
+    if (!aliasKey) return;
+    const alias = it[aliasKey];
+    if (typeof alias === "string" && alias !== "") {
+      if (!it.name) {
+        it.name = alias;
+        warnings.push(`${kind} '${alias}': '${aliasKey}' is not a schema key — used as 'name' ('name' is the display name).`);
+      } else if (it.name !== alias) {
+        warnings.push(`${kind} '${it.name}': '${aliasKey}' is ignored — 'name' is the display name shown to users.`);
+      }
+    }
+    delete it.displayName;
+    delete it.label;
+  };
+
+  const fixOptions = (it: any, kind: string) => {
+    if (!it || typeof it !== "object") return;
+    const norm = normalizeOptionList(it.options);
+    if (norm.changed) {
+      it.options = norm.options;
+      warnings.push(`${kind} '${it.name}': options given as objects — normalized to plain strings ({label} or {value}).`);
+    }
+  };
+
+  for (const f of asArray(schema.information)) {
+    fixName(f, "Field");
+    fixOptions(f, "Field");
+    for (const sf of asArray(f?.fields)) {
+      fixName(sf, "Sub-field");
+      fixOptions(sf, "Sub-field");
+    }
+  }
+  for (const s of asArray(schema.states)) fixName(s, "State");
+  for (const a of asArray(schema.activities)) {
+    fixName(a, "Activity");
+    for (const ref of asArray(a?.fields)) {
+      if (ref && typeof ref === "object") fixOptions(ref, `Activity '${a?.name}' field`);
+    }
+  }
+  for (const fl of asArray(schema.flows)) {
+    if (!fl || typeof fl !== "object") continue;
+    let aliased = false;
+    if (fl.from === undefined && typeof fl.fromState === "string") {
+      fl.from = fl.fromState;
+      aliased = true;
+    }
+    if (fl.to === undefined && typeof fl.toState === "string") {
+      fl.to = fl.toState;
+      aliased = true;
+    }
+    if (aliased) {
+      warnings.push(`Flow '${fl.from} → ${fl.to}': use 'from'/'to', not 'fromState'/'toState'.`);
+    }
+    delete fl.fromState;
+    delete fl.toState;
+  }
+  return warnings;
+}
+
 const NAMED_COLORS: Record<string, string> = {
   gray: "#5A6070", grey: "#5A6070", slate: "#5A6070", silver: "#5A6070",
   blue: "#2968A8", navy: "#2968A8", azure: "#2968A8",
@@ -334,6 +436,18 @@ interface ValidationResult {
   summary: Record<string, unknown> | null;
 }
 
+/**
+ * Structural check for one flow row. Flows are loose on the wire (tools.ts
+ * flowShape) so incomplete rows reach this message instead of a Zod -32602;
+ * update_module's partial path uses it too, where validateDesign never runs.
+ */
+export function flowCompletenessError(f: any, index: number): string | null {
+  const missing = (["from", "to", "activity"] as const).filter((k) => f?.[k] === undefined);
+  return missing.length > 0
+    ? `Flow at index ${index} is missing '${missing.join("', '")}' — flows are { from, to, activity } using state/activity names.`
+    : null;
+}
+
 export function validateDesign(
   schema: Record<string, any>,
   mode: "create" | "update" = "create",
@@ -341,9 +455,11 @@ export function validateDesign(
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Resolve id-style references (flows pointing at state/activity ids, field
-  // refs pointing at field ids) before any checks, mirroring what
-  // create_module/update_module send to the platform.
+  // Fold near-miss vocabulary (displayName/label, object options,
+  // fromState/toState) before any checks, then resolve id-style references
+  // (flows pointing at state/activity ids, field refs pointing at field ids),
+  // mirroring what create_module/update_module send to the platform.
+  warnings.push(...repairDesignInput(schema));
   warnings.push(...resolveDesignRefs(schema));
 
   const name: string = schema.name || "";
@@ -405,7 +521,7 @@ export function validateDesign(
 
     if (REFERENCE_TYPES_LOWER.has(base) && !hasConnection) {
       errors.push(
-        `Field '${f.name}' is type '${f.type}' but is missing 'connection'. Set 'connection' to the name of the module to link to (e.g. "connection": "Members").`,
+        `Field '${f.name}' is type '${f.type}' but is missing 'connection'. Set 'connection' to the name of a module that exists in this workspace (check list_modules).`,
       );
     }
     if (!REFERENCE_TYPES_LOWER.has(base) && hasConnection) {
@@ -555,7 +671,15 @@ export function validateDesign(
     }
 
     // Validate flows
-    for (const f of flows) {
+    for (let i = 0; i < flows.length; i++) {
+      const f = flows[i];
+      // A flow missing its keys outright (wrong key names) would otherwise
+      // produce one "state 'undefined'" error per key — say what's missing once.
+      const incomplete = flowCompletenessError(f, i);
+      if (incomplete) {
+        errors.push(incomplete);
+        continue;
+      }
       if (f.from !== "" && !stateNames.has(f.from)) {
         errors.push(
           `Flow references state '${f.from}' (from) which is not defined. Available states: ${[...stateNames].join(", ")}.`,
@@ -627,6 +751,14 @@ export function validateDesign(
       warnings,
       summary: errors.length === 0 ? summary : null,
     };
+  }
+
+  // Flows with no states in the payload (e.g. an update that leaves states
+  // server-side): reference checks need the states, but row completeness
+  // does not — catch incomplete rows before they 422 on the platform.
+  for (let i = 0; i < flows.length; i++) {
+    const incomplete = flowCompletenessError(flows[i], i);
+    if (incomplete) errors.push(incomplete);
   }
 
   // Record list module — minimal validation
@@ -769,7 +901,7 @@ const DESIGN_CONSTRAINTS = {
   field_types: VALID_FIELD_TYPES,
   state_colors: VALID_COLORS,
   reference_fields:
-    'User/Users/Module/Modules fields require \'connection\': the module name to link to (e.g. "Members" for workspace users). Not supported inside Table sub-fields.',
+    "User/Users/Module/Modules fields require 'connection': the name of a module that exists in this workspace. Not supported inside Table sub-fields.",
   actors: VALID_ACTOR_TYPES,
 };
 
