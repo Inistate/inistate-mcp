@@ -23,6 +23,7 @@ import {
 import {
   coerceBoolish,
   coerceNumish,
+  dropEmptyArrayish,
   designWorkflow,
   flowCompletenessError,
   normalizeFieldType,
@@ -138,8 +139,10 @@ const repairItem = (raw: unknown): unknown => {
     if (it[k] !== undefined) it[k] = coerceBoolish(it[k]);
   }
   if (it.confidence_threshold !== undefined) it.confidence_threshold = coerceNumish(it.confidence_threshold);
-  if (it.options !== undefined) it.options = unwrapItems(it.options);
-  if (it.fields !== undefined) it.fields = unwrapItems(it.fields);
+  for (const k of ["options", "fields"]) {
+    if (dropEmptyArrayish(it, k)) continue; // "" / null → absent (optional array)
+    if (it[k] !== undefined) it[k] = unwrapItems(it[k]);
+  }
   if (Array.isArray(it.options)) it.options = normalizeOptionList(it.options).options;
   return it;
 };

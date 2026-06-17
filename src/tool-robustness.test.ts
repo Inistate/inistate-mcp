@@ -665,6 +665,45 @@ describe("design tools — stringly-typed primitives and {item} wrapping", () =>
     expect((lastCreatePayload!.flows as unknown[])).toHaveLength(1);
   });
 
+  it("create_module coerces 1/0-style and {item}-wrapped boolean 'initial'", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Boolish",
+        information: [{ name: "T", type: "Text" }],
+        states: [
+          { name: "A", color: "#5A6070", initial: "1" },
+          { name: "B", color: "#1E6B45", initial: { item: "false" } },
+        ],
+        activities: [{ name: "Go", actor: "human" }],
+        flows: [{ from: "A", to: "B", activity: "Go" }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const states = lastCreatePayload!.states as Array<Record<string, unknown>>;
+    expect(states[0].initial).toBe(true);
+    expect(states[1].initial).toBe(false);
+  });
+
+  it("create_module treats an empty-string activity 'fields' as absent", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "EmptyFields",
+        information: [{ name: "T", type: "Text" }],
+        states: [
+          { name: "A", color: "#5A6070", initial: true },
+          { name: "B", color: "#1E6B45" },
+        ],
+        activities: [{ name: "Go", actor: "human", fields: "" }],
+        flows: [{ from: "A", to: "B", activity: "Go" }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const acts = lastCreatePayload!.activities as Array<Record<string, unknown>>;
+    expect(acts[0].fields).toBeUndefined();
+  });
+
   it("validate_design unwraps {item:[…]} instead of crashing on 'information is not iterable'", async () => {
     const result = await client.callTool({
       name: "validate_design",

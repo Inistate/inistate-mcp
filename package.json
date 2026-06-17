@@ -1,7 +1,7 @@
 {
   "name": "inistate-mcp",
   "mcpName": "io.github.Inistate/inistate-mcp",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "MCP server for the Inistate platform — no-code apps creation powered by AI",
   "type": "module",
   "author": "Inistate",

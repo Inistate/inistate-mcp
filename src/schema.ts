@@ -225,24 +225,56 @@ const asArray = (v: unknown): any[] => (Array.isArray(v) ? v : []);
 // recover from (it mutates the value, not the type). Coerce the obvious cases
 // on the way in; genuinely wrong values still fall through to the type check.
 
-/** "true"/"false" (case-insensitive) → boolean. Other values pass through. */
-export function coerceBoolish(v: unknown): unknown {
-  if (typeof v === "string") {
-    const s = v.trim().toLowerCase();
-    if (s === "true") return true;
-    if (s === "false") return false;
+/** Pull a scalar out of a single-key {item: x} / {items: x} wrapper. Agents
+ * that XML-marshal arrays sometimes wrap scalar values the same way
+ * (initial: {item: "true"}). Returns the value unchanged otherwise. */
+function unwrapScalarItem(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const keys = Object.keys(v as Record<string, unknown>);
+    if (keys.length === 1 && (keys[0] === "item" || keys[0] === "items")) {
+      return (v as Record<string, unknown>)[keys[0]];
+    }
   }
   return v;
 }
 
+const TRUE_STRINGS = new Set(["true", "1", "yes"]);
+const FALSE_STRINGS = new Set(["false", "0", "no"]);
+
+/** Stringly-typed boolean → boolean: "true"/"True"/"1"/"yes" → true,
+ * "false"/"0"/"no" → false (case-insensitive). Also unwraps a {item: …}
+ * wrapper first. Anything unrecognized passes through to the type check. */
+export function coerceBoolish(v: unknown): unknown {
+  const u = unwrapScalarItem(v);
+  if (typeof u === "string") {
+    const s = u.trim().toLowerCase();
+    if (TRUE_STRINGS.has(s)) return true;
+    if (FALSE_STRINGS.has(s)) return false;
+  }
+  return u;
+}
+
 /** Numeric string ("0.85", "100") → number. Non-numeric strings pass through
- * so z.number() still reports them. */
+ * so z.number() still reports them. Unwraps a {item: …} wrapper first. */
 export function coerceNumish(v: unknown): unknown {
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
+  const u = unwrapScalarItem(v);
+  if (typeof u === "string" && u.trim() !== "") {
+    const n = Number(u);
     if (Number.isFinite(n)) return n;
   }
-  return v;
+  return u;
+}
+
+/** An array-shaped slot given an empty string ("") or null — agents emit this
+ * for "no items" (activities: fields: ""). Treat as absent so the optional
+ * array check passes instead of -32602. Returns true if the key was cleared. */
+export function dropEmptyArrayish(obj: Record<string, unknown>, key: string): boolean {
+  const v = obj[key];
+  if (v === null || (typeof v === "string" && v.trim() === "")) {
+    delete obj[key];
+    return true;
+  }
+  return false;
 }
 
 /** Unwrap XML/SOAP-style array marshalling — { item: [...] } or { items: [...] }
@@ -286,6 +318,7 @@ export function repairDesignInput(schema: Record<string, any>): string[] {
   const fixItemArrays = (it: any) => {
     if (!it || typeof it !== "object") return;
     for (const key of ["options", "fields", "from_states", "from", "to_states"]) {
+      if (dropEmptyArrayish(it, key)) continue; // "" / null → absent
       if (it[key] !== undefined) it[key] = unwrapItems(it[key]);
     }
   };
@@ -326,10 +359,16 @@ export function repairDesignInput(schema: Record<string, any>): string[] {
       fixOptions(sf, "Sub-field");
     }
   }
-  for (const s of asArray(schema.states)) fixName(s, "State");
+  for (const s of asArray(schema.states)) {
+    fixName(s, "State");
+    if (s && typeof s === "object" && s.initial !== undefined) s.initial = coerceBoolish(s.initial);
+  }
   for (const a of asArray(schema.activities)) {
     fixItemArrays(a);
     fixName(a, "Activity");
+    if (a && typeof a === "object" && a.confidence_threshold !== undefined) {
+      a.confidence_threshold = coerceNumish(a.confidence_threshold);
+    }
     for (const ref of asArray(a?.fields)) {
       if (ref && typeof ref === "object") fixOptions(ref, `Activity '${a?.name}' field`);
     }
