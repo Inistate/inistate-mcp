@@ -8,21 +8,25 @@ import {
   clearFlagged,
   evaluateActivity,
   FLAGGED_ANNOTATION,
+  getHumanBlockedStates,
   getModuleFieldTypes,
   getModuleStates,
   getPriorFlag,
   primeSchemaCache,
   recordFlagged,
+  resolveInputKeys,
   seedSchemaCache,
-  validateInputShapes,
   validateInputShapesWith,
   type CanvasFetcher,
   type SchemaFetcher,
 } from "./activity-guard.js";
 import {
   designWorkflow,
+  flowCompletenessError,
   normalizeFieldType,
+  normalizeOptionList,
   normalizeStateColor,
+  resolveDesignRefs,
   validateDesign,
 } from "./schema.js";
 
@@ -72,11 +76,18 @@ function err(e: unknown) {
   };
 }
 
+// System columns present on every entry — valid sort keys even though they
+// never appear in a module's `information` list.
+const SYSTEM_ENTRY_FIELDS = new Set([
+  "entryid", "documentid", "date", "state",
+  "createdby", "createddate", "updatedby", "updateddate",
+]);
+
 // ---------- Workspace helper ----------
 
 // Serialized into every tool that takes workspaceId — keep it one short line.
 const wsParam = z
-  .string()
+  .union([z.string(), z.number()])
   .optional()
   .describe("Workspace ID. Omit if set via env or set_workspace; required in stateless/remote mode.");
 
@@ -95,56 +106,89 @@ const gatedDesc = (available: boolean, full: string, hint = ""): string =>
 // ---------- Shared module-schema shapes (used by create_module + update_module) ----------
 // `id` is optional on both: ignored on create, used to match items on update (enables renaming).
 // `type` is optional so update can rename without re-sending it; create still requires it server-side.
+//
+// Each shape is wrapped in z.preprocess to repair common agent near-misses
+// before validation: `displayName`/`label` standing in for `name`,
+// `{value,label}` option objects, `actor: "user"`, and `fromState`/`toState`/
+// `state` flow keys. zodToJsonSchema serializes the inner object, so the
+// published tool schema is unchanged — the repairs are runtime-only.
 
-const subFieldShape = z.object({
+const repairItem = (raw: unknown): unknown => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const it: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  if (typeof it.name !== "string" || it.name === "") {
+    const alias = it.displayName ?? it.label;
+    if (typeof alias === "string" && alias !== "") it.name = alias;
+  }
+  delete it.displayName;
+  delete it.label;
+  if (it.actor === "user") it.actor = "human";
+  if (Array.isArray(it.options)) it.options = normalizeOptionList(it.options).options;
+  return it;
+};
+
+const repairFlow = (raw: unknown): unknown => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const f: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  if (f.from === undefined && typeof f.fromState === "string") f.from = f.fromState;
+  if (f.to === undefined && typeof f.toState === "string") f.to = f.toState;
+  // Agents pattern-match a flow's target on the activity's "state" key.
+  if (f.to === undefined && typeof f.state === "string") f.to = f.state;
+  return f;
+};
+
+const subFieldShape = z.preprocess(repairItem, z.object({
   id: z.string().optional(),
   name: z.string(),
   type: z.string().optional(),
   options: z.array(z.string()).optional(),
-});
+}));
 
-const fieldShape = z.object({
+const fieldShape = z.preprocess(repairItem, z.object({
   id: z.string().optional(),
   name: z.string(),
   type: z.string().optional(),
-  connection: z.string().optional().describe("Module to link to (e.g. \"Members\"). Required for User/Users/Module/Modules types."),
+  connection: z.string().optional().describe("Name of an existing module in this workspace to link to. Required for User/Users/Module/Modules types."),
   options: z.array(z.string()).optional(),
   fields: z.array(subFieldShape).optional().describe("Sub-fields for Table type"),
   ai_hint: z.string().optional(),
-});
+}));
 
-const stateShape = z.object({
+const stateShape = z.preprocess(repairItem, z.object({
   id: z.string().optional(),
   name: z.string(),
   color: z.string().optional().describe("Palette: #5A6070 #2968A8 #2A7B50 #A07828 #C0392B #6B4D91 #1E6B45 #8B2D2D. Names ('red', 'amber') and other hex are normalized to the nearest."),
   initial: z.boolean().optional(),
   ai_hint: z.string().optional(),
   ai_instruction: z.string().optional(),
-});
+}));
 
-const activityFieldRefShape = z.object({
+const activityFieldRefShape = z.preprocess(repairItem, z.object({
   name: z.string(),
   required: z.boolean().optional(),
   readOnly: z.boolean().optional(),
   options: z.array(z.string()).optional(),
-});
+}));
 
-const activityShape = z.object({
+const activityShape = z.preprocess(repairItem, z.object({
   id: z.string().optional(),
   name: z.string(),
   actor: z.enum(["human", "ai", "hybrid"]).optional(),
   fields: z.array(z.union([z.string(), activityFieldRefShape])).optional(),
   ai_hint: z.string().optional(),
   ai_instruction: z.string().optional(),
-  confidence_threshold: z.number().min(0).max(1).optional(),
-});
+  confidence_threshold: z.number().min(0).max(100).optional().describe("0-1; values above 1 are read as percent"),
+}));
 
-const flowShape = z.object({
-  from: z.string(),
-  to: z.string(),
-  activity: z.string(),
+// from/to/activity are required semantically but optional on the wire: a flow
+// missing one would otherwise die as a raw Zod -32602; loose parsing lets the
+// design validator report what's missing as a structured error instead.
+const flowShape = z.preprocess(repairFlow, z.object({
+  from: z.string().optional(),
+  to: z.string().optional(),
+  activity: z.string().optional().describe("Activity performing this transition (required)"),
   ai_hint: z.string().optional(),
-});
+}));
 
 const moduleSectionsShape = {
   icon: z.string().optional().describe("Emoji identifier"),
@@ -152,7 +196,7 @@ const moduleSectionsShape = {
   information: z.array(fieldShape).optional().describe("Field definitions. Items matched by id on update enable renaming."),
   states: z.array(stateShape).optional().describe("Workflow states. Omit for record list modules."),
   activities: z.array(activityShape).optional().describe("Custom activities. Omit for record list modules."),
-  flows: z.array(flowShape).optional().describe("State transition rules. Omit for record list modules."),
+  flows: z.array(flowShape).optional().describe("State transition rules: { from, to, activity } by name. Omit for record list modules."),
 };
 
 /**
@@ -181,6 +225,16 @@ function normalizeModuleSections(body: Record<string, unknown>): void {
       color: normalizeStateColor(s.color as string | undefined, (s.name as string) || "").color,
     }));
   }
+  if (Array.isArray(body.activities)) {
+    body.activities = (body.activities as Array<Record<string, unknown>>).map((a) =>
+      typeof a.confidence_threshold === "number" && a.confidence_threshold > 1
+        ? { ...a, confidence_threshold: a.confidence_threshold / 100 }
+        : a,
+    );
+  }
+  // Flows/field refs that point at locally declared ids (s1, a1, f1) are
+  // rewritten to names — the platform only accepts names.
+  resolveDesignRefs(body);
 }
 
 // ---------- Tool registration ----------
@@ -218,9 +272,96 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     }
   };
 
+  /**
+   * update_module matches section items by id and the platform rejects an id
+   * that matches nothing — yet agents routinely invent ids for NEW items
+   * ("field_priority"). Strip ids the live canvas does not know (the item
+   * becomes a create) and report what was stripped. Fail-open per section:
+   * no canvas, or a section the canvas lacks, strips nothing.
+   */
+  const SECTION_LABEL = { information: "field", states: "state", activities: "activity" } as const;
+  const stripUnknownSectionIds = async (
+    moduleRef: string,
+    body: Record<string, unknown>,
+  ): Promise<string[]> => {
+    const sections = Object.keys(SECTION_LABEL) as Array<keyof typeof SECTION_LABEL>;
+    const carriesIds = (s: string): boolean =>
+      Array.isArray(body[s]) &&
+      (body[s] as Array<Record<string, unknown>>).some(
+        (it) => typeof it?.id === "string" && it.id !== "",
+      );
+    if (!sections.some(carriesIds)) return [];
+    const canvas = (await fetchCanvas(moduleRef)) as Record<string, unknown> | null;
+    if (!canvas) return [];
+    const repairs: string[] = [];
+    for (const s of sections) {
+      if (!carriesIds(s)) continue;
+      const existing = canvas[s];
+      if (!Array.isArray(existing) || existing.length === 0) continue;
+      const known = new Set(
+        (existing as Array<Record<string, unknown>>)
+          .map((it) => it?.id)
+          .filter((v): v is string => typeof v === "string"),
+      );
+      for (const it of body[s] as Array<Record<string, unknown>>) {
+        if (typeof it.id === "string" && it.id !== "" && !known.has(it.id)) {
+          repairs.push(`${SECTION_LABEL[s]} '${typeof it.name === "string" ? it.name : "?"}' (id '${it.id}')`);
+          delete it.id;
+        }
+      }
+    }
+    return repairs;
+  };
+
   /** Apply workspaceId if provided (stateless mode), else rely on env/prior set_workspace. */
-  const applyWorkspace = (workspaceId?: string): void => {
-    if (workspaceId) backend.setActiveWorkspace(workspaceId);
+  const applyWorkspace = (workspaceId?: string | number): void => {
+    if (workspaceId) backend.setActiveWorkspace(String(workspaceId));
+  };
+
+  /** Module names in the active workspace, lowercased, or null when the list
+   * is unavailable (no workspace set / backend error) — callers fail open. */
+  const getModuleNames = async (): Promise<{ names: Set<string>; display: string[] } | null> => {
+    try {
+      const modules = await backend.listModules();
+      if (!Array.isArray(modules)) return null;
+      const display = (modules as Array<Record<string, unknown>>)
+        .map((m) => (typeof m?.name === "string" ? m.name : ""))
+        .filter(Boolean);
+      return { names: new Set(display.map((n) => n.toLowerCase())), display };
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Reference fields must link to a module that exists in the workspace — the
+   * platform rejects unknown targets at create/update time, so checking here
+   * keeps validate_design (and the create/update pre-flight) a faithful
+   * dry-run. `selfName` exempts the module being created (self-reference).
+   * Fails open when the module list is unavailable.
+   */
+  const checkConnectionTargets = async (
+    information: unknown,
+    selfName?: string,
+  ): Promise<string[]> => {
+    if (!Array.isArray(information)) return [];
+    const refs = (information as Array<Record<string, unknown>>).filter(
+      (f) => f && typeof f.connection === "string" && (f.connection as string).trim() !== "",
+    );
+    if (refs.length === 0) return [];
+    const modules = await getModuleNames();
+    if (!modules) return [];
+    if (selfName) modules.names.add(selfName.toLowerCase());
+    const errors: string[] = [];
+    for (const f of refs) {
+      const conn = (f.connection as string).trim();
+      if (!modules.names.has(conn.toLowerCase())) {
+        errors.push(
+          `Field '${f.name}' links to module '${conn}' which does not exist in this workspace. Modules: ${modules.display.join(", ")}.`,
+        );
+      }
+    }
+    return errors;
   };
 
   // ── Governance-conditional schema pieces ──
@@ -238,7 +379,7 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   const submitAiShape = z.object({
     reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
     model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
-    confidence: z.number().min(0).max(1).describe("0-1; gated against the activity's confidence_threshold"),
+    confidence: z.number().min(0).max(100).describe("0-1; values above 1 are read as percent (100 → 1). Gated against the activity's confidence_threshold"),
     sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
@@ -252,11 +393,17 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   const bulkAiShape = z.object({
     reasoning: z.string(),
     model: z.string(),
-    confidence: z.number().min(0).max(1),
+    confidence: z.number().min(0).max(100),
     sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
   });
+
+  /** Agents send confidence as 0-1 or as percent (e.g. 100) — normalize to 0-1 in place. */
+  const normalizeAiConfidence = <T extends { confidence: number } | undefined>(ai: T): T => {
+    if (ai && ai.confidence > 1) ai.confidence = ai.confidence / 100;
+    return ai;
+  };
   const bulkAiParam = gov
     ? bulkAiShape.describe("Default AI traceability applied to every item that does not specify its own. Same field semantics as submit_activity.ai.")
     : bulkAiShape.optional().describe("Default AI traceability for items without their own. Optional on the local runtime.");
@@ -372,17 +519,44 @@ Workflow sequences after workspace is set:
       ),
       inputSchema: {
         workspaceId: z
-          .string()
-          .describe("Workspace ID from list_workspaces"),
+          .union([z.string(), z.number()])
+          .describe("Workspace ID (or exact name) from list_workspaces"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ workspaceId }) => {
       if (!caps.workspaces) return ok(capabilityMessage("workspaces", backend.kind));
       try {
-        backend.setActiveWorkspace(workspaceId);
-        const data = await backend.getWorkspace(workspaceId);
-        return ok(slimWorkspace(workspaceId, data));
+        // Verify the workspace exists before mutating session state, so a bad
+        // id never leaves the session pointing at a nonexistent workspace.
+        const requested = String(workspaceId).trim();
+        let resolved = requested;
+        let data: unknown;
+        try {
+          data = await backend.getWorkspace(resolved);
+        } catch {
+          // Id lookup failed — the agent may have sent a name. Resolve it.
+          const list = await backend.listWorkspaces().catch(() => null);
+          const all = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : [];
+          const lower = requested.toLowerCase();
+          const match =
+            all.find((w) => String(w?.id) === requested) ??
+            all.find((w) => typeof w?.name === "string" && (w.name as string).toLowerCase() === lower);
+          if (!match) {
+            return err({
+              structured: {
+                error: "workspace_not_found",
+                message: `No workspace with id or name '${requested}'. The active workspace is unchanged.`,
+                available: all.map((w) => ({ id: w?.id, name: w?.name })),
+                agent_action: "Call set_workspace again with an id from `available`.",
+              },
+            });
+          }
+          resolved = String(match.id);
+          data = await backend.getWorkspace(resolved);
+        }
+        backend.setActiveWorkspace(resolved);
+        return ok(slimWorkspace(resolved, data));
       } catch (e) {
         return err(e);
       }
@@ -489,7 +663,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         state: z.string().optional(),
-        search: z.string().optional().describe("Free-text against document ID and indexed text fields"),
+        search: z.string().optional().describe("Free-text search across document ID, state, and text-like fields; supports * and ? wildcards"),
         filters: z.record(z.unknown()).optional(),
         sortBy: z.string().optional(),
         sortDirection: z.enum(["asc", "desc"]).default("asc").optional(),
@@ -519,6 +693,47 @@ Load resource inistate://schema before modifying to know valid field types, colo
           pageSize,
           fields,
         });
+        // A typo'd state, sortBy, or fields entry matches nothing — an empty
+        // page reads as "no data", a wrong sortBy silently returns unsorted
+        // rows, and a wrong fields entry silently drops that column from
+        // every row. Verify the names against the module schema and say so.
+        // On non-empty results, only full mismatches (no case-insensitive
+        // match either) are flagged, to avoid second-guessing the platform's
+        // own name resolution.
+        if (data && typeof data === "object" && (state || sortBy || (fields && fields.length > 0))) {
+          const empty = (data as Record<string, unknown>).totalItems === 0;
+          const issues: string[] = [];
+          if (state && empty) {
+            const states = await getModuleStates(moduleName, fetchSchema);
+            if (states && !states.includes(state)) {
+              issues.push(`state '${state}' does not exist — states: ${states.join(", ")}`);
+            }
+          }
+          const needTypes = (sortBy && !SYSTEM_ENTRY_FIELDS.has(sortBy.toLowerCase())) || (fields && fields.length > 0);
+          const types = needTypes ? await getModuleFieldTypes(moduleName, fetchSchema) : null;
+          if (types) {
+            const lowerKeys = new Set([...types.keys()].map((k) => k.toLowerCase()));
+            if (sortBy && !SYSTEM_ENTRY_FIELDS.has(sortBy.toLowerCase()) && !types.has(sortBy)) {
+              const ciMatch = lowerKeys.has(sortBy.toLowerCase());
+              if (empty || !ciMatch) {
+                issues.push(`sortBy '${sortBy}' is not a field — results are NOT sorted by it; fields: ${[...types.keys()].join(", ")}`);
+              }
+            }
+            if (fields && fields.length > 0) {
+              const bad = fields.filter(
+                (f) => !SYSTEM_ENTRY_FIELDS.has(f.toLowerCase()) && !lowerKeys.has(f.toLowerCase()),
+              );
+              if (bad.length > 0) {
+                issues.push(`fields ${bad.map((f) => `'${f}'`).join(", ")} match no field — those columns were silently omitted; available: ${[...types.keys()].join(", ")}`);
+              }
+            }
+          }
+          if (issues.length > 0) {
+            (data as Record<string, unknown>).hint = empty
+              ? `0 results; check: ${issues.join("; ")}`
+              : `check: ${issues.join("; ")}`;
+          }
+        }
         return ok(data);
       } catch (e) {
         return err(e);
@@ -563,7 +778,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "Get Activity Form",
       description:
-        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). Never fabricate form data — if required fields cannot be confidently populated, ask the user.",
+        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         activity: z
@@ -647,6 +862,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
       const expectedVersion = (extra as Record<string, unknown>).expectedVersion as number | undefined;
       try {
         applyWorkspace(workspaceId);
+        // An empty-string entryId reaches the platform as a 500 — treat it as
+        // absent (create).
+        if (typeof entryId === "string" && entryId.trim() === "") entryId = undefined;
+        normalizeAiConfidence(ai);
         // Actor/confidence/flag governance runs only on backends that declare it
         // (the hosted Platform). A local runtime does no such gating — it either
         // commits a legal transition or rejects it.
@@ -685,9 +904,38 @@ Load resource inistate://schema before modifying to know valid field types, colo
             return err({ structured: guard.structured });
           }
         }
+        // Key-match pre-flight: the platform silently discards input keys that
+        // match no field — a typo'd key is data loss with no signal. Near-miss
+        // keys (casing/spacing/underscores) are remapped in place; truly
+        // unknown keys are rejected with the field list.
+        let inputKeyNotes: string[] = [];
+        const fieldTypes = input ? await getModuleFieldTypes(moduleName, fetchSchema) : null;
+        if (input && fieldTypes) {
+          const keys = resolveInputKeys(fieldTypes, input);
+          if (keys.unknown.length > 0) {
+            const stateHint = keys.unknown.some((k) => /^(state|status)$/i.test(k))
+              ? " To set the workflow state, use the top-level `state` parameter (requires user confirmation), not an input field."
+              : "";
+            const structured = {
+              error: "unknown_input_fields",
+              message: `These input keys match no field on module '${moduleName}' and would be silently ignored: ${keys.unknown.join(", ")}. Fields: ${[...fieldTypes.keys()].join(", ")}.`,
+              activity,
+              unknown: keys.unknown,
+              agent_action: `Key \`input\` by the exact field names from get_form; drop values that match no field and note the omission, then resubmit.${stateHint}`,
+            };
+            log(
+              "submit_activity",
+              `module=${moduleName} activity=${activity} → BLOCKED: unknown_input_fields (${keys.unknown.join("|")})`,
+            );
+            return err({ structured });
+          }
+          inputKeyNotes = keys.remapped.map(
+            (r) => `Input key '${r.from}' matched field '${r.to}' — use exact field names.`,
+          );
+        }
         // Reference-shape pre-flight: User/Module fields must be { id, value }.
         if (input) {
-          const shapeErrors = await validateInputShapes(moduleName, input, fetchSchema);
+          const shapeErrors = validateInputShapesWith(fieldTypes, input);
           if (shapeErrors.length > 0) {
             const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
             const structured = {
@@ -764,6 +1012,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
           // The platform returns the bare flag — explain it so agents stop retrying.
           Object.assign(data as Record<string, unknown>, FLAGGED_ANNOTATION);
         }
+        if (inputKeyNotes.length > 0 && data && typeof data === "object") {
+          (data as Record<string, unknown>).input_key_notes = inputKeyNotes;
+        }
         log("submit_activity", `module=${moduleName} activity=${activity} entry=${target} → ${flagged ? "flagged" : "ok"}`);
         return ok(data);
       } catch (e) {
@@ -823,6 +1074,11 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
+        normalizeAiConfidence(ai);
+        for (const item of items) {
+          normalizeAiConfidence(item.ai);
+          if (typeof item.entryId === "string" && item.entryId.trim() === "") item.entryId = undefined;
+        }
 
         // Actor/confidence/flag governance — only on backends that declare it
         // (the hosted Platform). A local runtime skips the whole guard.
@@ -866,6 +1122,34 @@ Load resource inistate://schema before modifying to know valid field types, colo
               );
               return err({ structured });
             }
+          }
+        }
+        // …must not reach a state whose human-only transition was just
+        // blocked on the same entry (confirmed does not unlock those)…
+        if (itemsWithState.length > 0) {
+          const bypassed = items
+            .map((it, i) => ({ idx: i, entryId: it.entryId, state: it.state }))
+            .filter(
+              (x) =>
+                x.entryId !== undefined &&
+                !!x.state &&
+                getHumanBlockedStates(moduleName, x.entryId)?.states.has(x.state) === true,
+            );
+          if (bypassed.length > 0) {
+            const structured = {
+              error: "human_actor_bypass_blocked",
+              message:
+                "One or more items target a state whose transition was just blocked as a human-only activity. confirmed: true does not unlock human-only transitions.",
+              activity,
+              items: bypassed,
+              agent_action:
+                "Stop and do not work around this. A human must perform these transitions in Inistate — report them to the user.",
+            };
+            log(
+              "submit_activities",
+              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: human_actor_bypass_blocked (${bypassed.length} items)`,
+            );
+            return err({ structured });
           }
         }
         // …and requires explicit confirmation.
@@ -918,16 +1202,39 @@ Load resource inistate://schema before modifying to know valid field types, colo
         }
         } // end governance gate
 
-        // Reference-shape pre-flight: User/Module fields must be { id, value }
-        // (User adds `username`). Fetch the field-type map once for the whole
-        // batch — the per-item check is then synchronous.
+        // Key-match + reference-shape pre-flight. Fetch the field-type map once
+        // for the whole batch — the per-item checks are then synchronous.
+        // Unknown keys block the batch: the platform silently drops them,
+        // which is data loss with no signal. Near-miss keys are remapped.
         const fieldTypes = await getModuleFieldTypes(moduleName, fetchSchema);
+        const keyFailures: Array<{ idx: number; unknown: string[] }> = [];
+        const remapNotes = new Set<string>();
         const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           if (!it.input) continue;
+          const keys = resolveInputKeys(fieldTypes, it.input as Record<string, unknown>);
+          if (keys.unknown.length > 0) keyFailures.push({ idx: i, unknown: keys.unknown });
+          for (const r of keys.remapped) {
+            remapNotes.add(`Input key '${r.from}' matched field '${r.to}' — use exact field names.`);
+          }
           const errs = validateInputShapesWith(fieldTypes, it.input as Record<string, unknown>);
           if (errs.length > 0) shapeFailures.push({ idx: i, fields: errs });
+        }
+        if (keyFailures.length > 0) {
+          const structured = {
+            error: "unknown_input_fields",
+            message: `One or more items use input keys that match no field on module '${moduleName}' — the platform would silently ignore them. Fields: ${fieldTypes ? [...fieldTypes.keys()].join(", ") : "(unavailable)"}.`,
+            activity,
+            items: keyFailures,
+            agent_action:
+              "Key `input` by the exact field names from get_form, then resubmit. To set a workflow state, use the per-item `state` parameter (requires user confirmation), not an input field.",
+          };
+          log(
+            "submit_activities",
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: unknown_input_fields (${keyFailures.length} items)`,
+          );
+          return err({ structured });
         }
         if (shapeFailures.length > 0) {
           const structured = {
@@ -1007,6 +1314,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if ((summary?.flagged ?? 0) > 0 || results.some((r) => r.flagged === true)) {
           // The platform returns bare per-item flags — explain them so agents stop retrying.
           Object.assign(data, FLAGGED_ANNOTATION);
+        }
+        if (remapNotes.size > 0 && data && typeof data === "object") {
+          data.input_key_notes = [...remapNotes];
         }
         log(
           "submit_activities",
@@ -1251,6 +1561,17 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     },
     async ({ description, industry }) => {
       const result = designWorkflow(description, industry);
+      // Ground the connection hint in reality: name the workspace's actual
+      // modules so agents pick a real target instead of inventing one.
+      // Copy constraints — designWorkflow returns a shared const.
+      const modules = await getModuleNames();
+      if (modules && modules.display.length > 0) {
+        const constraints = (result as Record<string, any>).constraints ?? {};
+        (result as Record<string, any>).constraints = {
+          ...constraints,
+          reference_fields: `${constraints.reference_fields ?? ""} Modules in this workspace: ${modules.display.join(", ")}.`.trim(),
+        };
+      }
       return ok(result);
     },
   ));
@@ -1274,11 +1595,27 @@ Load resources inistate://schema and inistate://design-guide before designing fo
           .describe(
             "create = new module (all rules). update = merge (omitted sections acceptable).",
           ),
+        workspaceId: wsParam,
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ schema, mode }) => {
+    async ({ schema, mode, workspaceId }) => {
+      applyWorkspace(workspaceId);
       const result = validateDesign(schema as Record<string, any>, mode);
+      // create_module rejects connections naming a module that does not exist
+      // in the workspace — check here too so this dry-run keeps its
+      // no-surprises contract (fails open when the module list is unavailable).
+      const connErrors = await checkConnectionTargets(
+        (schema as Record<string, unknown>).information,
+        typeof (schema as Record<string, unknown>).name === "string"
+          ? ((schema as Record<string, unknown>).name as string)
+          : undefined,
+      );
+      if (connErrors.length > 0) {
+        result.errors.push(...connErrors);
+        result.valid = false;
+        result.summary = null;
+      }
       return ok(result);
     },
   ));
@@ -1322,14 +1659,18 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         // Validate post-normalization — the same rules validate_design applies,
         // so a failing design costs a structured error, not an API 422 (and the
         // agent no longer needs a separate validate_design round trip).
+        // Connection targets are checked against the live module list too, so
+        // a dangling reference fails here instead of as a platform 404.
         const validation = validateDesign(body as Record<string, any>, "create");
-        if (!validation.valid) {
-          log("create_module", `name=${name} → BLOCKED: validation_failed (${validation.errors.length} errors)`);
+        const connErrors = await checkConnectionTargets(body.information, name);
+        if (!validation.valid || connErrors.length > 0) {
+          const errors = [...validation.errors, ...connErrors];
+          log("create_module", `name=${name} → BLOCKED: validation_failed (${errors.length} errors)`);
           return err({
             structured: {
               error: "validation_failed",
               message: "The schema failed pre-flight validation (same rules as validate_design). Nothing was created.",
-              errors: validation.errors,
+              errors,
               warnings: validation.warnings,
               agent_action: "Fix the listed errors and call create_module again — no separate validate_design call is needed.",
             },
@@ -1354,7 +1695,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     {
       title: "Update Module",
       description:
-        "Update an existing module. Merges changes into the existing canvas; items matched by id enable renaming. Omitted sections are left unchanged. Always call get_module_canvas first to obtain the stable module id and item ids. Full-canvas payloads (information included) are validated internally like create_module; for partial payloads, validate the merged canvas with validate_design first.",
+        "Update an existing module. A section you pass (information/states/activities/flows) replaces that section's entire list — include every existing item you want to keep (matched by id, which enables renaming; omit id to add new items). Omitted sections are left unchanged. Always call get_module_canvas first to obtain the stable module id and item ids. Full-canvas payloads (information included) are validated internally like create_module; for partial payloads, validate the merged canvas with validate_design first.",
       inputSchema: {
         id: z
           .union([z.string(), z.number()])
@@ -1387,30 +1728,66 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         normalizeModuleSections(body);
+        const idRepairs = await stripUnknownSectionIds(String(id), body);
+        // Partial payloads skip validateDesign below, and flows are loose on
+        // the wire (see flowShape) — check row completeness here so an
+        // incomplete flow fails structured instead of as a platform 422.
+        if (!information && Array.isArray(body.flows)) {
+          const flowErrors = (body.flows as Array<Record<string, unknown>>)
+            .map((f, i) => flowCompletenessError(f, i))
+            .filter((e): e is string => e !== null);
+          if (flowErrors.length > 0) {
+            log("update_module", `id=${id} → BLOCKED: validation_failed (${flowErrors.length} errors)`);
+            return err({
+              structured: {
+                error: "validation_failed",
+                message: "The payload failed pre-flight validation. Nothing was updated.",
+                errors: flowErrors,
+                agent_action: "Fix the listed errors and call update_module again.",
+              },
+            });
+          }
+        }
         // Pre-flight only full-canvas payloads. Partial updates (no
         // `information`) can legitimately reference fields that live on the
         // server-side canvas, which the validator cannot see — let the
         // platform validate those.
         if (information) {
           const validation = validateDesign(body as Record<string, any>, "update");
-          if (!validation.valid) {
-            log("update_module", `id=${id} → BLOCKED: validation_failed (${validation.errors.length} errors)`);
+          const connErrors = await checkConnectionTargets(body.information, name);
+          if (!validation.valid || connErrors.length > 0) {
+            const errors = [...validation.errors, ...connErrors];
+            log("update_module", `id=${id} → BLOCKED: validation_failed (${errors.length} errors)`);
             return err({
               structured: {
                 error: "validation_failed",
                 message: "The schema failed pre-flight validation (same rules as validate_design). Nothing was updated.",
-                errors: validation.errors,
+                errors,
                 warnings: validation.warnings,
                 agent_action: "Fix the listed errors and call update_module again.",
               },
             });
           }
         }
-        log("update_module", `id=${id}${name ? ` newName=${name}` : ""}`);
+        log("update_module", `id=${id}${name ? ` newName=${name}` : ""}${idRepairs.length > 0 ? ` idRepairs=${idRepairs.length}` : ""}`);
         const data = await backend.updateModule(body);
         log("update_module", `id=${id} → ok`);
+        if (idRepairs.length > 0 && data && typeof data === "object" && !Array.isArray(data)) {
+          return ok({
+            ...(data as Record<string, unknown>),
+            hint: `Ids matching no existing element were removed; these items were created as new: ${idRepairs.join(", ")}. Use ids from get_module_canvas to update/rename existing items.`,
+          });
+        }
         return ok(data);
       } catch (e) {
+        // The platform's canvas-consistency failure ("Column references
+        // non-existent field …") almost always means the agent sent a partial
+        // section expecting per-item merge — name the actual fix.
+        const s = (e as { structured?: Record<string, unknown> }).structured;
+        if (s && typeof s.message === "string" && s.message.includes("Canvas consistency check failed")) {
+          s.agent_action =
+            "A passed section replaces that section's entire list, so omitted items are deleted — this payload was likely partial. Fetch get_module_canvas and resubmit the section with ALL items (existing + changed).";
+        }
         log("update_module", `id=${id} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);
       }

@@ -266,6 +266,68 @@ describe("validateDesign", () => {
     expect(result.errors.some((e) => e.includes("'Ghost'"))).toBe(true);
   });
 
+  it("resolves flows that reference state/activity ids to names", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { id: "s1", name: "Open", color: "#5A6070", initial: true },
+        { id: "s2", name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ id: "a1", name: "Close", actor: "human", fields: ["Title"] }],
+      flows: [{ from: "s1", to: "s2", activity: "a1" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.warnings.some((w) => w.includes("'s1'") && w.includes("'Open'"))).toBe(true);
+  });
+
+  it("never resolves an id when it collides with a declared name", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { id: "s1", name: "Open", color: "#5A6070", initial: true },
+        { name: "s1", color: "#1E6B45" },
+      ],
+      flows: [{ from: "Open", to: "s1", activity: "Close" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.every((w) => !w.includes("resolved"))).toBe(true);
+  });
+
+  it("resolves activity field refs that reference field ids", () => {
+    const schema = {
+      ...minimalWorkflow,
+      information: [{ id: "f1", name: "Title", type: "Text" }],
+      activities: [{ name: "Close", actor: "human", fields: ["f1"] }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("reads confidence_threshold above 1 as a percentage", () => {
+    const schema = {
+      ...minimalWorkflow,
+      activities: [
+        { name: "Close", actor: "ai", ai_hint: "close it", fields: ["Title"], confidence_threshold: 80 },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("normalized to 0.8"))).toBe(true);
+  });
+
+  it("rejects confidence_threshold above 100", () => {
+    const schema = {
+      ...minimalWorkflow,
+      activities: [{ name: "Close", actor: "human", confidence_threshold: 101 }],
+    };
+    const result = validateDesign(schema);
+    expect(result.errors.some((e) => e.includes("confidence_threshold"))).toBe(true);
+  });
+
   it("warns about unreachable states", () => {
     const schema = {
       ...minimalWorkflow,
@@ -562,6 +624,83 @@ describe("validateDesign — input normalization", () => {
     });
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("'Priority'") && e.includes("no options"))).toBe(true);
+  });
+
+  it("normalizes {value,label} option objects to strings with a warning", () => {
+    const schema = {
+      ...base,
+      information: [
+        {
+          name: "Priority",
+          type: "Selection",
+          options: [{ value: "low", label: "Low" }, { value: "High" }, "Medium"],
+        },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(schema.information[0].options).toEqual(["Low", "High", "Medium"]);
+    expect(result.warnings.some((w) => w.includes("'Priority'") && w.includes("normalized to plain strings"))).toBe(true);
+  });
+
+  it("aliases fromState/toState flow keys instead of erroring on 'undefined'", () => {
+    const schema = {
+      ...base,
+      information: [{ name: "Title", type: "Text" }],
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Close", actor: "human" }],
+      flows: [{ fromState: "Open", toState: "Closed", activity: "Close" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'fromState'/'toState'"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("undefined"))).toBe(false);
+  });
+
+  it("reports flows missing from/to/activity once, not as 'undefined' states", () => {
+    const schema = {
+      ...base,
+      information: [{ name: "Title", type: "Text" }],
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Close", actor: "human" }],
+      flows: [{ source: "Open", target: "Closed" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(false);
+    const missing = result.errors.filter((e) => e.includes("is missing"));
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain("'from', 'to', 'activity'");
+    expect(result.errors.some((e) => e.includes("'undefined'"))).toBe(false);
+  });
+
+  it("uses displayName/label as the name when name is missing", () => {
+    const schema = {
+      ...base,
+      information: [
+        { displayName: "Project Name", type: "Text" },
+        { label: "Notes", type: "MultiText" },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(schema.information[0]).toMatchObject({ name: "Project Name" });
+    expect(schema.information[1]).toMatchObject({ name: "Notes" });
+    expect(result.warnings.some((w) => w.includes("'displayName' is not a schema key"))).toBe(true);
+  });
+
+  it("warns that label is ignored when name is also present", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "projectName", label: "Project Name", type: "Text" }],
+    });
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'projectName'") && w.includes("'label' is ignored"))).toBe(true);
   });
 });
 

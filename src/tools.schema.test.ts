@@ -188,7 +188,7 @@ describe("configure tool schemas", () => {
 
   it("validate_design", () => {
     expect(shape(tools, "validate_design")).toEqual({
-      props: ["mode", "schema"],
+      props: ["mode", "schema", "workspaceId"],
       required: ["schema"],
     });
   });

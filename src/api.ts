@@ -82,6 +82,20 @@ function authHeader(): Record<string, string> {
   return buildHeaders();
 }
 
+/**
+ * A bare "Module 'X' not found" sends agents hunting across workspaces one
+ * set_workspace at a time (observed: 7 calls to locate a module created in
+ * the wrong workspace). Anchor the error to the active workspace and name
+ * the two possible fixes.
+ */
+export function annotateModuleNotFound(message: string): string {
+  if (!/^module '.+' not found\.?$/i.test(message.trim())) return message;
+  const wsid = effectiveWorkspaceId();
+  return wsid
+    ? `${message.trim().replace(/\.$/, "")} in the active workspace (id ${wsid}). Check list_modules for the exact name, or call set_workspace if the module lives in another workspace.`
+    : `${message.trim().replace(/\.$/, "")}. No active workspace is set — call set_workspace (or pass workspaceId) first.`;
+}
+
 function agentAction(status: number): string {
   switch (status) {
     case 400:
@@ -110,7 +124,7 @@ async function handleResponse(res: Response): Promise<unknown> {
     }
     const error = {
       error: body.error || `HTTP ${res.status}`,
-      message: body.message || text || res.statusText,
+      message: annotateModuleNotFound(String(body.message || text || res.statusText)),
       details: body.details || null,
       agent_action: agentAction(res.status),
     };
