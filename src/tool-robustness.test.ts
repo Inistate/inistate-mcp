@@ -283,6 +283,37 @@ describe("ai.confidence percent normalization", () => {
     });
     expect((lastSubmitPayload!.ai as Record<string, unknown>).confidence).toBe(0.7);
   });
+
+  // A weaker model dead-ended task_4 of the 2026-06-15 testbench by sending
+  // confidence as the string "0.95" six times in a row — coerce it instead of
+  // rejecting with -32602.
+  it("coerces a stringly-typed confidence on submit_activity", async () => {
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: { Title: "x" },
+        ai: { reasoning: "test", model: "test-model", confidence: "0.95" },
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    expect((lastSubmitPayload!.ai as Record<string, unknown>).confidence).toBe(0.95);
+  });
+
+  it("coerces a stringly-typed percent confidence (\"100\" → 1)", async () => {
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: { Title: "x" },
+        ai: { reasoning: "test", model: "test-model", confidence: "100" },
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    expect((lastSubmitPayload!.ai as Record<string, unknown>).confidence).toBe(1);
+  });
 });
 
 describe("list_entries empty-result hints", () => {
@@ -577,6 +608,87 @@ describe("design tools — connection targets and input repair", () => {
     const res = parse(result);
     expect(res.error).toBe("validation_failed");
     expect(res.errors.some((e: string) => e.includes("missing 'activity'"))).toBe(true);
+  });
+});
+
+// Two input-shape mismatches that the 2026-06-15 testbench showed weaker
+// models thrash on for many calls without recovering: scalar primitives sent
+// as strings, and arrays SOAP/XML-wrapped as { item: [...] }.
+describe("design tools — stringly-typed primitives and {item} wrapping", () => {
+  it("create_module coerces string 'initial' and string confidence_threshold", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Stringy",
+        information: [{ name: "T", type: "Text" }],
+        states: [
+          { name: "A", color: "#5A6070", initial: "true" },
+          { name: "B", color: "#1E6B45" },
+        ],
+        activities: [{ name: "Go", actor: "human", confidence_threshold: "0.85" }],
+        flows: [{ from: "A", to: "B", activity: "Go" }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const states = lastCreatePayload!.states as Array<Record<string, unknown>>;
+    expect(states[0].initial).toBe(true);
+    const acts = lastCreatePayload!.activities as Array<Record<string, unknown>>;
+    expect(acts[0].confidence_threshold).toBe(0.85);
+  });
+
+  it("create_module unwraps {item:[…]} sections and nested options", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Wrapped",
+        information: {
+          item: [
+            { name: "T", type: "Text" },
+            { name: "Priority", type: "Selection", options: { item: ["Low", "High"] } },
+          ],
+        },
+        states: {
+          item: [
+            { name: "A", color: "#5A6070", initial: true },
+            { name: "B", color: "#1E6B45" },
+          ],
+        },
+        activities: { item: [{ name: "Go", actor: "human" }] },
+        flows: { item: [{ from: "A", to: "B", activity: "Go" }] },
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const info = lastCreatePayload!.information as Array<Record<string, unknown>>;
+    expect(info).toHaveLength(2);
+    expect(info[1].options).toEqual(["Low", "High"]);
+    expect((lastCreatePayload!.states as unknown[])).toHaveLength(2);
+    expect((lastCreatePayload!.flows as unknown[])).toHaveLength(1);
+  });
+
+  it("validate_design unwraps {item:[…]} instead of crashing on 'information is not iterable'", async () => {
+    const result = await client.callTool({
+      name: "validate_design",
+      arguments: {
+        schema: {
+          name: "Wrapped",
+          information: { item: [{ name: "T", type: "Text" }] },
+          states: {
+            item: [
+              { name: "A", color: "#5A6070", initial: true },
+              { name: "B", color: "#1E6B45" },
+            ],
+          },
+          activities: { item: [{ name: "Go", actor: "human" }] },
+          flows: { item: [{ from: "A", to: "B", activity: "Go" }] },
+        },
+        mode: "create",
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const res = parse(result);
+    expect(res.valid).toBe(true);
+    expect(res.summary.field_count).toBe(1);
+    expect(res.summary.state_count).toBe(2);
   });
 });
 

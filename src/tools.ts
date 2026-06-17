@@ -21,12 +21,15 @@ import {
   type SchemaFetcher,
 } from "./activity-guard.js";
 import {
+  coerceBoolish,
+  coerceNumish,
   designWorkflow,
   flowCompletenessError,
   normalizeFieldType,
   normalizeOptionList,
   normalizeStateColor,
   resolveDesignRefs,
+  unwrapItems,
   validateDesign,
 } from "./schema.js";
 
@@ -113,6 +116,12 @@ const gatedDesc = (available: boolean, full: string, hint = ""): string =>
 // `state` flow keys. zodToJsonSchema serializes the inner object, so the
 // published tool schema is unchanged — the repairs are runtime-only.
 
+// Unwrap {item:[…]} array marshalling before the inner array check.
+// zodToJsonSchema serializes the inner type, so the published tool schema is
+// unchanged — this is runtime-only. (Item-level scalar coercion happens inside
+// repairItem; ai.confidence inside repairAi.)
+const arrayish = (inner: z.ZodTypeAny) => z.preprocess(unwrapItems, inner);
+
 const repairItem = (raw: unknown): unknown => {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const it: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
@@ -123,6 +132,14 @@ const repairItem = (raw: unknown): unknown => {
   delete it.displayName;
   delete it.label;
   if (it.actor === "user") it.actor = "human";
+  // Booleans/numbers/option lists arrive stringly-typed or {item:[…]}-wrapped
+  // from agents that serialize through stringy/XML-ish intermediates.
+  for (const k of ["initial", "required", "readOnly"]) {
+    if (it[k] !== undefined) it[k] = coerceBoolish(it[k]);
+  }
+  if (it.confidence_threshold !== undefined) it.confidence_threshold = coerceNumish(it.confidence_threshold);
+  if (it.options !== undefined) it.options = unwrapItems(it.options);
+  if (it.fields !== undefined) it.fields = unwrapItems(it.fields);
   if (Array.isArray(it.options)) it.options = normalizeOptionList(it.options).options;
   return it;
 };
@@ -193,10 +210,10 @@ const flowShape = z.preprocess(repairFlow, z.object({
 const moduleSectionsShape = {
   icon: z.string().optional().describe("Emoji identifier"),
   description: z.string().optional(),
-  information: z.array(fieldShape).optional().describe("Field definitions. Items matched by id on update enable renaming."),
-  states: z.array(stateShape).optional().describe("Workflow states. Omit for record list modules."),
-  activities: z.array(activityShape).optional().describe("Custom activities. Omit for record list modules."),
-  flows: z.array(flowShape).optional().describe("State transition rules: { from, to, activity } by name. Omit for record list modules."),
+  information: arrayish(z.array(fieldShape)).optional().describe("Field definitions. Items matched by id on update enable renaming."),
+  states: arrayish(z.array(stateShape)).optional().describe("Workflow states. Omit for record list modules."),
+  activities: arrayish(z.array(activityShape)).optional().describe("Custom activities. Omit for record list modules."),
+  flows: arrayish(z.array(flowShape)).optional().describe("State transition rules: { from, to, activity } by name. Omit for record list modules."),
 };
 
 /**
@@ -376,28 +393,38 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     .array(z.object({ type: z.string().optional(), reference: z.string().optional(), excerpt: z.string().optional() }))
     .optional();
 
-  const submitAiShape = z.object({
+  // Coerce a stringly-typed confidence ("0.95") before the number check, in
+  // place — the single mismatch that most often dead-ends a weaker model's
+  // submit_activity retry loop. Object-level so the field stays strictly typed.
+  const repairAi = (raw: unknown): unknown => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const ai = { ...(raw as Record<string, unknown>) };
+    if (ai.confidence !== undefined) ai.confidence = coerceNumish(ai.confidence);
+    return ai;
+  };
+
+  const submitAiShape = z.preprocess(repairAi, z.object({
     reasoning: z.string().describe("Why the AI chose this action — recorded for audit. Keep short and precise; one or two sentences."),
     model: z.string().describe("e.g. claude-haiku-4-5, claude-opus-4-7"),
     confidence: z.number().min(0).max(100).describe("0-1; values above 1 are read as percent (100 → 1). Gated against the activity's confidence_threshold"),
     sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
-  });
+  }));
   const submitAiParam = gov
     ? submitAiShape.describe("REQUIRED — AI agent traceability")
     : submitAiShape.optional().describe("Optional on the local runtime — no confidence/actor gating is applied.");
 
   // Field semantics are documented once, on submit_activity's ai param — the
   // bulk variants only restate the shape.
-  const bulkAiShape = z.object({
+  const bulkAiShape = z.preprocess(repairAi, z.object({
     reasoning: z.string(),
     model: z.string(),
     confidence: z.number().min(0).max(100),
     sources: aiSourcesShape,
     model_version: z.string().optional(),
     prompt_hash: z.string().optional(),
-  });
+  }));
 
   /** Agents send confidence as 0-1 or as percent (e.g. 100) — normalize to 0-1 in place. */
   const normalizeAiConfidence = <T extends { confidence: number } | undefined>(ai: T): T => {

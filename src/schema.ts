@@ -217,6 +217,49 @@ export function normalizeOptionList(options: unknown): { options: unknown; chang
 
 const asArray = (v: unknown): any[] => (Array.isArray(v) ? v : []);
 
+// ---------- Primitive coercion ----------
+//
+// Smaller / non-Anthropic models routinely emit JSON primitives as strings
+// ("true", "0.85") because they serialize through stringly-typed intermediates.
+// A strict Zod schema rejects these with a hard -32602 the model often cannot
+// recover from (it mutates the value, not the type). Coerce the obvious cases
+// on the way in; genuinely wrong values still fall through to the type check.
+
+/** "true"/"false" (case-insensitive) → boolean. Other values pass through. */
+export function coerceBoolish(v: unknown): unknown {
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true") return true;
+    if (s === "false") return false;
+  }
+  return v;
+}
+
+/** Numeric string ("0.85", "100") → number. Non-numeric strings pass through
+ * so z.number() still reports them. */
+export function coerceNumish(v: unknown): unknown {
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return v;
+}
+
+/** Unwrap XML/SOAP-style array marshalling — { item: [...] } or { items: [...] }
+ * (and a single { item: {...} }) — to the bare array. Agents that serialize
+ * lists through an XML-ish intermediate emit this for every section and nested
+ * list (options, sub-fields, from_states). Non-wrapped values pass through. */
+export function unwrapItems(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const keys = Object.keys(v as Record<string, unknown>);
+    if (keys.length === 1 && (keys[0] === "item" || keys[0] === "items")) {
+      const inner = (v as Record<string, unknown>)[keys[0]];
+      return Array.isArray(inner) ? inner : [inner];
+    }
+  }
+  return v;
+}
+
 /**
  * Fold common agent near-misses into canonical shape, in place, before
  * validation: `displayName`/`label` used instead of `name`, `{value,label}`
@@ -228,6 +271,24 @@ const asArray = (v: unknown): any[] => (Array.isArray(v) ? v : []);
  */
 export function repairDesignInput(schema: Record<string, any>): string[] {
   const warnings: string[] = [];
+
+  // Unwrap {item:[…]} array marshalling on every section first, in place, so
+  // the checks below (and validateDesign's own `for…of`) see plain arrays
+  // instead of throwing "information is not iterable".
+  for (const key of ["information", "states", "activities", "flows"] as const) {
+    const unwrapped = unwrapItems(schema[key]);
+    if (unwrapped !== schema[key]) {
+      schema[key] = unwrapped;
+      warnings.push(`'${key}' was wrapped as {item:[…]} — unwrapped to a plain array.`);
+    }
+  }
+
+  const fixItemArrays = (it: any) => {
+    if (!it || typeof it !== "object") return;
+    for (const key of ["options", "fields", "from_states", "from", "to_states"]) {
+      if (it[key] !== undefined) it[key] = unwrapItems(it[key]);
+    }
+  };
 
   const fixName = (it: any, kind: string) => {
     if (!it || typeof it !== "object") return;
@@ -256,15 +317,18 @@ export function repairDesignInput(schema: Record<string, any>): string[] {
   };
 
   for (const f of asArray(schema.information)) {
+    fixItemArrays(f);
     fixName(f, "Field");
     fixOptions(f, "Field");
     for (const sf of asArray(f?.fields)) {
+      fixItemArrays(sf);
       fixName(sf, "Sub-field");
       fixOptions(sf, "Sub-field");
     }
   }
   for (const s of asArray(schema.states)) fixName(s, "State");
   for (const a of asArray(schema.activities)) {
+    fixItemArrays(a);
     fixName(a, "Activity");
     for (const ref of asArray(a?.fields)) {
       if (ref && typeof ref === "object") fixOptions(ref, `Activity '${a?.name}' field`);
