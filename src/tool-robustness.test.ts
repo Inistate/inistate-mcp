@@ -543,6 +543,25 @@ describe("design tools — connection targets and input repair", () => {
     expect(flows[0]).toMatchObject({ from: "A", to: "B", activity: "Go" });
   });
 
+  it("create_module reads a flow's plural 'activities' as 'activity'", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Plural",
+        information: [{ name: "T", type: "Text" }],
+        states: [
+          { name: "A", color: "#5A6070", initial: true },
+          { name: "B", color: "#1E6B45" },
+        ],
+        activities: [{ name: "Go", actor: "human" }],
+        flows: [{ name: "Resolve", from: "A", to: "B", activities: ["Go"] }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const flows = lastCreatePayload!.flows as Array<Record<string, unknown>>;
+    expect(flows[0]).toMatchObject({ from: "A", to: "B", activity: "Go" });
+  });
+
   it("update_module explains section-replacement on a canvas consistency failure", async () => {
     const result = await client.callTool({
       name: "update_module",
@@ -554,8 +573,15 @@ describe("design tools — connection targets and input repair", () => {
     });
     expect(result.isError).toBe(true);
     const res = parse(result);
-    expect(res.agent_action).toContain("get_module_canvas");
     expect(res.agent_action).toContain("replaces");
+    // Recovery is one round trip: the live canvas (with stable ids) rides along
+    // for only the section the payload tried to replace.
+    expect(res.current_canvas.information).toEqual([
+      { id: "FLD_TITLE", name: "Title", type: "Text" },
+      { id: "FLD_DUE", name: "Due Date", type: "Date" },
+      { id: "FLD_OWNER", name: "Owner", type: "User", connection: "Users" },
+    ]);
+    expect(res.current_canvas.states).toBeUndefined(); // not sent → not echoed
   });
 
   it("create_module repairs actor 'user' and a flow 'state' target", async () => {

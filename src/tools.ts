@@ -154,6 +154,13 @@ const repairFlow = (raw: unknown): unknown => {
   if (f.to === undefined && typeof f.toState === "string") f.to = f.toState;
   // Agents pattern-match a flow's target on the activity's "state" key.
   if (f.to === undefined && typeof f.state === "string") f.to = f.state;
+  // A flow names exactly one activity; agents sometimes mirror the activities
+  // section and send the plural array (or a {item:[…]} wrapper) instead.
+  if (f.activity === undefined && f.activities !== undefined) {
+    const picked = unwrapItems(f.activities);
+    const name = Array.isArray(picked) ? picked[0] : picked;
+    if (typeof name === "string") f.activity = name;
+  }
   return f;
 };
 
@@ -1816,7 +1823,19 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         const s = (e as { structured?: Record<string, unknown> }).structured;
         if (s && typeof s.message === "string" && s.message.includes("Canvas consistency check failed")) {
           s.agent_action =
-            "A passed section replaces that section's entire list, so omitted items are deleted — this payload was likely partial. Fetch get_module_canvas and resubmit the section with ALL items (existing + changed).";
+            "A passed section replaces that section's entire list, so omitted items are deleted — this payload was likely partial. Merge your changes (matched by id) into current_canvas below, keeping every item you are not deleting, and resubmit. No separate get_module_canvas call is needed.";
+          // Embed the live canvas so recovery is one round trip instead of two.
+          // Only the sections this payload tried to replace (those are the ones
+          // that got truncated); fetchCanvas fails open to null.
+          const canvas = (await fetchCanvas(String(id))) as Record<string, unknown> | null;
+          if (canvas) {
+            const sent: Record<string, unknown> = { information, states, activities, flows };
+            const current: Record<string, unknown> = {};
+            for (const k of ["information", "states", "activities", "flows"] as const) {
+              if (sent[k] !== undefined && Array.isArray(canvas[k])) current[k] = canvas[k];
+            }
+            if (Object.keys(current).length > 0) s.current_canvas = current;
+          }
         }
         log("update_module", `id=${id} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
         return err(e);

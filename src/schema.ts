@@ -389,6 +389,15 @@ export function repairDesignInput(schema: Record<string, any>): string[] {
     }
     delete fl.fromState;
     delete fl.toState;
+    if (fl.activity === undefined && fl.activities !== undefined) {
+      const picked = unwrapItems(fl.activities);
+      const name = Array.isArray(picked) ? picked[0] : picked;
+      if (typeof name === "string") {
+        fl.activity = name;
+        warnings.push(`Flow '${fl.from} → ${fl.to}': a flow takes a single 'activity', not 'activities' — used '${name}'.`);
+      }
+      delete fl.activities;
+    }
   }
   return warnings;
 }
@@ -984,6 +993,67 @@ export function parseStatesFromDescription(desc: string): string[] {
   return states.length >= 2 ? states : [];
 }
 
+// Types that need a companion attribute to validate (options for Selection/Tag,
+// connection for references, sub-fields for Table, an expression for Formula).
+// A scaffold can't supply those, and a reference/Selection field without them is
+// a hard validate_design error — so a parsed hint matching one collapses to Text.
+// The field name is the win; the agent upgrades the type when it fills the form.
+const UNSAFE_SCAFFOLD_TYPES = new Set([
+  "selection", "tag", "user", "users", "module", "modules", "table", "formula",
+]);
+
+/** Map a free-text "(type)" hint to a validate-clean field type, defaulting to
+ * Text for unknown or attribute-requiring types. */
+function hintToScaffoldType(hint?: string): string {
+  if (!hint) return "Text";
+  const norm = normalizeFieldType(hint).type;
+  if (!norm) return "Text";
+  const base = norm.toLowerCase();
+  if (!CANONICAL_TYPES.has(base) || UNSAFE_SCAFFOLD_TYPES.has(base)) return "Text";
+  return norm;
+}
+
+/**
+ * Pull an explicitly enumerated field list out of a description, e.g.
+ * "fields: project name (text), client (text), budget (currency/number)" or
+ * "fields like Title, Owner, Due Date". Each item's optional "(...)" hint is
+ * read as a type (leading token, so "currency/number" → Currency, and a "text -
+ * the company name" description keeps just "text"); unrecognized or
+ * attribute-requiring hints default to Text via hintToScaffoldType. Returns []
+ * when no clear enumeration is found — callers fall back to the generic
+ * recommended_fields, since a wrong scaffold costs more than an empty one.
+ */
+export function parseFieldsFromDescription(
+  desc: string,
+): Array<{ name: string; type: string }> {
+  const m =
+    /\bfields?\b(?:[^:.\n]{0,20}:|\s+(?:like|are|including|includes?|such as))\s*([^.;\n]+)/i.exec(
+      desc,
+    );
+  if (!m) return [];
+  const out: Array<{ name: string; type: string }> = [];
+  for (const raw of m[1].split(/,|\band\b/i)) {
+    let seg = raw.trim();
+    if (!seg) continue;
+    let hint: string | undefined;
+    const pm = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(seg);
+    if (pm) {
+      seg = pm[1].trim();
+      hint = pm[2].trim().split(/[\s/,-]+/)[0]; // first token of the parenthetical
+    }
+    const name = seg.replace(/["']/g, "").trim();
+    if (!name || name.length > 40) continue;
+    if (name.split(/\s+/).length > 5) continue; // a field name, not a clause
+    if (/^(etc|e\.?g|i\.?e|so on)$/i.test(name)) continue;
+    const titled = name.replace(/\b\w/g, (c) => c.toUpperCase());
+    if (!out.some((f) => f.name.toLowerCase() === titled.toLowerCase())) {
+      out.push({ name: titled, type: hintToScaffoldType(hint) });
+    }
+    if (out.length === 12) break;
+  }
+  return out.length >= 2 ? out : [];
+}
+
 /** Map free-text industry to a known key; unknown text falls back to general. */
 export function normalizeIndustry(industry?: string | null): string {
   if (!industry) return "general";
@@ -1015,6 +1085,10 @@ export function designWorkflow(
   const resolvedIndustry = normalizeIndustry(industry);
   const indDefaults = INDUSTRY_DEFAULTS[resolvedIndustry];
   const parsedStates = parseStatesFromDescription(description);
+  const parsedFields = parseFieldsFromDescription(description);
+  // Field names lifted from the description, ready to drop into the template.
+  // Empty array → callers keep the single-Title placeholder.
+  const parsedInformation = parsedFields.map((f) => ({ ...f, ai_hint: "" }));
 
   // An explicit state list always means a workflow module.
   let pattern = detectPattern(description);
@@ -1029,13 +1103,15 @@ export function designWorkflow(
         icon: "",
         description: "",
 
-        information: [
-          { name: "Name", type: "Text", ai_hint: "" },
-        ],
+        information:
+          parsedInformation.length > 0
+            ? parsedInformation
+            : [{ name: "Name", type: "Text", ai_hint: "" }],
       },
       suggestions: {
         detected_pattern: "record_list",
         recommended_fields: ["Name", "Code", "Description", "Active"],
+        ...(parsedFields.length > 0 ? { fields_source: "parsed_from_description" } : {}),
         industry: resolvedIndustry,
         industry_defaults: indDefaults,
       },
@@ -1139,9 +1215,10 @@ export function designWorkflow(
       icon: "",
       description: "",
       published: true,
-      information: [
-        { name: "Title", type: "Text", ai_hint: "" },
-      ],
+      information:
+        parsedInformation.length > 0
+          ? parsedInformation
+          : [{ name: "Title", type: "Text", ai_hint: "" }],
       states,
       activities: useParsed ? [] : baseActivities[pattern],
       flows: useParsed ? [] : baseFlows[pattern],
@@ -1151,6 +1228,7 @@ export function designWorkflow(
       recommended_fields: recommendedFields[pattern],
       recommended_states: states.map((s) => s.name),
       ...(useParsed ? { states_source: "parsed_from_description" } : {}),
+      ...(parsedFields.length > 0 ? { fields_source: "parsed_from_description" } : {}),
       industry: resolvedIndustry,
       industry_defaults: {
         confidence_threshold: indDefaults.confidence_threshold,

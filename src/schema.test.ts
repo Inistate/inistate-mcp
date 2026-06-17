@@ -10,6 +10,7 @@ import {
   normalizeStateColor,
   normalizeIndustry,
   parseStatesFromDescription,
+  parseFieldsFromDescription,
   VALID_FIELD_TYPES,
   VALID_COLORS,
   VALID_ACTOR_TYPES,
@@ -601,6 +602,44 @@ describe("parseStatesFromDescription", () => {
   });
 });
 
+describe("parseFieldsFromDescription", () => {
+  it("parses a typed field enumeration, defaulting unsafe types to Text", () => {
+    const fields = parseFieldsFromDescription(
+      "Track client projects with the following fields: project name (text), client (text - the client company name), status (workflow state), start date (date), deadline (date), owner (user responsible for the project), and budget (currency/number).",
+    );
+    expect(fields).toEqual([
+      { name: "Project Name", type: "Text" },
+      { name: "Client", type: "Text" },
+      { name: "Status", type: "Text" }, // "workflow" is not a type → Text
+      { name: "Start Date", type: "Date" },
+      { name: "Deadline", type: "Date" },
+      { name: "Owner", type: "Text" }, // User needs a connection → collapsed to Text
+      { name: "Budget", type: "Currency" }, // "currency/number" → leading token
+    ]);
+  });
+
+  it("parses an untyped 'fields like …' list as Text", () => {
+    const fields = parseFieldsFromDescription("a tracker with fields like Title, Owner, Due Date");
+    expect(fields).toEqual([
+      { name: "Title", type: "Text" },
+      { name: "Owner", type: "Text" },
+      { name: "Due Date", type: "Text" },
+    ]);
+  });
+
+  it("never emits a reference or option-requiring type a scaffold can't satisfy", () => {
+    const fields = parseFieldsFromDescription(
+      "fields: priority (selection), assignee (user), parent (module), amount (currency)",
+    );
+    expect(fields.map((f) => f.type)).toEqual(["Text", "Text", "Text", "Currency"]);
+  });
+
+  it("returns [] when no field enumeration is present", () => {
+    expect(parseFieldsFromDescription("an approval process for purchase requests")).toEqual([]);
+    expect(parseFieldsFromDescription("a single field: just a name")).toEqual([]); // needs ≥2
+  });
+});
+
 describe("validateDesign — input normalization", () => {
   const base = { name: "Projects" };
 
@@ -657,6 +696,23 @@ describe("validateDesign — input normalization", () => {
     const result = validateDesign(schema);
     expect(result.valid).toBe(true);
     expect(result.warnings.some((w) => w.includes("'fromState'/'toState'"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("undefined"))).toBe(false);
+  });
+
+  it("reads a flow's plural 'activities' as 'activity' instead of erroring on 'undefined'", () => {
+    const schema = {
+      ...base,
+      information: [{ name: "Title", type: "Text" }],
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Close", actor: "human" }],
+      flows: [{ name: "Resolve", from: "Open", to: "Closed", activities: ["Close"] }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("a flow takes a single 'activity'"))).toBe(true);
     expect(result.errors.some((e) => e.includes("undefined"))).toBe(false);
   });
 
@@ -753,6 +809,28 @@ describe("designWorkflow", () => {
   it("returns a next_step instruction", () => {
     const result = designWorkflow("approval workflow");
     expect(result.next_step).toBeTruthy();
+  });
+
+  it("lifts enumerated fields from the description into the template", () => {
+    const result = designWorkflow(
+      "Track client projects. Lifecycle: Draft, Active, Completed. Fields: project name (text), client (text), deadline (date), budget (currency).",
+    );
+    expect(result.template.information).toEqual([
+      { name: "Project Name", type: "Text", ai_hint: "" },
+      { name: "Client", type: "Text", ai_hint: "" },
+      { name: "Deadline", type: "Date", ai_hint: "" },
+      { name: "Budget", type: "Currency", ai_hint: "" },
+    ]);
+    expect(result.suggestions.fields_source).toBe("parsed_from_description");
+    // The parsed fields carry no reference/option landmines: once the agent
+    // supplies the (intentionally blank) module name, the scaffold validates.
+    expect(validateDesign({ ...result.template, name: "Client Projects" }).valid).toBe(true);
+  });
+
+  it("keeps the single-Title placeholder when no fields are enumerated", () => {
+    const result = designWorkflow("an approval process for purchase requests");
+    expect(result.template.information).toEqual([{ name: "Title", type: "Text", ai_hint: "" }]);
+    expect(result.suggestions.fields_source).toBeUndefined();
   });
 
   it("templates have consistent structure", () => {
