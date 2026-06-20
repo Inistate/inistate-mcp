@@ -121,9 +121,17 @@ const gatedDesc = (available: boolean, full: string, hint = ""): string =>
 // zodToJsonSchema serializes the inner type, so the published tool schema is
 // unchanged — this is runtime-only. (Item-level scalar coercion happens inside
 // repairItem; ai.confidence inside repairAi.)
-const arrayish = (inner: z.ZodTypeAny) => z.preprocess(unwrapItems, inner);
+const arrayish = (inner: z.ZodTypeAny) => z.preprocess(v => {
+  const a = unwrapItems(v);
+  if (!Array.isArray(a)) return a;
+  // ponytail: coerce bare strings to {name} (model sent ["Title"]), drop empties/non-objects
+  return a
+    .map(x => (typeof x === "string" ? (x.trim() ? { name: x.trim() } : null) : x))
+    .filter(x => x != null && typeof x === "object" && !Array.isArray(x));
+}, inner);
 
 const repairItem = (raw: unknown): unknown => {
+  if (typeof raw === "string") return raw.trim() ? { name: raw.trim() } : null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const it: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
   if (typeof it.name !== "string" || it.name === "") {
@@ -860,8 +868,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
         entryIds: z.array(z.union([z.string(), z.number()])).optional().describe("For bulk ops"),
         input: z
-          .record(z.unknown())
-          .optional()
+          .preprocess(v => (v != null && typeof v === "object" && !Array.isArray(v) ? v : undefined), z.record(z.unknown()).optional())
           .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
@@ -1074,7 +1081,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
         module: z.string(),
         activity: z.string().default("create"),
         ai: bulkAiParam,
-        items: z
+        items: z.preprocess(
+          v => { const a = unwrapItems(v); return Array.isArray(a) ? a.filter(x => x != null && typeof x === "object" && !Array.isArray(x)) : a; },
+          z
           .array(
             z.object({
               entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
@@ -1097,7 +1106,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           )
           .min(1)
           .max(100)
-          .describe("1-100 items. Each item carries only what differs from the top-level activity."),
+          .describe("1-100 items. Each item carries only what differs from the top-level activity.")),
         confirmed: z
           .boolean()
           .optional()
@@ -1693,6 +1702,16 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
         normalizeModuleSections(body);
+        if (!Array.isArray(body.information) || (body.information as unknown[]).length === 0) {
+          return err({
+            structured: {
+              error: "validation_failed",
+              message: "No fields were provided. 'information' must be a non-empty array of field objects, e.g. [{ name: \"Title\", type: \"Text\" }]. Bare strings like [\"\"] or [\"Title\"] are not valid — each item must be an object with at least 'name' and 'type'.",
+              errors: ["information must contain at least one field object with 'name' and 'type'"],
+              agent_action: "Call design_workflow first to generate a valid schema, then pass its 'information' array to create_module.",
+            },
+          });
+        }
         // Validate post-normalization — the same rules validate_design applies,
         // so a failing design costs a structured error, not an API 422 (and the
         // agent no longer needs a separate validate_design round trip).

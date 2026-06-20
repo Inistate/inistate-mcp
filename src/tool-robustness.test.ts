@@ -730,6 +730,34 @@ describe("design tools — stringly-typed primitives and {item} wrapping", () =>
     expect(acts[0].fields).toBeUndefined();
   });
 
+  it("create_module filters empty-string items from information/states/activities instead of -32602", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "String Items",
+        information: [""],
+        states: [""],
+        activities: [""],
+        flows: [""],
+      },
+    });
+    // Empty strings filtered to [] — reaches the backend cleanly instead of crashing with Zod -32602
+    const res = parse(result);
+    expect(res).not.toHaveProperty("code"); // no raw Zod error code
+  });
+
+  it("create_module coerces bare string items in information to {name} (structured error, not -32602)", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: { name: "String Coerce", information: ["Title", "Status"] },
+    });
+    // Strings are coerced to {name} — pre-flight catches missing type as a structured error, not a Zod -32602 crash
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("validation_failed");
+    expect(res.errors.some((e: string) => e.includes("missing a 'type'"))).toBe(true);
+  });
+
   it("validate_design unwraps {item:[…]} instead of crashing on 'information is not iterable'", async () => {
     const result = await client.callTool({
       name: "validate_design",
@@ -847,5 +875,20 @@ describe("reference id sanity", () => {
       },
     });
     expect(result.isError).toBeFalsy();
+  });
+
+  it("submit_activity coerces array/null input to undefined instead of -32602", async () => {
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: ["Title", "x"] as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    // array input must not throw a Zod -32602; call proceeds (input treated as absent)
+    const res = parse(result);
+    expect(res).not.toHaveProperty("code");
   });
 });
