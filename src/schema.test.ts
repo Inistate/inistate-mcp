@@ -6,6 +6,10 @@ import {
   suggestColorForState,
   validateDesign,
   designWorkflow,
+  normalizeFieldType,
+  normalizeStateColor,
+  normalizeIndustry,
+  parseStatesFromDescription,
   VALID_FIELD_TYPES,
   VALID_COLORS,
   VALID_ACTOR_TYPES,
@@ -201,7 +205,7 @@ describe("validateDesign", () => {
     expect(result.errors.some((e) => e.includes("Duplicate state name"))).toBe(true);
   });
 
-  it("catches invalid state colors", () => {
+  it("normalizes off-palette state colors with a warning instead of erroring", () => {
     const schema = {
       ...minimalWorkflow,
       states: [
@@ -210,7 +214,8 @@ describe("validateDesign", () => {
       ],
     };
     const result = validateDesign(schema);
-    expect(result.errors.some((e) => e.includes("invalid color"))).toBe(true);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'Open'") && w.includes("normalized to '#C0392B'"))).toBe(true);
   });
 
   it("catches duplicate activity names", () => {
@@ -259,6 +264,68 @@ describe("validateDesign", () => {
     };
     const result = validateDesign(schema);
     expect(result.errors.some((e) => e.includes("'Ghost'"))).toBe(true);
+  });
+
+  it("resolves flows that reference state/activity ids to names", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { id: "s1", name: "Open", color: "#5A6070", initial: true },
+        { id: "s2", name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [{ id: "a1", name: "Close", actor: "human", fields: ["Title"] }],
+      flows: [{ from: "s1", to: "s2", activity: "a1" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.warnings.some((w) => w.includes("'s1'") && w.includes("'Open'"))).toBe(true);
+  });
+
+  it("never resolves an id when it collides with a declared name", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { id: "s1", name: "Open", color: "#5A6070", initial: true },
+        { name: "s1", color: "#1E6B45" },
+      ],
+      flows: [{ from: "Open", to: "s1", activity: "Close" }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.every((w) => !w.includes("resolved"))).toBe(true);
+  });
+
+  it("resolves activity field refs that reference field ids", () => {
+    const schema = {
+      ...minimalWorkflow,
+      information: [{ id: "f1", name: "Title", type: "Text" }],
+      activities: [{ name: "Close", actor: "human", fields: ["f1"] }],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("reads confidence_threshold above 1 as a percentage", () => {
+    const schema = {
+      ...minimalWorkflow,
+      activities: [
+        { name: "Close", actor: "ai", ai_hint: "close it", fields: ["Title"], confidence_threshold: 80 },
+      ],
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("normalized to 0.8"))).toBe(true);
+  });
+
+  it("rejects confidence_threshold above 100", () => {
+    const schema = {
+      ...minimalWorkflow,
+      activities: [{ name: "Close", actor: "human", confidence_threshold: 101 }],
+    };
+    const result = validateDesign(schema);
+    expect(result.errors.some((e) => e.includes("confidence_threshold"))).toBe(true);
   });
 
   it("warns about unreachable states", () => {
@@ -319,6 +386,244 @@ describe("validateDesign", () => {
     const result = validateDesign(schema);
     expect(result.valid).toBe(true);
     expect(result.summary).toMatchObject({ module_type: "record_list", field_count: 2 });
+  });
+});
+
+// ──────────────────────────────────────────────
+// validateDesign — platform parity
+// (mirrors FETIAS InistateSchema.Validator so validate→create cannot 422)
+// ──────────────────────────────────────────────
+
+describe("validateDesign — platform parity", () => {
+  const base = { name: "Projects" };
+
+  it("requires connection on User fields", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Owner", type: "User" }],
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("'Owner'") && e.includes("missing 'connection'"))).toBe(true);
+  });
+
+  it("requires connection on Modules fields", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Linked", type: "Modules" }],
+    });
+    expect(result.errors.some((e) => e.includes("missing 'connection'"))).toBe(true);
+  });
+
+  it("accepts reference fields that carry connection", () => {
+    const result = validateDesign({
+      ...base,
+      information: [
+        { name: "Owner", type: "User", connection: "Members" },
+        { name: "Client", type: "Module", connection: "Clients" },
+      ],
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects connection on non-reference types", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Title", type: "Text", connection: "Clients" }],
+    });
+    expect(result.errors.some((e) => e.includes("not a reference type"))).toBe(true);
+  });
+
+  it("requires a type on every field", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Untyped" }],
+    });
+    expect(result.errors.some((e) => e.includes("'Untyped'") && e.includes("missing a 'type'"))).toBe(true);
+  });
+
+  it("requires a name on every field", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ type: "Text" }],
+    });
+    expect(result.errors.some((e) => e.includes("index 0") && e.includes("missing a 'name'"))).toBe(true);
+  });
+
+  it("requires options on Selection/Tag fields", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Priority", type: "Selection" }],
+    });
+    expect(result.errors.some((e) => e.includes("'Priority'") && e.includes("no options"))).toBe(true);
+  });
+
+  it("accepts inline Selection(...) shorthand without options", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Priority", type: "Selection(High/Low)" }],
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects reference types inside Table sub-fields", () => {
+    const result = validateDesign({
+      ...base,
+      information: [
+        {
+          name: "Rows",
+          type: "Table",
+          fields: [{ name: "Assignee", type: "User" }],
+        },
+      ],
+    });
+    expect(result.errors.some((e) => e.includes("'Assignee'") && e.includes("not supported inside Table sub-fields"))).toBe(true);
+  });
+
+  it("warns that 'required' is ignored on information fields", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Title", type: "Text", required: true }],
+    });
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'Title'") && w.includes("'required'"))).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Input normalization
+// ──────────────────────────────────────────────
+
+describe("normalizeFieldType", () => {
+  it("passes canonical types through unchanged", () => {
+    expect(normalizeFieldType("Text")).toEqual({ type: "Text", changed: false });
+    expect(normalizeFieldType("MultiText")).toEqual({ type: "MultiText", changed: false });
+  });
+
+  it("maps common aliases to canonical types", () => {
+    expect(normalizeFieldType("Select")).toEqual({ type: "Selection", changed: true });
+    expect(normalizeFieldType("TextArea")).toEqual({ type: "MultiText", changed: true });
+    expect(normalizeFieldType("LongText")).toEqual({ type: "MultiText", changed: true });
+    expect(normalizeFieldType("Paragraph")).toEqual({ type: "MultiText", changed: true });
+    expect(normalizeFieldType("MultilineText")).toEqual({ type: "MultiText", changed: true });
+  });
+
+  it("fixes casing and internal spaces", () => {
+    expect(normalizeFieldType("text")).toEqual({ type: "Text", changed: true });
+    expect(normalizeFieldType("Long Text")).toEqual({ type: "MultiText", changed: true });
+    expect(normalizeFieldType("Date Time")).toEqual({ type: "DateTime", changed: true });
+    expect(normalizeFieldType("user")).toEqual({ type: "User", changed: true });
+  });
+
+  it("preserves inline option syntax", () => {
+    expect(normalizeFieldType("Select(High/Low)")).toEqual({ type: "Selection(High/Low)", changed: true });
+    expect(normalizeFieldType("Selection(High/Low)")).toEqual({ type: "Selection(High/Low)", changed: false });
+  });
+
+  it("passes unknown types through for validation to report", () => {
+    expect(normalizeFieldType("Bogus")).toEqual({ type: "Bogus", changed: false });
+    expect(normalizeFieldType(undefined)).toEqual({ type: undefined, changed: false });
+  });
+});
+
+describe("normalizeStateColor", () => {
+  it("passes palette colors through unchanged", () => {
+    expect(normalizeStateColor("#A07828", "On Hold")).toEqual({ color: "#A07828", changed: false });
+  });
+
+  it("maps color names to the palette", () => {
+    expect(normalizeStateColor("gray", "Draft")).toEqual({ color: "#5A6070", changed: true });
+    expect(normalizeStateColor("dark red", "Escalated")).toEqual({ color: "#8B2D2D", changed: true });
+    expect(normalizeStateColor("amber", "On Hold")).toEqual({ color: "#A07828", changed: true });
+  });
+
+  it("snaps off-palette hex to the nearest palette color", () => {
+    expect(normalizeStateColor("#D4A017", "On Hold")).toEqual({ color: "#A07828", changed: true });
+    expect(normalizeStateColor("#FF0000", "Failed")).toEqual({ color: "#C0392B", changed: true });
+  });
+
+  it("treats case-different palette hex as unchanged", () => {
+    expect(normalizeStateColor("#a07828", "On Hold")).toEqual({ color: "#A07828", changed: false });
+  });
+
+  it("falls back to the state-name suggestion for unrecognizable values", () => {
+    expect(normalizeStateColor("banana", "Completed")).toEqual({ color: "#1E6B45", changed: true });
+  });
+
+  it("leaves missing colors alone", () => {
+    expect(normalizeStateColor(undefined, "Open")).toEqual({ color: undefined, changed: false });
+  });
+});
+
+describe("normalizeIndustry", () => {
+  it("passes known keys through", () => {
+    expect(normalizeIndustry("healthcare")).toBe("healthcare");
+    expect(normalizeIndustry("financial_services")).toBe("financial_services");
+  });
+
+  it("maps free text to known keys", () => {
+    expect(normalizeIndustry("Medical clinic")).toBe("healthcare");
+    expect(normalizeIndustry("Banking")).toBe("financial_services");
+    expect(normalizeIndustry("IT")).toBe("it_service");
+    expect(normalizeIndustry("Human Resources")).toBe("hr");
+  });
+
+  it("falls back to general for unknown or missing text", () => {
+    expect(normalizeIndustry("Professional Services")).toBe("general");
+    expect(normalizeIndustry(undefined)).toBe("general");
+  });
+});
+
+describe("parseStatesFromDescription", () => {
+  it("parses an explicit lifecycle state list", () => {
+    const states = parseStatesFromDescription(
+      "Track client projects. Lifecycle states: Proposed, Active, On Hold, Completed, Cancelled. Activities: create and edit.",
+    );
+    expect(states).toEqual(["Proposed", "Active", "On Hold", "Completed", "Cancelled"]);
+  });
+
+  it("parses 'states like …' phrasing and stops at a closing paren", () => {
+    const states = parseStatesFromDescription(
+      "status (state-based workflow with states like Planning, In Progress, On Hold, Completed, Cancelled), start date (date)",
+    );
+    expect(states).toEqual(["Planning", "In Progress", "On Hold", "Completed", "Cancelled"]);
+  });
+
+  it("parses a parenthesized status list", () => {
+    const states = parseStatesFromDescription(
+      "Each project has a status (Not Started, In Progress, Done) and an owner.",
+    );
+    expect(states).toEqual(["Not Started", "In Progress", "Done"]);
+  });
+
+  it("returns [] when no state list is present", () => {
+    expect(parseStatesFromDescription("an approval process for purchase requests")).toEqual([]);
+    expect(parseStatesFromDescription("status (state field)")).toEqual([]);
+  });
+});
+
+describe("validateDesign — input normalization", () => {
+  const base = { name: "Projects" };
+
+  it("accepts alias types with a normalization warning", () => {
+    const result = validateDesign({
+      ...base,
+      information: [
+        { name: "Priority", type: "Select", options: ["High", "Low"] },
+        { name: "Notes", type: "LongText" },
+      ],
+    });
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'Priority'") && w.includes("normalized to 'Selection'"))).toBe(true);
+    expect(result.warnings.some((w) => w.includes("'Notes'") && w.includes("normalized to 'MultiText'"))).toBe(true);
+  });
+
+  it("still requires options for a normalized Select", () => {
+    const result = validateDesign({
+      ...base,
+      information: [{ name: "Priority", type: "Select" }],
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("'Priority'") && e.includes("no options"))).toBe(true);
   });
 });
 
@@ -386,6 +691,59 @@ describe("designWorkflow", () => {
       expect(stateNames.has(flow.from)).toBe(true);
       expect(stateNames.has(flow.to)).toBe(true);
     }
+  });
+
+  it("ships the design constraints with every response", () => {
+    for (const result of [designWorkflow("approval workflow"), designWorkflow("a directory of vendors")]) {
+      expect(result.constraints.field_types).toContain("Selection");
+      expect(result.constraints.state_colors).toContain("#5A6070");
+      expect(result.constraints.reference_fields).toContain("connection");
+      expect(result.constraints.actors).toContain("hybrid");
+    }
+  });
+
+  it("contains no placeholder rows in templates", () => {
+    for (const result of [designWorkflow("approval workflow"), designWorkflow("a directory of vendors")]) {
+      for (const f of result.template.information) {
+        expect(f.name).toBeTruthy();
+        expect(f.type).toBeTruthy();
+      }
+    }
+  });
+
+  it("uses states enumerated in the description over the pattern template", () => {
+    const result = designWorkflow(
+      "Track client projects. Lifecycle states: Proposed, Active, On Hold, Completed, Cancelled. Each project has an owner and budget.",
+    );
+    expect(result.template.states.map((s: any) => s.name)).toEqual([
+      "Proposed", "Active", "On Hold", "Completed", "Cancelled",
+    ]);
+    expect(result.template.states[0].initial).toBe(true);
+    for (const s of result.template.states) {
+      expect(VALID_COLORS).toContain(s.color);
+    }
+    // No invented flows — the agent defines them.
+    expect(result.template.activities).toEqual([]);
+    expect(result.template.flows).toEqual([]);
+    expect(result.suggestions.states_source).toBe("parsed_from_description");
+    expect(result.suggestions.recommended_states).toEqual(result.template.states.map((s: any) => s.name));
+  });
+
+  it("never detects record_list when lifecycle language is present", () => {
+    const result = designWorkflow(
+      "Module to track client projects with lifecycle states: Proposed, Active, Completed. Include list view fields.",
+    );
+    expect(result.suggestions.detected_pattern).not.toBe("record_list");
+  });
+
+  it("maps free-text industry and reports the resolution", () => {
+    const medical = designWorkflow("approval workflow", "Medical Clinic");
+    expect(medical.suggestions.industry).toBe("healthcare");
+    expect(medical.suggestions.industry_defaults.confidence_threshold).toBe(0.9);
+
+    const consulting = designWorkflow("approval workflow", "Professional Services");
+    expect(consulting.suggestions.industry).toBe("general");
+    expect(consulting.suggestions.industry_defaults.confidence_threshold).toBe(0.8);
   });
 });
 

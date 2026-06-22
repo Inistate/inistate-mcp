@@ -58,8 +58,9 @@ describe("server discovery (runtime mode default)", () => {
     expect(names).toContain("request_upload_url");
     expect(names).toContain("confirm_upload");
     expect(names).toContain("switch_mode");
+    // get_module_schema is read-only and available in every mode
+    expect(names).toContain("get_module_schema");
     // configure-mode tools must be hidden
-    expect(names).not.toContain("get_module_schema");
     expect(names).not.toContain("get_module_canvas");
     expect(names).not.toContain("design_workflow");
     expect(names).not.toContain("validate_design");
@@ -199,6 +200,45 @@ describe("configure mode", () => {
       });
       const data = JSON.parse((result.content as any)[0].text);
       expect(data.suggestions.detected_pattern).toBe("record_list");
+    });
+  });
+
+  describe("create_module pre-flight validation", () => {
+    it("returns validation_failed locally without calling the API", async () => {
+      const result = await client.callTool({
+        name: "create_module",
+        arguments: {
+          name: "Broken Module",
+          information: [
+            { name: "Title", type: "Text" },
+            { name: "Title", type: "Text" },
+          ],
+          states: [{ name: "A" }, { name: "B" }],
+          activities: [{ name: "Go", actor: "human", fields: ["Missing"] }],
+          flows: [{ from: "A", to: "Ghost", activity: "Nope" }],
+        },
+      });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.error).toBe("validation_failed");
+      expect(data.errors.length).toBeGreaterThan(0);
+      expect(data.agent_action).toContain("create_module");
+    });
+  });
+
+  describe("update_module pre-flight validation", () => {
+    it("validates full-canvas payloads locally", async () => {
+      const result = await client.callTool({
+        name: "update_module",
+        arguments: {
+          id: 123,
+          information: [{ name: "Foo", type: "Bogus" }],
+        },
+      });
+      expect(result.isError).toBe(true);
+      const data = JSON.parse((result.content as any)[0].text);
+      expect(data.error).toBe("validation_failed");
+      expect(data.errors.some((e: string) => e.includes("Bogus"))).toBe(true);
     });
   });
 

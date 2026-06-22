@@ -1,8 +1,10 @@
 # Inistate MCP Server — Complete Specification
 
-> **Version:** 1.0 · **Date:** March 2026 · **Status:** Authoritative  
+> **Version:** 1.1 · **Date:** May 2026 · **Status:** Authoritative  
+> **License:** This MCP server is **open source (MIT)** — free to run, inspect, fork, and contribute to.  
 > **Patent:** US20230266946A1 · **Platform:** Inistate (inistate.com)  
-> **Framework:** FACTSOps (Form → Activity → Controlled Transition → State + Operations)
+> **Framework:** FACTSOps (Form → Activity → Controlled Transition → State + Operations)  
+> **Backends:** One server, two interchangeable backends — the hosted **Inistate Platform** (default) and a free **local Core** runtime on storage you control (§1.6).
 
 ---
 
@@ -62,6 +64,8 @@ The Inistate MCP Server exposes the Inistate process platform as a structured, A
 - **Query** process data with rich filtering and audit trail access
 - **Coordinate** multi-agent workflows where different AI agents handle different activities
 
+The server is **open source (MIT)** — free to run, inspect, fork, and contribute to. It speaks to two interchangeable backends behind one identical tool surface: the hosted **Inistate Platform** and a free **local Core** runtime that runs on storage you control. See §1.6 for what each backend provides and why they differ.
+
 ### 1.2 The Core Execution Primitive
 
 Everything in FACTSOps derives from one primitive:
@@ -87,7 +91,7 @@ State → Activity(Form) → State
 | **Agent Coordination** | A2A (future) | Agent-to-agent handoff via process definition routing |
 | **Process Governance** | FACTSOps | States, activities, forms, hooks, audit trail |
 
-The MCP layer is the primary interface. A2A coordination is a future extension (see §15). The FACTSOps governance layer is the Inistate platform itself.
+The MCP layer is the primary interface. A2A coordination is a future extension (see §15). The **Process Governance** layer — workspaces, role-based authorization, governed history, and confidence gating — is provided by the Inistate Platform; the local Core backend provides present-state enforcement on your own storage without it (§1.6).
 
 ### 1.4 Intent Resolution — Agent-Driven
 
@@ -118,6 +122,33 @@ The MCP server exposes its full capability set behind three **server modes** tha
 
 > **AGENT INSTRUCTION:** Stay in `runtime` unless the user explicitly asks to design, modify, or generate UI. When the user's intent requires configure- or frontend-only tools, call `switch_mode(mode)` once and re-read resources as needed. Switch back to `runtime` when the design/frontend task is complete to keep subsequent turns cheap.
 
+### 1.6 Backends: Inistate Platform and local Core
+
+The same open-source MCP server runs against either of two backends through one identical tool surface. Which backend is active is a deployment choice (§14.1, §14.2); agents and process designers use the tools the same way regardless.
+
+| | **Inistate Platform** (default) | **Local Core** (`inistate-core`) |
+|---|---|---|
+| What it is | The hosted, governed product at `api.inistate.com` | A free runtime you run on storage you control (SQLite by default) |
+| Connects via | `CloudBackend` (HTTPS + token) | `LocalBackend` (in-process) |
+| Present-state enforcement (legal transitions) | Yes | Yes |
+| Typed activity forms | Yes | Yes |
+| Module design + validation | Yes | Yes |
+| Workspaces / multi-tenancy | Yes | No — a single local store |
+| Authentication / authorization (roles) | Yes | No — local trust boundary |
+| Governed history & audit trail | Yes | No |
+| Confidence gating & escalation | Yes | No |
+| Files (upload / download) | Yes | No |
+
+**The boundary follows what the storage can hold, not a decision to withhold features.** Enforcing the *present state* of a record needs only its current value — a status field — which any store can carry, so Core runs directly on your own storage. Recording an *accountable past* — an append-only, actor-attributed, immutable history — needs a governed store that a plain table or external sheet does not provide; the same is true of role-based authorization and confidence-gating records. So the dividing line is precise:
+
+> **Core manages the present state of your records. The Platform manages the governed history of how that state changed** — together with the identity, authorization, and escalation that a governed history implies.
+
+A module schema may *carry* `actor` designations and a `confidence_threshold` on either backend — these are descriptive metadata — but only the Platform *enforces* on them. Core describes; the Platform governs.
+
+**Capability gating.** Tools that depend on Platform-only capabilities (workspaces, governed history, files, authorization) are not silently absent on Core. When the active backend cannot serve a tool, the server responds with a clear, structured message stating that the capability requires the Inistate Platform, so the agent can explain the gap to the user rather than guessing. Per-tool backend availability is shown in the Tool Summary (§2) and called out in each affected tool and section.
+
+> **AGENT INSTRUCTION:** Do not assume a backend. If a tool returns a capability message indicating it requires the Platform, report that to the user plainly — never fabricate history, authorization results, confidence gating, or file handling that the active backend does not provide.
+
 ---
 
 ## 2. MCP Tool Reference
@@ -127,36 +158,38 @@ The MCP server exposes three types of MCP primitives:
 - **Resources** — background knowledge (§3)
 - **Prompts** — guided workflows (§4)
 
-All tools require valid authentication — either an API key (`fsk` prefix) or a JWT obtained via the `login` tool. See §5 for details.
+On the Inistate Platform backend, all tools require valid authentication — either an API key (`fsk` prefix) or a JWT obtained via the `login` tool (see §5). The local Core backend (§1.6) runs within a local trust boundary and requires no authentication.
 
 ### Tool Summary
 
-The **Surface** column indicates the server mode(s) in which the tool is visible (§1.5). Tools marked `runtime` are visible in all three modes; `configure+` tools are only visible after `switch_mode(configure)` or `switch_mode(frontend)`. The **Agent Mode** column is the agent's operational mode from §1.4 / §6.1.
+The **Surface** column indicates the server mode(s) in which the tool is visible (§1.5). Tools marked `runtime` are visible in all three modes; `configure+` tools are only visible after `switch_mode(configure)` or `switch_mode(frontend)`. The **Agent Mode** column is the agent's operational mode from §1.4 / §6.1. The **Backend** column indicates availability (§1.6): `Both` tools work on the Platform and local Core; `Platform` tools require the Inistate Platform. Resolvers shown are the Platform's REST endpoints; on local Core the same operations are served in-process by `LocalBackend`.
 
-| # | Tool | Resolver | Surface | Agent Mode | Purpose |
-|---|---|---|---|---|---|
-| 0 | `login` | `POST /token` | runtime | All | Authenticate with username/password to obtain a JWT |
-| 1 | `list_workspaces` | `GET /api/workspace` | runtime | All | List accessible workspaces |
-| 2 | `set_workspace` | `GET /api/workspace/{id}` | runtime | All | Set active workspace for session |
-| 3 | `list_modules` | `GET /api/mcp/` | runtime | All | List all modules in workspace |
-| 4 | `switch_mode` | Server-side | runtime | All | Switch between `runtime` / `configure` / `frontend` server modes |
-| 5 | `get_module_schema` | `GET /api/mcp/{name}?tier=` | configure+ | design, modify | Get module fields, states, activities, flows |
-| 6 | `get_module_canvas` | `GET /api/configure/{name}` | configure+ | modify | Get full module definition with stable IDs |
-| 7 | `list_entries` | `POST /api/mcp/list` | runtime | execute, query | Query entries with filters |
-| 8 | `get_entry` | `POST /api/mcp/entry` | runtime | execute, query | Read a single entry |
-| 9 | `get_form` | `POST /api/mcp/form` | runtime | execute | Get activity form fields and defaults |
-| 10 | `submit_activity` | `POST /api/mcp/activity` | runtime | execute | Perform create/edit/delete/custom activity |
-| 11 | `get_entry_history` | `POST /api/mcp/history` | runtime | query | Get audit trail for an entry |
-| 12 | `upload_file` | `POST /api/mcp/upload` | runtime | execute | Upload a file for File/Image fields (fallback — use the presigned flow by default) |
-| 13 | `download_file` | `GET /api/mcp/download/{name}/s/{guid}/{file}` | runtime | query | Download a file by module name |
-| 14 | `design_workflow` | Server-side | configure+ | design | AI generates a module schema from description |
-| 15 | `validate_design` | Server-side | configure+ | design, modify | Validate a module schema before submission |
-| 16 | `create_module` | `POST /api/configure/{name}` | configure+ | design | Create a new module |
-| 17 | `update_module` | `PUT /api/configure/{name}` | configure+ | modify | Update existing module schema |
-| 18 | `request_upload_url` | `POST /api/mcp/request-upload-url` | runtime | execute | Request a presigned S3 PUT URL for direct large-file upload (up to 500MB) |
-| 19 | `confirm_upload` | `POST /api/mcp/confirm-upload` | runtime | execute | Finalize a presigned upload after the client PUTs the file to S3 |
+| # | Tool | Resolver | Surface | Agent Mode | Backend | Purpose |
+|---|---|---|---|---|---|---|
+| 0 | `login` | `POST /token` | runtime | All | Platform | Authenticate with username/password to obtain a JWT |
+| 1 | `list_workspaces` | `GET /api/workspace` | runtime | All | Platform | List accessible workspaces |
+| 2 | `set_workspace` | `GET /api/workspace/{id}` | runtime | All | Platform | Set active workspace for session |
+| 3 | `list_modules` | `GET /api/mcp/` | runtime | All | Both | List all modules in workspace |
+| 4 | `switch_mode` | Server-side | runtime | All | Both | Switch between `runtime` / `configure` / `frontend` server modes |
+| 5 | `get_module_schema` | `GET /api/mcp/{name}?tier=` | configure+ | design, modify | Both | Get module fields, states, activities, flows |
+| 6 | `get_module_canvas` | `GET /api/configure/{name}` | configure+ | modify | Both | Get full module definition with stable IDs |
+| 7 | `list_entries` | `POST /api/mcp/list` | runtime | execute, query | Both | Query entries with filters |
+| 8 | `get_entry` | `POST /api/mcp/entry` | runtime | execute, query | Both | Read a single entry |
+| 9 | `get_form` | `POST /api/mcp/form` | runtime | execute | Both | Get activity form fields and defaults |
+| 10 | `submit_activity` | `POST /api/mcp/activity` | runtime | execute | Both | Perform create/edit/delete/custom activity |
+| 11 | `get_entry_history` | `POST /api/mcp/history` | runtime | query | Platform | Get audit trail for an entry |
+| 12 | `upload_file` | `POST /api/mcp/upload` | runtime | execute | Platform | Upload a file for File/Image fields (fallback — use the presigned flow by default) |
+| 13 | `download_file` | `GET /api/mcp/download/{name}/s/{guid}/{file}` | runtime | query | Platform | Download a file by module name |
+| 14 | `design_workflow` | Server-side | configure+ | design | Both | AI generates a module schema from description |
+| 15 | `validate_design` | Server-side | configure+ | design, modify | Both | Validate a module schema before submission |
+| 16 | `create_module` | `POST /api/configure/{name}` | configure+ | design | Both | Create a new module |
+| 17 | `update_module` | `PUT /api/configure/{name}` | configure+ | modify | Both | Update existing module schema |
+| 18 | `request_upload_url` | `POST /api/mcp/request-upload-url` | runtime | execute | Platform | Request a presigned S3 PUT URL for direct large-file upload (up to 500MB) |
+| 19 | `confirm_upload` | `POST /api/mcp/confirm-upload` | runtime | execute | Platform | Finalize a presigned upload after the client PUTs the file to S3 |
 
 > **Note:** `get_module_schema` moved behind `configure+` when the mode-switching surface was introduced — runtime sessions discover activity shapes via `get_form` and entry `availableActivities` instead. Switch to `configure` if you need the full fields/states/activities/flows payload.
+>
+> **Backend note (§1.6):** `Platform`-only tools (`login`, `list_workspaces`, `set_workspace`, `get_entry_history`, `upload_file`, `download_file`, `request_upload_url`, `confirm_upload`) return a structured capability message on local Core rather than a result. On Core, `switch_mode` supports `runtime` and `configure` only — `frontend` mode and its REST guide target the Platform API.
 
 ---
 
@@ -781,6 +814,8 @@ Perform an activity on a module entry.
 ### 2.10 get_entry_history
 
 Get the audit trail and comments for an entry. Returns chronological list of actions with field-level change details and AI traceability context.
+
+> **Backend: Platform only (§1.6).** Governed history is an append-only, actor-attributed record that requires the Platform's governed store; the local Core backend does not maintain one. On Core this tool returns a capability message rather than a history — do not present a history that the backend cannot produce.
 
 **Resolver:** `POST /api/mcp/history`
 
@@ -1576,6 +1611,8 @@ Rules:
 
 The MCP server supports two authentication methods. Only one is needed.
 
+> **Backend note (§1.6):** Authentication, workspaces, and the authorization scopes in this section apply to the **Inistate Platform** backend. The **local Core** backend runs within a local trust boundary and requires no token, login, or workspace — `login`, `list_workspaces`, and `set_workspace` are Platform-only, and the role-based scopes in §5.4 are not enforced by Core.
+
 ### 5.1 API Key Authentication
 
 When an API key (prefixed with `fsk`) is configured via environment variable, all requests use it directly:
@@ -1799,6 +1836,8 @@ get_module_schema(module, tier="extended")
 ## 7. Confidence Gating and Escalation
 
 Confidence gating is the core safety mechanism for AI-driven state transitions. It implements the FACTSOps Third Law: **No automation without escalation.**
+
+> **Backend: Platform capability (§1.6).** Gating records an `intention` event in the governed history, which the local Core backend does not maintain. A schema may still *carry* `confidence_threshold` and `actor` designations as descriptive metadata on either backend, but only the Platform *enforces* on them. On Core, an activity submission either makes a legal transition or is rejected as illegal — it is never gated into an intention. Agents must not represent a submission as "gated for review" on a backend that does not gate.
 
 ### 7.1 How It Works
 
@@ -2367,6 +2406,8 @@ The `details` array is only present on `422` validation errors.
 
 Every activity submitted by an AI agent should include the `ai` object for full traceability. This is critical for compliance with EU AI Act, FINRA, HIPAA, and Colorado AI Act requirements.
 
+> **Backend: Platform capability (§1.6).** The audit trail persists the `ai` object on an append-only, actor-attributed history that the local Core backend does not maintain. Agents should still construct the `ai` object; on the Platform it is retained as governed history, while on Core it is accepted with the submission but not retained. Treat full traceability as available only when the active backend is the Platform.
+
 ### 11.1 AI Context Schema
 
 ```json
@@ -2647,6 +2688,15 @@ These rules are enforced by `validate_design` (server-side) and by the Inistate 
 | Transport | stdio (default), Streamable HTTP | stdio for local CLI; Streamable HTTP for remote/web deployment |
 | Env loader | `dotenv` | Loads `.env` files for configuration |
 | Package Registry | npm | For MCP registry submission |
+
+**Backend abstraction.** The server talks to its data plane through a single `Backend` interface, so the identical tool surface (§2) runs against either the hosted Platform or local Core (§1.6):
+
+| Backend | Implementation | Notes |
+|---|---|---|
+| `CloudBackend` | `fetch` HTTP client to `api.inistate.com` | Default; carries the auth token + `wsid` header |
+| `LocalBackend` | In-process adapter to the `inistate-core` runtime | Calls Core through its stable public interface, never engine internals |
+
+Backend selection is a deployment choice: the open-source `inistate-mcp` distribution defaults to `CloudBackend`; `inistate-core` ships the same server wired to `LocalBackend`. Platform-only capabilities (workspaces, governed history, files, authorization) are capability-gated per backend — `LocalBackend` reports them as unavailable with a structured message (§1.6) rather than failing opaquely.
 
 ### 14.2 Server Configuration
 

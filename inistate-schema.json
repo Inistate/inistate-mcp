@@ -34,6 +34,10 @@
           "description": "Display name. Used as the key in all MCP input/output payloads (e.g. 'Leave Type', not 'xKfLmNpQ')."
         },
         "type": { "$ref": "#/definitions/FieldType" },
+        "connection": {
+          "type": "string",
+          "description": "Name of the module this field links to (e.g. 'Members' for workspace users). Required for Module/Modules/User/Users types; not allowed on other types. Not supported inside Table sub-fields."
+        },
         "options": {
           "type": "array",
           "items": { "type": "string" },
@@ -685,7 +689,7 @@
 
     "FilterOperators": {
       "type": "object",
-      "description": "Available filter operators for list_entries. Keys are field display names. Simple value = equality match.",
+      "description": "Filter operators for list_entries.filters. Keys are field display names. Simple value = equality match ({'Priority': 'High'}); object value = operator. Multiple keys are AND-ed; use {or: [...]} for OR. Module fields filter by referenced entry ID.",
       "properties": {
         "_string": {
           "type": "object",
@@ -721,7 +725,10 @@
           "description": "Date/DateTime field operators",
           "properties": {
             "after": { "type": "string", "format": "date" },
-            "before": { "type": "string", "format": "date" }
+            "before": { "type": "string", "format": "date" },
+            "upcoming": { "type": "boolean" },
+            "past": { "type": "boolean" },
+            "within": { "type": "string", "description": "Relative window, e.g. '7d'" }
           }
         },
         "_existence": {
@@ -738,6 +745,16 @@
           "properties": {
             "yes": { "type": "boolean" },
             "no": { "type": "boolean" }
+          }
+        },
+        "_user": {
+          "type": "object",
+          "description": "User field operators. 'me'/isMe matches the current user.",
+          "properties": {
+            "is": { "type": "string" },
+            "isMe": { "type": "boolean" },
+            "not": { "type": "string" },
+            "includes": { "type": "string" }
           }
         }
       }
@@ -1081,20 +1098,20 @@
     "steps": [
       "1. list_workspaces(?search=) → find accessible workspaces (id and name)",
       "2. get_workspace(id) → get workspace details with modules and states",
-      "3. discover_modules() → find available module names",
-      "4. get_module(module, tier='basic') → understand fields and states",
-      "5. get_module(module, tier='extended') → understand activities (only when needed)",
+      "3. list_modules() → find available module names",
+      "4. get_module_schema(module, tier='basic') → understand fields and states",
+      "5. get_module_schema(module, tier='extended') → understand activities (only when needed)",
       "6. get_form(module, activity) → get required fields, types, options, defaults, and confidence_threshold before submitting",
       "7. request_upload_url(module, fileName, fileSize, contentType) → PUT bytes to uploadUrl → confirm_upload(s3Key) → returns /s/ path. ALWAYS use this flow for File/Image fields. Only fall back to upload_file(module, file) if this flow fails.",
       "8. submit_activity(module, activity, input) → create/edit/delete/custom operations. Use /s/ paths from confirm_upload (or upload_file fallback) for File/Image fields.",
       "9. list_entries(module, filters) → query and browse entries",
       "10. get_entry(module, entryId) → read a specific entry",
-      "11. get_history(module, entryId) → audit trail and comments",
+      "11. get_entry_history(module, entryId) → audit trail and comments",
       "12. download_file(moduleName, guid, fileName) → download a file. Construct URL: /api/mcp/download/{moduleName}/s/{guid}/{fileName} from any /s/{guid}/{fileName} value",
-      "--- Module Configuration (via /api/configure/ endpoints, uses INISTATE ModuleSchema format) ---",
-      "13. get_module_schema(moduleName) → GET /api/configure/{moduleName} — get the module's current definition as ModuleSchema with stable IDs. Round-trippable: modify and send back via update_module.",
-      "14. create_module(ModuleSchema) → POST /api/configure — create a new module using the ModuleSchema definition from this schema",
-      "15. update_module(ModuleSchema) → PUT /api/configure — update an existing module. Use get_module_schema() first, modify, then send back."
+      "--- Module Configuration (configure mode, INISTATE ModuleSchema format) ---",
+      "13. get_module_canvas(module) → the module's current definition as ModuleSchema with stable IDs. Round-trippable: modify and send back via update_module.",
+      "14. create_module(ModuleSchema) → create a new module using the ModuleSchema definition from this schema",
+      "15. update_module(ModuleSchema) → update an existing module. Use get_module_canvas() first, modify, then send back."
     ],
     "key_rules": [
       "All input/output keys use field DISPLAY NAMES, never internal IDs",
@@ -1144,7 +1161,7 @@
       "_description": "AI agent traceability in history events:",
       "behavior": [
         "Every history event submitted by an AI agent includes the full 'ai' object (reasoning, sources, model, model_version, prompt_hash, confidence)",
-        "get_history() returns the ai context on each event, enabling full chain-of-reasoning reconstruction",
+        "get_entry_history() returns the ai context on each event, enabling full chain-of-reasoning reconstruction",
         "The ai object is only present on events that were submitted with AI context — human actions have no ai field"
       ]
     },

@@ -19,12 +19,29 @@ interface ActivityDef {
   actor?: string;
 }
 
+interface FieldInfo {
+  name: string;
+  type: string;
+}
+
+// The extended schema tier returns activities as plain strings (names only) —
+// the canvas is the source of actor data. Tolerate both shapes.
 interface ExtendedSchema {
+  activities?: Array<ActivityDef | string>;
+  information?: FieldInfo[];
+  states?: Array<string | { name?: string }>;
+}
+
+interface CanvasSchema {
   activities?: ActivityDef[];
 }
 
+const REF_FIELD_TYPES = new Set(["User", "Users", "Module", "Modules"]);
+
 // Standard activities are inherent platform operations and have no actor in the
 // module schema. They bypass the actor check (but state-change checks still run).
+// The platform uses both names for the direct state change — availableActivities
+// lists "changeState" while forms and history say "changeStatus".
 const STANDARD_ACTIVITIES = new Set([
   "create",
   "edit",
@@ -34,6 +51,7 @@ const STANDARD_ACTIVITIES = new Set([
   "manage",
   "view",
   "changeStatus",
+  "changeState",
 ]);
 
 interface SchemaCacheEntry {
@@ -50,23 +68,112 @@ function cacheKey(prefix: string, parts: Array<string | number | undefined>): st
   return [prefix, user, wsid, ...parts.map((p) => String(p ?? "_"))].join("::");
 }
 
-async function getActivityDef(
+/**
+ * Source of a module's extended schema. Defaults to the cloud API; the MCP tool
+ * handlers pass a backend-routed fetcher so the same guard runs against whatever
+ * backend is injected (cloud or local) instead of always hitting api.ts.
+ */
+export type SchemaFetcher = (moduleName: string) => Promise<ExtendedSchema | null>;
+
+const defaultSchemaFetcher: SchemaFetcher = async (moduleName) => {
+  try {
+    return (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
+  } catch {
+    return null;
+  }
+};
+
+async function getExtendedSchema(
   moduleName: string,
-  activity: string,
-): Promise<ActivityDef | null> {
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<ExtendedSchema | null> {
   const key = cacheKey("schema", [moduleName]);
   const now = Date.now();
   const cached = schemaCache.get(key);
-  let schema: ExtendedSchema | undefined = cached && now - cached.at < SCHEMA_TTL_MS ? cached.schema : undefined;
-  if (!schema) {
-    try {
-      schema = (await api.get(`/api/mcp/${api.enc(moduleName)}?tier=extended`)) as ExtendedSchema;
-      schemaCache.set(key, { schema, at: now });
-    } catch {
-      return null;
+  if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.schema;
+  const schema = await fetchSchema(moduleName);
+  if (schema) schemaCache.set(key, { schema, at: now });
+  return schema;
+}
+
+/**
+ * Warm the schema cache in the background (fire-and-forget). Called from
+ * get_form so the guard/shape lookups on the submit_activity that typically
+ * follows hit cache instead of paying an extra round trip ahead of the write.
+ */
+export function primeSchemaCache(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): void {
+  void getExtendedSchema(moduleName, fetchSchema).catch(() => {});
+}
+
+/**
+ * Seed the schema cache with an extended schema the caller already fetched
+ * (e.g. the get_module_schema tool's own tier=extended response), so the
+ * guard does not re-fetch what just passed through this process.
+ */
+export function seedSchemaCache(moduleName: string, schema: unknown): void {
+  if (!schema || typeof schema !== "object") return;
+  schemaCache.set(cacheKey("schema", [moduleName]), {
+    schema: schema as ExtendedSchema,
+    at: Date.now(),
+  });
+}
+
+interface CanvasCacheEntry {
+  canvas: CanvasSchema | null;
+  at: number;
+}
+const canvasCache = new Map<string, CanvasCacheEntry>();
+
+/**
+ * Source of a module's canvas (actor data). Like SchemaFetcher, the tool
+ * handlers pass a backend-routed fetcher so the actor fallback works against
+ * whatever backend is injected; the default hits the cloud API.
+ */
+export type CanvasFetcher = (moduleName: string) => Promise<CanvasSchema | null>;
+
+const defaultCanvasFetcher: CanvasFetcher = async (moduleName) => {
+  try {
+    return (await api.get(`/api/configure/${api.enc(moduleName)}`)) as CanvasSchema;
+  } catch {
+    return null;
+  }
+};
+
+async function getCanvasSchema(
+  moduleName: string,
+  fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
+): Promise<CanvasSchema | null> {
+  const key = cacheKey("canvas", [moduleName]);
+  const now = Date.now();
+  const cached = canvasCache.get(key);
+  if (cached && now - cached.at < SCHEMA_TTL_MS) return cached.canvas;
+  // Cache the miss too — a caller without configure access would otherwise
+  // pay a failing round trip on every submit.
+  const canvas = await fetchCanvas(moduleName);
+  canvasCache.set(key, { canvas, at: now });
+  return canvas;
+}
+
+async function getActivityDef(
+  moduleName: string,
+  activity: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+  fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
+): Promise<ActivityDef | null> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
+  for (const a of schema?.activities ?? []) {
+    if (a && typeof a === "object" && a.name === activity) {
+      if (a.actor) return a;
+      break; // listed without actor info — consult the canvas
     }
   }
-  return schema.activities?.find((a) => a.name === activity) ?? null;
+  const canvas = await getCanvasSchema(moduleName, fetchCanvas);
+  return canvas?.activities?.find(
+    (a) => a && typeof a === "object" && a.name === activity,
+  ) ?? null;
 }
 
 interface FlaggedRecord {
@@ -126,7 +233,11 @@ export type GuardOutcome =
   | { ok: true }
   | { ok: false; structured: Record<string, unknown> };
 
-export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome> {
+export async function evaluateActivity(
+  input: GuardInput,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+  fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
+): Promise<GuardOutcome> {
   const { module: moduleName, activity, entryId, entryIds, state, confidence, confirmed } = input;
 
   // Rule 1 — confidence inflation after a prior flag.
@@ -151,14 +262,34 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
     }
   }
 
-  // Rule 2a — `changeStatus` is the explicit state-change override.
-  if (activity === "changeStatus" && !confirmed) {
+  // Rule 2 pre-flight — a target state must exist before any confirmation
+  // dance. The platform returns an opaque error for unknown states.
+  if (state) {
+    const states = await getModuleStates(moduleName, fetchSchema);
+    if (states && !states.includes(state)) {
+      return {
+        ok: false,
+        structured: {
+          error: "unknown_state",
+          message: `State '${state}' does not exist on module '${moduleName}'. Available states: ${states.join(", ")}.`,
+          activity,
+          state,
+          agent_action:
+            "Use one of the listed states, or omit 'state' to follow the activity's normal flow.",
+        },
+      };
+    }
+  }
+
+  // Rule 2a — `changeStatus` (alias `changeState`) is the explicit
+  // state-change override.
+  if ((activity === "changeStatus" || activity === "changeState") && !confirmed) {
     return {
       ok: false,
       structured: {
         error: "state_change_requires_confirmation",
         message:
-          "The 'changeStatus' activity bypasses the workflow to change an entry's state directly. AI agents must not call it on their own initiative.",
+          `The '${activity}' activity bypasses the workflow to change an entry's state directly. AI agents must not call it on their own initiative.`,
         activity,
         agent_action:
           "Ask the user explicitly whether to change the entry's state. After they confirm, resubmit with confirmed: true.",
@@ -185,7 +316,7 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
   // Rules 3 & 4 apply to custom (workflow-defined) activities only.
   if (STANDARD_ACTIVITIES.has(activity)) return { ok: true };
 
-  const def = await getActivityDef(moduleName, activity);
+  const def = await getActivityDef(moduleName, activity, fetchSchema, fetchCanvas);
   if (!def) return { ok: true }; // unknown activity — let the API decide.
 
   const actor = (def.actor || "").toLowerCase();
@@ -221,8 +352,181 @@ export async function evaluateActivity(input: GuardInput): Promise<GuardOutcome>
   return { ok: true };
 }
 
+// ---------- Reference-shape pre-flight (User/Module fields) ----------
+//
+// User/Module fields require `{ id, value }` objects (plural variants take
+// arrays of them). The server enforces this too, but failing on the client
+// gives the agent a structured error it can self-correct on without a
+// network round trip. Strict: bare strings/numbers, missing `value`, or
+// missing `id` all reject.
+
+export interface RefShapeError {
+  field: string;
+  type: string;
+  message: string;
+  received: unknown;
+}
+
+function checkSingleRef(
+  field: string,
+  type: string,
+  value: unknown,
+  index?: number,
+): RefShapeError | null {
+  const locator = index !== undefined ? `${field}[${index}]` : field;
+  const isUserType = type === "User" || type === "Users";
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    const shape = isUserType
+      ? `{ id, value, username } (e.g. { id: 42, value: "John Doe", username: "jdoe" })`
+      : `{ id, value } (e.g. { id: 42, value: "Acme Corp" })`;
+    return {
+      field,
+      type,
+      received: value,
+      message: `${type} field '${locator}' must be an object with ${shape}.`,
+    };
+  }
+  const obj = value as Record<string, unknown>;
+  const idOk =
+    (typeof obj.id === "string" && obj.id.length > 0) ||
+    (typeof obj.id === "number" && Number.isFinite(obj.id));
+  const valueOk = typeof obj.value === "string";
+  const usernameOk =
+    !isUserType ||
+    (typeof obj.username === "string" && obj.username.length > 0);
+  if (idOk && valueOk && usernameOk) return null;
+  const missing: string[] = [];
+  if (!idOk) missing.push("id (string|number)");
+  if (!valueOk) missing.push("value (string)");
+  if (!usernameOk) missing.push("username (string)");
+  const required = isUserType ? "'id', 'value', and 'username'" : "both 'id' and 'value'";
+  return {
+    field,
+    type,
+    received: value,
+    message: `${type} field '${locator}' must include ${required}. Missing/invalid: ${missing.join(", ")}.`,
+  };
+}
+
+function checkRefValue(
+  field: string,
+  type: string,
+  value: unknown,
+): RefShapeError | null {
+  // null/undefined clears the field — allowed.
+  if (value === null || value === undefined) return null;
+
+  const isPlural = type === "Users" || type === "Modules";
+  if (isPlural) {
+    if (!Array.isArray(value)) {
+      const itemShape = type === "Users" ? "{ id, value, username }" : "{ id, value }";
+      return {
+        field,
+        type,
+        received: value,
+        message: `${type} field '${field}' must be an array of ${itemShape} objects.`,
+      };
+    }
+    for (let i = 0; i < value.length; i++) {
+      const e = checkSingleRef(field, type, value[i], i);
+      if (e) return e;
+    }
+    return null;
+  }
+  return checkSingleRef(field, type, value);
+}
+
+/**
+ * State names for a module, from the cached extended schema. Tolerates both
+ * string[] and [{name}] shapes; null when unavailable (let the API decide).
+ */
+export async function getModuleStates(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<string[] | null> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
+  const raw = schema?.states;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const names = raw
+    .map((s) => (typeof s === "string" ? s : s?.name))
+    .filter((n): n is string => typeof n === "string" && n.length > 0);
+  return names.length > 0 ? names : null;
+}
+
+/**
+ * Build a field-name → field-type map for a module. Returns null when the
+ * schema cannot be loaded (callers should let the server decide). The
+ * underlying schema is cached by getExtendedSchema, so repeat calls are cheap.
+ *
+ * Split out so bulk callers (submit_activities) can fetch once and reuse the
+ * map across items via validateInputShapesWith.
+ */
+export async function getModuleFieldTypes(
+  moduleName: string,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<Map<string, string> | null> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
+  const info = schema?.information;
+  if (!info || info.length === 0) return null;
+  const types = new Map<string, string>();
+  for (const f of info) {
+    if (f?.name && f?.type) types.set(f.name, f.type);
+  }
+  return types;
+}
+
+/**
+ * Synchronous shape check against a pre-built field-type map. Use this in
+ * bulk loops to avoid rebuilding the map per item. When `types` is null
+ * (schema unavailable), returns [] so the server makes the final call.
+ */
+export function validateInputShapesWith(
+  types: Map<string, string> | null,
+  input: Record<string, unknown> | undefined | null,
+): RefShapeError[] {
+  if (!input || !types) return [];
+  const errors: RefShapeError[] = [];
+  for (const [key, val] of Object.entries(input)) {
+    const type = types.get(key);
+    if (!type || !REF_FIELD_TYPES.has(type)) continue;
+    const e = checkRefValue(key, type, val);
+    if (e) errors.push(e);
+  }
+  return errors;
+}
+
+/**
+ * Validate that User/Module/Users/Modules fields in `input` carry the
+ * correct shape. Convenience wrapper around getModuleFieldTypes +
+ * validateInputShapesWith — use this for one-shot calls (submit_activity).
+ * Bulk callers should fetch the map once and use validateInputShapesWith
+ * directly.
+ */
+export async function validateInputShapes(
+  moduleName: string,
+  input: Record<string, unknown> | undefined | null,
+  fetchSchema: SchemaFetcher = defaultSchemaFetcher,
+): Promise<RefShapeError[]> {
+  if (!input) return [];
+  const types = await getModuleFieldTypes(moduleName, fetchSchema);
+  return validateInputShapesWith(types, input);
+}
+
+/**
+ * Annotation merged into platform responses that carry `flagged: true`. The
+ * platform itself returns the bare flag with no explanation — without this,
+ * agents loop retrying with higher confidence or `confirmed: true`.
+ */
+export const FLAGGED_ANNOTATION = {
+  flag_reason:
+    "Flagged submissions are recorded as intentions pending human review — the state transition did NOT occur. Causes: ai.confidence below the activity's confidence_threshold, or the activity's actor does not permit AI execution.",
+  agent_action:
+    "Do not retry with a higher confidence. Report the flag to the user; a human can complete the activity in Inistate.",
+} as const;
+
 // Test-only helpers.
 export function __resetGuardCaches(): void {
   schemaCache.clear();
+  canvasCache.clear();
   flaggedCache.clear();
 }
