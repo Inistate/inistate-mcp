@@ -188,6 +188,220 @@ export function normalizeFieldType(
   return { type: normalized, changed: normalized !== type };
 }
 
+/** Coerce one option entry to its display string. Agents send {value,label}
+ * objects (or numbers); the platform takes plain strings. Display text wins:
+ * label, then value, then name. Unrecognized shapes pass through unchanged
+ * so validation can report them. */
+function optionToString(option: unknown): unknown {
+  if (typeof option === "string") return option;
+  if (typeof option === "number") return String(option);
+  if (option && typeof option === "object" && !Array.isArray(option)) {
+    const o = option as Record<string, unknown>;
+    const s = o.label ?? o.value ?? o.name;
+    if (typeof s === "string") return s;
+    if (typeof s === "number") return String(s);
+  }
+  return option;
+}
+
+export function normalizeOptionList(options: unknown): { options: unknown; changed: boolean } {
+  if (!Array.isArray(options)) return { options, changed: false };
+  let changed = false;
+  const out = options.map((o) => {
+    const v = optionToString(o);
+    if (v !== o) changed = true;
+    return v;
+  });
+  return { options: changed ? out : options, changed };
+}
+
+const asArray = (v: unknown): any[] => (Array.isArray(v) ? v : []);
+
+// ---------- Primitive coercion ----------
+//
+// Smaller / non-Anthropic models routinely emit JSON primitives as strings
+// ("true", "0.85") because they serialize through stringly-typed intermediates.
+// A strict Zod schema rejects these with a hard -32602 the model often cannot
+// recover from (it mutates the value, not the type). Coerce the obvious cases
+// on the way in; genuinely wrong values still fall through to the type check.
+
+/** Pull a scalar out of a single-key {item: x} / {items: x} wrapper. Agents
+ * that XML-marshal arrays sometimes wrap scalar values the same way
+ * (initial: {item: "true"}). Returns the value unchanged otherwise. */
+function unwrapScalarItem(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const keys = Object.keys(v as Record<string, unknown>);
+    if (keys.length === 1 && (keys[0] === "item" || keys[0] === "items")) {
+      return (v as Record<string, unknown>)[keys[0]];
+    }
+  }
+  return v;
+}
+
+const TRUE_STRINGS = new Set(["true", "1", "yes"]);
+const FALSE_STRINGS = new Set(["false", "0", "no"]);
+
+/** Stringly-typed boolean → boolean: "true"/"True"/"1"/"yes" → true,
+ * "false"/"0"/"no" → false (case-insensitive). Also unwraps a {item: …}
+ * wrapper first. Anything unrecognized passes through to the type check. */
+export function coerceBoolish(v: unknown): unknown {
+  const u = unwrapScalarItem(v);
+  if (typeof u === "string") {
+    const s = u.trim().toLowerCase();
+    if (TRUE_STRINGS.has(s)) return true;
+    if (FALSE_STRINGS.has(s)) return false;
+  }
+  return u;
+}
+
+/** Numeric string ("0.85", "100") → number. Non-numeric strings pass through
+ * so z.number() still reports them. Unwraps a {item: …} wrapper first. */
+export function coerceNumish(v: unknown): unknown {
+  const u = unwrapScalarItem(v);
+  if (typeof u === "string" && u.trim() !== "") {
+    const n = Number(u);
+    if (Number.isFinite(n)) return n;
+  }
+  return u;
+}
+
+/** An array-shaped slot given an empty string ("") or null — agents emit this
+ * for "no items" (activities: fields: ""). Treat as absent so the optional
+ * array check passes instead of -32602. Returns true if the key was cleared. */
+export function dropEmptyArrayish(obj: Record<string, unknown>, key: string): boolean {
+  const v = obj[key];
+  if (v === null || (typeof v === "string" && v.trim() === "")) {
+    delete obj[key];
+    return true;
+  }
+  return false;
+}
+
+/** Unwrap XML/SOAP-style array marshalling — { item: [...] } or { items: [...] }
+ * (and a single { item: {...} }) — to the bare array. Agents that serialize
+ * lists through an XML-ish intermediate emit this for every section and nested
+ * list (options, sub-fields, from_states). Non-wrapped values pass through. */
+export function unwrapItems(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const keys = Object.keys(v as Record<string, unknown>);
+    if (keys.length === 1 && (keys[0] === "item" || keys[0] === "items")) {
+      const inner = (v as Record<string, unknown>)[keys[0]];
+      return Array.isArray(inner) ? inner : [inner];
+    }
+  }
+  return v;
+}
+
+/**
+ * Fold common agent near-misses into canonical shape, in place, before
+ * validation: `displayName`/`label` used instead of `name`, `{value,label}`
+ * option objects, and `fromState`/`toState` flow keys. Returns one warning
+ * per repair so agents learn the canonical vocabulary. create_module /
+ * update_module apply the same repairs at the input boundary, so this is a
+ * no-op on their payloads — it exists so validate_design (which takes raw
+ * objects) stays a faithful dry-run.
+ */
+export function repairDesignInput(schema: Record<string, any>): string[] {
+  const warnings: string[] = [];
+
+  // Unwrap {item:[…]} array marshalling on every section first, in place, so
+  // the checks below (and validateDesign's own `for…of`) see plain arrays
+  // instead of throwing "information is not iterable".
+  for (const key of ["information", "states", "activities", "flows"] as const) {
+    const unwrapped = unwrapItems(schema[key]);
+    if (unwrapped !== schema[key]) {
+      schema[key] = unwrapped;
+      warnings.push(`'${key}' was wrapped as {item:[…]} — unwrapped to a plain array.`);
+    }
+  }
+
+  const fixItemArrays = (it: any) => {
+    if (!it || typeof it !== "object") return;
+    for (const key of ["options", "fields", "from_states", "from", "to_states"]) {
+      if (dropEmptyArrayish(it, key)) continue; // "" / null → absent
+      if (it[key] !== undefined) it[key] = unwrapItems(it[key]);
+    }
+  };
+
+  const fixName = (it: any, kind: string) => {
+    if (!it || typeof it !== "object") return;
+    const aliasKey = it.displayName !== undefined ? "displayName" : it.label !== undefined ? "label" : null;
+    if (!aliasKey) return;
+    const alias = it[aliasKey];
+    if (typeof alias === "string" && alias !== "") {
+      if (!it.name) {
+        it.name = alias;
+        warnings.push(`${kind} '${alias}': '${aliasKey}' is not a schema key — used as 'name' ('name' is the display name).`);
+      } else if (it.name !== alias) {
+        warnings.push(`${kind} '${it.name}': '${aliasKey}' is ignored — 'name' is the display name shown to users.`);
+      }
+    }
+    delete it.displayName;
+    delete it.label;
+  };
+
+  const fixOptions = (it: any, kind: string) => {
+    if (!it || typeof it !== "object") return;
+    const norm = normalizeOptionList(it.options);
+    if (norm.changed) {
+      it.options = norm.options;
+      warnings.push(`${kind} '${it.name}': options given as objects — normalized to plain strings ({label} or {value}).`);
+    }
+  };
+
+  for (const f of asArray(schema.information)) {
+    fixItemArrays(f);
+    fixName(f, "Field");
+    fixOptions(f, "Field");
+    for (const sf of asArray(f?.fields)) {
+      fixItemArrays(sf);
+      fixName(sf, "Sub-field");
+      fixOptions(sf, "Sub-field");
+    }
+  }
+  for (const s of asArray(schema.states)) {
+    fixName(s, "State");
+    if (s && typeof s === "object" && s.initial !== undefined) s.initial = coerceBoolish(s.initial);
+  }
+  for (const a of asArray(schema.activities)) {
+    fixItemArrays(a);
+    fixName(a, "Activity");
+    if (a && typeof a === "object" && a.confidence_threshold !== undefined) {
+      a.confidence_threshold = coerceNumish(a.confidence_threshold);
+    }
+    for (const ref of asArray(a?.fields)) {
+      if (ref && typeof ref === "object") fixOptions(ref, `Activity '${a?.name}' field`);
+    }
+  }
+  for (const fl of asArray(schema.flows)) {
+    if (!fl || typeof fl !== "object") continue;
+    let aliased = false;
+    if (fl.from === undefined && typeof fl.fromState === "string") {
+      fl.from = fl.fromState;
+      aliased = true;
+    }
+    if (fl.to === undefined && typeof fl.toState === "string") {
+      fl.to = fl.toState;
+      aliased = true;
+    }
+    if (aliased) {
+      warnings.push(`Flow '${fl.from} → ${fl.to}': use 'from'/'to', not 'fromState'/'toState'.`);
+    }
+    delete fl.fromState;
+    delete fl.toState;
+    if (fl.activity === undefined && fl.activities !== undefined) {
+      const picked = unwrapItems(fl.activities);
+      const name = Array.isArray(picked) ? picked[0] : picked;
+      if (typeof name === "string") {
+        fl.activity = name;
+        warnings.push(`Flow '${fl.from} → ${fl.to}': a flow takes a single 'activity', not 'activities' — used '${name}'.`);
+      }
+      delete fl.activities;
+    }
+  }
+  return warnings;
+}
+
 const NAMED_COLORS: Record<string, string> = {
   gray: "#5A6070", grey: "#5A6070", slate: "#5A6070", silver: "#5A6070",
   blue: "#2968A8", navy: "#2968A8", azure: "#2968A8",
@@ -334,6 +548,18 @@ interface ValidationResult {
   summary: Record<string, unknown> | null;
 }
 
+/**
+ * Structural check for one flow row. Flows are loose on the wire (tools.ts
+ * flowShape) so incomplete rows reach this message instead of a Zod -32602;
+ * update_module's partial path uses it too, where validateDesign never runs.
+ */
+export function flowCompletenessError(f: any, index: number): string | null {
+  const missing = (["from", "to", "activity"] as const).filter((k) => f?.[k] === undefined);
+  return missing.length > 0
+    ? `Flow at index ${index} is missing '${missing.join("', '")}' — flows are { from, to, activity } using state/activity names.`
+    : null;
+}
+
 export function validateDesign(
   schema: Record<string, any>,
   mode: "create" | "update" = "create",
@@ -341,9 +567,11 @@ export function validateDesign(
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Resolve id-style references (flows pointing at state/activity ids, field
-  // refs pointing at field ids) before any checks, mirroring what
-  // create_module/update_module send to the platform.
+  // Fold near-miss vocabulary (displayName/label, object options,
+  // fromState/toState) before any checks, then resolve id-style references
+  // (flows pointing at state/activity ids, field refs pointing at field ids),
+  // mirroring what create_module/update_module send to the platform.
+  warnings.push(...repairDesignInput(schema));
   warnings.push(...resolveDesignRefs(schema));
 
   const name: string = schema.name || "";
@@ -405,7 +633,7 @@ export function validateDesign(
 
     if (REFERENCE_TYPES_LOWER.has(base) && !hasConnection) {
       errors.push(
-        `Field '${f.name}' is type '${f.type}' but is missing 'connection'. Set 'connection' to the name of the module to link to (e.g. "connection": "Members").`,
+        `Field '${f.name}' is type '${f.type}' but is missing 'connection'. Set 'connection' to the name of a module that exists in this workspace (check list_modules).`,
       );
     }
     if (!REFERENCE_TYPES_LOWER.has(base) && hasConnection) {
@@ -555,7 +783,15 @@ export function validateDesign(
     }
 
     // Validate flows
-    for (const f of flows) {
+    for (let i = 0; i < flows.length; i++) {
+      const f = flows[i];
+      // A flow missing its keys outright (wrong key names) would otherwise
+      // produce one "state 'undefined'" error per key — say what's missing once.
+      const incomplete = flowCompletenessError(f, i);
+      if (incomplete) {
+        errors.push(incomplete);
+        continue;
+      }
       if (f.from !== "" && !stateNames.has(f.from)) {
         errors.push(
           `Flow references state '${f.from}' (from) which is not defined. Available states: ${[...stateNames].join(", ")}.`,
@@ -627,6 +863,14 @@ export function validateDesign(
       warnings,
       summary: errors.length === 0 ? summary : null,
     };
+  }
+
+  // Flows with no states in the payload (e.g. an update that leaves states
+  // server-side): reference checks need the states, but row completeness
+  // does not — catch incomplete rows before they 422 on the platform.
+  for (let i = 0; i < flows.length; i++) {
+    const incomplete = flowCompletenessError(flows[i], i);
+    if (incomplete) errors.push(incomplete);
   }
 
   // Record list module — minimal validation
@@ -749,6 +993,67 @@ export function parseStatesFromDescription(desc: string): string[] {
   return states.length >= 2 ? states : [];
 }
 
+// Types that need a companion attribute to validate (options for Selection/Tag,
+// connection for references, sub-fields for Table, an expression for Formula).
+// A scaffold can't supply those, and a reference/Selection field without them is
+// a hard validate_design error — so a parsed hint matching one collapses to Text.
+// The field name is the win; the agent upgrades the type when it fills the form.
+const UNSAFE_SCAFFOLD_TYPES = new Set([
+  "selection", "tag", "user", "users", "module", "modules", "table", "formula",
+]);
+
+/** Map a free-text "(type)" hint to a validate-clean field type, defaulting to
+ * Text for unknown or attribute-requiring types. */
+function hintToScaffoldType(hint?: string): string {
+  if (!hint) return "Text";
+  const norm = normalizeFieldType(hint).type;
+  if (!norm) return "Text";
+  const base = norm.toLowerCase();
+  if (!CANONICAL_TYPES.has(base) || UNSAFE_SCAFFOLD_TYPES.has(base)) return "Text";
+  return norm;
+}
+
+/**
+ * Pull an explicitly enumerated field list out of a description, e.g.
+ * "fields: project name (text), client (text), budget (currency/number)" or
+ * "fields like Title, Owner, Due Date". Each item's optional "(...)" hint is
+ * read as a type (leading token, so "currency/number" → Currency, and a "text -
+ * the company name" description keeps just "text"); unrecognized or
+ * attribute-requiring hints default to Text via hintToScaffoldType. Returns []
+ * when no clear enumeration is found — callers fall back to the generic
+ * recommended_fields, since a wrong scaffold costs more than an empty one.
+ */
+export function parseFieldsFromDescription(
+  desc: string,
+): Array<{ name: string; type: string }> {
+  const m =
+    /\bfields?\b(?:[^:.\n]{0,20}:|\s+(?:like|are|including|includes?|such as))\s*([^.;\n]+)/i.exec(
+      desc,
+    );
+  if (!m) return [];
+  const out: Array<{ name: string; type: string }> = [];
+  for (const raw of m[1].split(/,|\band\b/i)) {
+    let seg = raw.trim();
+    if (!seg) continue;
+    let hint: string | undefined;
+    const pm = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(seg);
+    if (pm) {
+      seg = pm[1].trim();
+      hint = pm[2].trim().split(/[\s/,-]+/)[0]; // first token of the parenthetical
+    }
+    const name = seg.replace(/["']/g, "").trim();
+    if (!name || name.length > 40) continue;
+    if (name.split(/\s+/).length > 5) continue; // a field name, not a clause
+    if (/^(etc|e\.?g|i\.?e|so on)$/i.test(name)) continue;
+    const titled = name.replace(/\b\w/g, (c) => c.toUpperCase());
+    if (!out.some((f) => f.name.toLowerCase() === titled.toLowerCase())) {
+      out.push({ name: titled, type: hintToScaffoldType(hint) });
+    }
+    if (out.length === 12) break;
+  }
+  return out.length >= 2 ? out : [];
+}
+
 /** Map free-text industry to a known key; unknown text falls back to general. */
 export function normalizeIndustry(industry?: string | null): string {
   if (!industry) return "general";
@@ -769,7 +1074,7 @@ const DESIGN_CONSTRAINTS = {
   field_types: VALID_FIELD_TYPES,
   state_colors: VALID_COLORS,
   reference_fields:
-    'User/Users/Module/Modules fields require \'connection\': the module name to link to (e.g. "Members" for workspace users). Not supported inside Table sub-fields.',
+    "User/Users/Module/Modules fields require 'connection': the name of a module that exists in this workspace. Not supported inside Table sub-fields.",
   actors: VALID_ACTOR_TYPES,
 };
 
@@ -780,6 +1085,10 @@ export function designWorkflow(
   const resolvedIndustry = normalizeIndustry(industry);
   const indDefaults = INDUSTRY_DEFAULTS[resolvedIndustry];
   const parsedStates = parseStatesFromDescription(description);
+  const parsedFields = parseFieldsFromDescription(description);
+  // Field names lifted from the description, ready to drop into the template.
+  // Empty array → callers keep the single-Title placeholder.
+  const parsedInformation = parsedFields.map((f) => ({ ...f, ai_hint: "" }));
 
   // An explicit state list always means a workflow module.
   let pattern = detectPattern(description);
@@ -794,13 +1103,15 @@ export function designWorkflow(
         icon: "",
         description: "",
 
-        information: [
-          { name: "Name", type: "Text", ai_hint: "" },
-        ],
+        information:
+          parsedInformation.length > 0
+            ? parsedInformation
+            : [{ name: "Name", type: "Text", ai_hint: "" }],
       },
       suggestions: {
         detected_pattern: "record_list",
         recommended_fields: ["Name", "Code", "Description", "Active"],
+        ...(parsedFields.length > 0 ? { fields_source: "parsed_from_description" } : {}),
         industry: resolvedIndustry,
         industry_defaults: indDefaults,
       },
@@ -904,9 +1215,10 @@ export function designWorkflow(
       icon: "",
       description: "",
       published: true,
-      information: [
-        { name: "Title", type: "Text", ai_hint: "" },
-      ],
+      information:
+        parsedInformation.length > 0
+          ? parsedInformation
+          : [{ name: "Title", type: "Text", ai_hint: "" }],
       states,
       activities: useParsed ? [] : baseActivities[pattern],
       flows: useParsed ? [] : baseFlows[pattern],
@@ -916,6 +1228,7 @@ export function designWorkflow(
       recommended_fields: recommendedFields[pattern],
       recommended_states: states.map((s) => s.name),
       ...(useParsed ? { states_source: "parsed_from_description" } : {}),
+      ...(parsedFields.length > 0 ? { fields_source: "parsed_from_description" } : {}),
       industry: resolvedIndustry,
       industry_defaults: {
         confidence_threshold: indDefaults.confidence_threshold,

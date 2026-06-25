@@ -7,6 +7,7 @@ import {
   getModuleFieldTypes,
   getPriorFlag,
   recordFlagged,
+  resolveInputKeys,
   validateInputShapes,
   validateInputShapesWith,
 } from "./activity-guard.js";
@@ -412,6 +413,24 @@ describe("validateInputShapes — User/Module pre-flight", () => {
     expect(errs).toEqual([]);
   });
 
+  it("rejects display names standing in as ids", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Assignee: { id: "carol", value: "Carol", username: "carol" },
+      "Linked Ticket": { id: "Gamma Inc", value: "Gamma Inc" },
+    });
+    expect(errs.length).toBe(2);
+    expect(errs[0].message).toMatch(/display name/);
+    expect(errs[1].message).toMatch(/display name/);
+  });
+
+  it("accepts numeric-string and document-style ids", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Assignee: { id: "803224", value: "Carol", username: "carol" },
+      "Linked Ticket": { id: "CLN00001", value: "Parent" },
+    });
+    expect(errs).toEqual([]);
+  });
+
   it("rejects a non-array for Users (plural)", async () => {
     const errs = await validateInputShapes("Ticket", {
       Reviewers: { id: 1, value: "Alice", username: "alice" },
@@ -517,6 +536,142 @@ describe("getModuleFieldTypes + validateInputShapesWith — bulk reuse", () => {
 
     expect(apiGet).toHaveBeenCalledTimes(1);
     expect(failures.length).toBe(25);
+  });
+});
+
+describe("human-actor bypass detection", () => {
+  const SCHEMA_HUMAN_FLOWS = {
+    activities: [
+      { name: "Start", actor: "human" },
+      { name: "AutoGo", actor: "ai" },
+    ],
+    information: [{ name: "Title", type: "Text" }],
+    states: ["Planned", "In Progress", "Done"],
+    flows: {
+      Planned: { activities: { Start: "In Progress" } },
+      "In Progress": { activities: { AutoGo: "Done" } },
+    },
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_HUMAN_FLOWS);
+  });
+
+  it("blocks changeState to the blocked activity's target state, even with confirmed", async () => {
+    const first = await evaluateActivity({
+      module: "Projects",
+      activity: "Start",
+      entryId: 5,
+      confidence: 0.9,
+    });
+    expect(first.ok).toBe(false);
+    expect((first as any).structured.error).toBe("human_actor_blocked");
+
+    const bypass = await evaluateActivity({
+      module: "Projects",
+      activity: "changeState",
+      entryId: 5,
+      state: "In Progress",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(bypass.ok).toBe(false);
+    expect((bypass as any).structured.error).toBe("human_actor_bypass_blocked");
+    expect((bypass as any).structured.blocked_activity).toBe("Start");
+  });
+
+  it("blocks a state override on any activity reaching the same state", async () => {
+    await evaluateActivity({ module: "Projects", activity: "Start", entryId: 5, confidence: 0.9 });
+    const override = await evaluateActivity({
+      module: "Projects",
+      activity: "edit",
+      entryId: 5,
+      state: "In Progress",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(override.ok).toBe(false);
+    expect((override as any).structured.error).toBe("human_actor_bypass_blocked");
+  });
+
+  it("does not block other entries or other target states", async () => {
+    await evaluateActivity({ module: "Projects", activity: "Start", entryId: 5, confidence: 0.9 });
+
+    const otherEntry = await evaluateActivity({
+      module: "Projects",
+      activity: "changeState",
+      entryId: 6,
+      state: "In Progress",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(otherEntry.ok).toBe(true);
+
+    const otherState = await evaluateActivity({
+      module: "Projects",
+      activity: "changeState",
+      entryId: 5,
+      state: "Done",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(otherState.ok).toBe(true);
+  });
+});
+
+describe("resolveInputKeys — unknown-key guard", () => {
+  const types = new Map([
+    ["project_name", "Text"],
+    ["Due Date", "Date"],
+    ["Title", "Text"],
+  ]);
+
+  it("leaves exact keys untouched", () => {
+    const input: Record<string, unknown> = { Title: "x", "Due Date": "2026-01-01" };
+    const res = resolveInputKeys(types, input);
+    expect(res.remapped).toEqual([]);
+    expect(res.unknown).toEqual([]);
+    expect(input).toEqual({ Title: "x", "Due Date": "2026-01-01" });
+  });
+
+  it("remaps near-miss keys (case/spacing/underscores) in place", () => {
+    const input: Record<string, unknown> = { "Project Name": "CRM", "due date": "2026-01-01" };
+    const res = resolveInputKeys(types, input);
+    expect(res.remapped).toEqual([
+      { from: "Project Name", to: "project_name" },
+      { from: "due date", to: "Due Date" },
+    ]);
+    expect(res.unknown).toEqual([]);
+    expect(input).toEqual({ project_name: "CRM", "Due Date": "2026-01-01" });
+  });
+
+  it("reports keys that match no field", () => {
+    const input: Record<string, unknown> = { Title: "x", State: "Active" };
+    const res = resolveInputKeys(types, input);
+    expect(res.unknown).toEqual(["State"]);
+    expect(input.State).toBe("Active");
+  });
+
+  it("never remaps onto a colliding or already-present key", () => {
+    const colliding = new Map([
+      ["Due Date", "Date"],
+      ["due_date", "Date"],
+    ]);
+    const res1 = resolveInputKeys(colliding, { "DUE DATE": "x" });
+    expect(res1.remapped).toEqual([]);
+    expect(res1.unknown).toEqual(["DUE DATE"]);
+
+    const input: Record<string, unknown> = { Title: "keep", title: "dupe" };
+    const res2 = resolveInputKeys(types, input);
+    expect(res2.remapped).toEqual([]);
+    expect(res2.unknown).toEqual(["title"]);
+    expect(input.Title).toBe("keep");
+  });
+
+  it("fails open on a null type map or empty input", () => {
+    expect(resolveInputKeys(null, { Anything: 1 })).toEqual({ remapped: [], unknown: [] });
+    expect(resolveInputKeys(types, undefined)).toEqual({ remapped: [], unknown: [] });
   });
 });
 
