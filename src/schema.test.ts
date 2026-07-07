@@ -731,7 +731,7 @@ describe("validateDesign — input normalization", () => {
     expect(result.valid).toBe(false);
     const missing = result.errors.filter((e) => e.includes("is missing"));
     expect(missing).toHaveLength(1);
-    expect(missing[0]).toContain("'from', 'to', 'activity'");
+    expect(missing[0]).toContain("'from', 'activity'");
     expect(result.errors.some((e) => e.includes("'undefined'"))).toBe(false);
   });
 

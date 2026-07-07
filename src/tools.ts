@@ -1,7 +1,7 @@
 import { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appendFile } from "node:fs";
 import { resolve } from "node:path";
-import { z } from "zod";
+import { number, string, z } from "zod";
 import { Backend } from "./backend.js";
 import { capabilityMessage } from "./capability.js";
 import {
@@ -33,6 +33,7 @@ import {
   unwrapItems,
   validateDesign,
 } from "./schema.js";
+import { info } from "node:console";
 
 // ---------- Logging ----------
 //
@@ -246,11 +247,11 @@ function normalizeModuleSections(body: Record<string, unknown>): void {
       type: normalizeFieldType(f.type as string | undefined).type,
       ...(Array.isArray(f.fields)
         ? {
-            fields: (f.fields as Array<Record<string, unknown>>).map((sf) => ({
-              ...sf,
-              type: normalizeFieldType(sf.type as string | undefined).type,
-            })),
-          }
+          fields: (f.fields as Array<Record<string, unknown>>).map((sf) => ({
+            ...sf,
+            type: normalizeFieldType(sf.type as string | undefined).type,
+          })),
+        }
         : {}),
     }));
   }
@@ -457,16 +458,16 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   const reliabilityParams: z.ZodRawShape = gov
     ? {}
     : {
-        idempotencyKey: z
-          .string()
-          .optional()
-          .describe("Replaying a submission with the same key applies the change at most once."),
-        expectedVersion: z
-          .number()
-          .int()
-          .optional()
-          .describe("Optimistic concurrency: the `version` from get_entry. The write fails with CONFLICT if the stored version differs."),
-      };
+      idempotencyKey: z
+        .string()
+        .optional()
+        .describe("Replaying a submission with the same key applies the change at most once."),
+      expectedVersion: z
+        .number()
+        .int()
+        .optional()
+        .describe("Optimistic concurrency: the `version` from get_entry. The write fails with CONFLICT if the stored version differs."),
+    };
 
   const submitActivityDescription = gov
     ? "Perform an activity on a module entry: standard (create [no entryId], edit, delete, changeStatus, comment, duplicate, manage) or any custom activity from get_module_schema. Call get_form before the first submission per (module, activity); reuse its schema for further entries. The `ai` object is REQUIRED (reasoning + model + confidence). If confidence < the activity's threshold, the transition is suppressed and the entry is flagged. Server-side guard rules (human/hybrid actor, state-change confirm, confidence-inflation) may block — see inistate://guardrails. Input shapes: ActivitySubmission in inistate://schema/runtime."
@@ -868,7 +869,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
         entryIds: z.array(z.union([z.string(), z.number()])).optional().describe("For bulk ops"),
         input: z
-          .preprocess(v => (v != null && typeof v === "object" && !Array.isArray(v) ? v : undefined), z.record(z.unknown()).optional())
+          .preprocess(v => (v === undefined || v === null ? undefined : typeof v === "object" && !Array.isArray(v) ? v : { __invalid_input_shape: true }), z.record(z.unknown()).optional())
           .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
@@ -952,6 +953,14 @@ Load resource inistate://schema before modifying to know valid field types, colo
         // match no field — a typo'd key is data loss with no signal. Near-miss
         // keys (casing/spacing/underscores) are remapped in place; truly
         // unknown keys are rejected with the field list.
+        if (input && "__invalid_input_shape" in input) {
+          const structured = {
+            error: "invalid_input_shape",
+            message: `'input' must be an object of field name -> value pairs (Eg. {\"Title\": \"...\"}). Arrays, strings and other non-object shapes are not valid.`,
+            agent_action: `Reformat 'input' as object or omit it entirely if this activity doesn't require field values.`
+          };
+          return err({ structured });
+        }
         let inputKeyNotes: string[] = [];
         const fieldTypes = input ? await getModuleFieldTypes(moduleName, fetchSchema) : null;
         if (input && fieldTypes) {
@@ -1082,31 +1091,37 @@ Load resource inistate://schema before modifying to know valid field types, colo
         activity: z.string().default("create"),
         ai: bulkAiParam,
         items: z.preprocess(
-          v => { const a = unwrapItems(v); return Array.isArray(a) ? a.filter(x => x != null && typeof x === "object" && !Array.isArray(x)) : a; },
+          v => {
+            const a = unwrapItems(v);
+            return Array.isArray(a) ?
+              a.map(x => x !== null && typeof x === "object" && !Array.isArray(x) ?
+                x : { __invalid_item: true }) : a
+          },
           z
-          .array(
-            z.object({
-              entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
-              input: z
-                .record(z.unknown())
-                .optional()
-                .describe("Field values keyed by display name. Same shape as submit_activity.input."),
-              state: z.string().optional().describe("Per-item target state name"),
-              comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
-              assignees: z.array(z.string()).optional(),
-              due: z.string().optional().describe("ISO 8601"),
-              ai: bulkAiShape
-                .optional()
-                .describe("Optional per-item ai override. Wholly replaces top-level ai for this item."),
-              clientRef: z
-                .string()
-                .optional()
-                .describe("Optional caller-supplied correlation id, echoed back on the result."),
-            }),
-          )
-          .min(1)
-          .max(100)
-          .describe("1-100 items. Each item carries only what differs from the top-level activity.")),
+            .array(
+              z.object({
+                __invalid_item: z.literal(true).optional(),
+                entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
+                input: z
+                  .record(z.unknown())
+                  .optional()
+                  .describe("Field values keyed by display name. Same shape as submit_activity.input."),
+                state: z.string().optional().describe("Per-item target state name"),
+                comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
+                assignees: z.array(z.string()).optional(),
+                due: z.string().optional().describe("ISO 8601"),
+                ai: bulkAiShape
+                  .optional()
+                  .describe("Optional per-item ai override. Wholly replaces top-level ai for this item."),
+                clientRef: z
+                  .string()
+                  .optional()
+                  .describe("Optional caller-supplied correlation id, echoed back on the result."),
+              }),
+            )
+            .min(1)
+            .max(100)
+            .describe("1-100 items. Each item carries only what differs from the top-level activity.")),
         confirmed: z
           .boolean()
           .optional()
@@ -1126,126 +1141,142 @@ Load resource inistate://schema before modifying to know valid field types, colo
           if (typeof item.entryId === "string" && item.entryId.trim() === "") item.entryId = undefined;
         }
 
+        const invalidItems = items.filter((item) =>
+          "__invalid_item" in item
+        );
+
+        if (invalidItems.length > 0) {
+          const structured = {
+            error: "invalid_items",
+            message: `${invalidItems.length} item(s) are not valid objects (e.g. a string, null, array, or JSON-encoded string).`,
+            activity,
+            agent_action:
+              "Resubmit all original activities including those that are valid. Each must be a plain object (not a string, null, array or JSON-encoded string)."
+          };
+          return err({ structured });
+        }
+
         // Actor/confidence/flag governance — only on backends that declare it
         // (the hosted Platform). A local runtime skips the whole guard.
         if (caps.governance) {
-        // Batch-level guard for actor (human/hybrid) and changeStatus rules,
-        // which apply uniformly to the whole batch since module + activity are shared.
-        const guard = await evaluateActivity({
-          module: moduleName,
-          activity,
-          confidence: ai?.confidence ?? 0,
-          confirmed,
-        }, fetchSchema, fetchCanvas);
-        if (!guard.ok) {
-          log(
-            "submit_activities",
-            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: ${guard.structured.error}`,
-          );
-          return err({ structured: guard.structured });
-        }
+          // Batch-level guard for actor (human/hybrid) and changeStatus rules,
+          // which apply uniformly to the whole batch since module + activity are shared.
+          const guard = await evaluateActivity({
+            module: moduleName,
+            activity,
+            confidence: ai?.confidence ?? 0,
+            confirmed,
+            entryIds: items.map((item) => item.entryId).filter((x): x is string | number => x !== undefined),
+          }, fetchSchema, fetchCanvas);
+          if (!guard.ok) {
+            log(
+              "submit_activities",
+              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: ${guard.structured.error}`,
+            );
+            return err({ structured: guard.structured });
+          }
 
-        // Any per-item state override must name a real state…
-        const itemsWithState = items
-          .map((it, i) => ({ idx: i, state: it.state }))
-          .filter((x) => !!x.state);
-        if (itemsWithState.length > 0) {
-          const knownStates = await getModuleStates(moduleName, fetchSchema);
-          if (knownStates) {
-            const unknown = itemsWithState.filter((x) => !knownStates.includes(x.state as string));
-            if (unknown.length > 0) {
+          // Any per-item state override must name a real state…
+          const itemsWithState = items
+            .map((it, i) => ({ idx: i, state: it.state }))
+            .filter((x) => !!x.state);
+          if (itemsWithState.length > 0) {
+            const knownStates = await getModuleStates(moduleName, fetchSchema);
+            if (knownStates) {
+              const unknown = itemsWithState.filter((x) => !knownStates.includes(x.state as string));
+              if (unknown.length > 0) {
+                const structured = {
+                  error: "unknown_state",
+                  message: `One or more items target states that do not exist on module '${moduleName}'. Available states: ${knownStates.join(", ")}.`,
+                  activity,
+                  items: unknown,
+                  agent_action:
+                    "Use one of the listed states, or omit 'state' to follow the activity's normal flow.",
+                };
+                log(
+                  "submit_activities",
+                  `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: unknown_state (${unknown.length} items)`,
+                );
+                return err({ structured });
+              }
+            }
+          }
+          // …must not reach a state whose human-only transition was just
+          // blocked on the same entry (confirmed does not unlock those)…
+          if (itemsWithState.length > 0) {
+            const bypassed = items
+              .map((it, i) => ({ idx: i, entryId: it.entryId, state: it.state }))
+              .filter(
+                (x) =>
+                  x.entryId !== undefined &&
+                  !!x.state &&
+                  getHumanBlockedStates(moduleName, x.entryId)?.states.has(x.state) === true,
+              );
+            if (bypassed.length > 0) {
               const structured = {
-                error: "unknown_state",
-                message: `One or more items target states that do not exist on module '${moduleName}'. Available states: ${knownStates.join(", ")}.`,
+                error: "human_actor_bypass_blocked",
+                message:
+                  "One or more items target a state whose transition was just blocked as a human-only activity. confirmed: true does not unlock human-only transitions.",
                 activity,
-                items: unknown,
+                items: bypassed,
                 agent_action:
-                  "Use one of the listed states, or omit 'state' to follow the activity's normal flow.",
+                  "Stop and do not work around this. A human must perform these transitions in Inistate — report them to the user.",
               };
               log(
                 "submit_activities",
-                `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: unknown_state (${unknown.length} items)`,
+                `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: human_actor_bypass_blocked (${bypassed.length} items)`,
               );
               return err({ structured });
             }
           }
-        }
-        // …must not reach a state whose human-only transition was just
-        // blocked on the same entry (confirmed does not unlock those)…
-        if (itemsWithState.length > 0) {
-          const bypassed = items
-            .map((it, i) => ({ idx: i, entryId: it.entryId, state: it.state }))
-            .filter(
-              (x) =>
-                x.entryId !== undefined &&
-                !!x.state &&
-                getHumanBlockedStates(moduleName, x.entryId)?.states.has(x.state) === true,
-            );
-          if (bypassed.length > 0) {
+          // …and requires explicit confirmation.
+          if (itemsWithState.length > 0 && !confirmed) {
             const structured = {
-              error: "human_actor_bypass_blocked",
+              error: "state_override_requires_confirmation",
               message:
-                "One or more items target a state whose transition was just blocked as a human-only activity. confirmed: true does not unlock human-only transitions.",
+                "One or more items pass a 'state' override. Bulk state changes require explicit user authorization — surface the planned changes and resubmit with confirmed: true.",
               activity,
-              items: bypassed,
+              items: itemsWithState,
               agent_action:
-                "Stop and do not work around this. A human must perform these transitions in Inistate — report them to the user.",
+                "Show the user the per-item state changes you intend to make, then resubmit with confirmed: true.",
             };
             log(
               "submit_activities",
-              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: human_actor_bypass_blocked (${bypassed.length} items)`,
+              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: state_override_requires_confirmation (${itemsWithState.length} items)`,
             );
             return err({ structured });
           }
-        }
-        // …and requires explicit confirmation.
-        if (itemsWithState.length > 0 && !confirmed) {
-          const structured = {
-            error: "state_override_requires_confirmation",
-            message:
-              "One or more items pass a 'state' override. Bulk state changes require explicit user authorization — surface the planned changes and resubmit with confirmed: true.",
-            activity,
-            items: itemsWithState,
-            agent_action:
-              "Show the user the per-item state changes you intend to make, then resubmit with confirmed: true.",
-          };
-          log(
-            "submit_activities",
-            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: state_override_requires_confirmation (${itemsWithState.length} items)`,
-          );
-          return err({ structured });
-        }
 
-        // Per-item confidence inflation: each item may override `ai`, so we
-        // can't fold this into the batch-level evaluateActivity call.
-        if (!confirmed) {
-          const inflated: Array<{ idx: number; entryId?: string | number; previous: number; current: number }> = [];
-          for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            const itemAi = item.ai ?? ai;
-            const conf = itemAi?.confidence ?? 0;
-            const prior = getPriorFlag(moduleName, item.entryId, activity);
-            if (prior && conf > prior.confidence + 1e-6) {
-              inflated.push({ idx: i, entryId: item.entryId, previous: prior.confidence, current: conf });
+          // Per-item confidence inflation: each item may override `ai`, so we
+          // can't fold this into the batch-level evaluateActivity call.
+          if (!confirmed) {
+            const inflated: Array<{ idx: number; entryId?: string | number; previous: number; current: number }> = [];
+            for (let i = 0; i < items.length; i++) {
+              const item = items[i];
+              const itemAi = item.ai ?? ai;
+              const conf = itemAi?.confidence ?? 0;
+              const prior = getPriorFlag(moduleName, item.entryId, activity);
+              if (prior && conf > prior.confidence + 1e-6) {
+                inflated.push({ idx: i, entryId: item.entryId, previous: prior.confidence, current: conf });
+              }
+            }
+            if (inflated.length > 0) {
+              const structured = {
+                error: "confidence_inflation_blocked",
+                message:
+                  "One or more items target entries that were previously flagged for human review and would be resubmitted with a higher confidence. Surface the flag(s) to the user.",
+                activity,
+                items: inflated,
+                agent_action:
+                  "Stop. Tell the user which entries were flagged. Do not retry these items with a higher confidence on your own. If the user explicitly authorizes proceeding, resubmit with confirmed: true.",
+              };
+              log(
+                "submit_activities",
+                `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: confidence_inflation_blocked (${inflated.length} items)`,
+              );
+              return err({ structured });
             }
           }
-          if (inflated.length > 0) {
-            const structured = {
-              error: "confidence_inflation_blocked",
-              message:
-                "One or more items target entries that were previously flagged for human review and would be resubmitted with a higher confidence. Surface the flag(s) to the user.",
-              activity,
-              items: inflated,
-              agent_action:
-                "Stop. Tell the user which entries were flagged. Do not retry these items with a higher confidence on your own. If the user explicitly authorizes proceeding, resubmit with confirmed: true.",
-            };
-            log(
-              "submit_activities",
-              `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: confidence_inflation_blocked (${inflated.length} items)`,
-            );
-            return err({ structured });
-          }
-        }
         } // end governance gate
 
         // Key-match + reference-shape pre-flight. Fetch the field-type map once
@@ -1775,6 +1806,20 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     }) => {
       try {
         applyWorkspace(workspaceId);
+        const emptySections = Object.entries({ name, icon, desc, information, states, activities, flows }).filter(([, v]) => {
+          Array.isArray(v) && v.length === 0
+        }).map(([k]) => k);
+        if (emptySections.length > 0) {
+          log("update_module", `id=${id} → BLOCKED: empty_section_rejected (${emptySections.join(", ")})`);
+          return err({
+            structured: {
+              error: "empty_section_rejected",
+              message: `Section(s) '${emptySections.join("', '")}' were sent as empty arrays, which would wipe the entire section. Omit the field entirely to leave it unchanged, or provide its full contents.`,
+              sections: emptySections,
+              agent_action: "Remove the empty section(s) from the request, or supply their intended contents.",
+            },
+          });
+        }
         const body: Record<string, unknown> = { id };
         if (name) body.name = name;
         if (icon) body.icon = icon;
@@ -1875,27 +1920,27 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   // structural contract is stable) without the operating manual attached.
   const scaffoldInput = caps.scaffold
     ? {
-        source: z
-          .string()
-          .describe(
-            "The data source: `notion://<databaseId>`, `airtable://<baseId>/<tableIdOrName>`, or a local SQLite path (e.g. `./core.db` or `sqlite://./core.db?table=tasks`).",
-          ),
-        table: z
-          .string()
-          .optional()
-          .describe("Which table to model. Omit on a SQLite source to DISCOVER the available tables first; provide it to draft the schema. Optional for Airtable if already in the URI."),
-        name: z.string().optional().describe("Override the generated module name (defaults to the source table name)."),
-        state: z
-          .string()
-          .optional()
-          .describe("Promote a specific column to the workflow's state column (overrides auto-detection of a status/state/stage/phase column)."),
-      }
+      source: z
+        .string()
+        .describe(
+          "The data source: `notion://<databaseId>`, `airtable://<baseId>/<tableIdOrName>`, or a local SQLite path (e.g. `./core.db` or `sqlite://./core.db?table=tasks`).",
+        ),
+      table: z
+        .string()
+        .optional()
+        .describe("Which table to model. Omit on a SQLite source to DISCOVER the available tables first; provide it to draft the schema. Optional for Airtable if already in the URI."),
+      name: z.string().optional().describe("Override the generated module name (defaults to the source table name)."),
+      state: z
+        .string()
+        .optional()
+        .describe("Promote a specific column to the workflow's state column (overrides auto-detection of a status/state/stage/phase column)."),
+    }
     : {
-        source: z.string(),
-        table: z.string().optional(),
-        name: z.string().optional(),
-        state: z.string().optional(),
-      };
+      source: z.string(),
+      table: z.string().optional(),
+      name: z.string().optional(),
+      state: z.string().optional(),
+    };
 
   configureTools.push(server.registerTool(
     "scaffold_module",

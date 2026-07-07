@@ -554,9 +554,9 @@ interface ValidationResult {
  * update_module's partial path uses it too, where validateDesign never runs.
  */
 export function flowCompletenessError(f: any, index: number): string | null {
-  const missing = (["from", "to", "activity"] as const).filter((k) => f?.[k] === undefined);
+  const missing = (["from", "activity"] as const).filter((k) => f?.[k] === undefined);
   return missing.length > 0
-    ? `Flow at index ${index} is missing '${missing.join("', '")}' — flows are { from, to, activity } using state/activity names.`
+    ? `Flow at index ${index} is missing '${missing.join("', '")}' — flows are { from, to, activity } or { from, activity } using state/activity names.`
     : null;
 }
 
@@ -747,19 +747,26 @@ export function validateDesign(
           );
         } else if (a.confidence_threshold > 1) {
           warnings.push(
-            `Activity '${a.name}' confidence_threshold ${a.confidence_threshold} read as a percentage — normalized to ${a.confidence_threshold / 100}.`,
+            `Activity '${a.name}' confidence_threshold ${a.confidence_threshold} read as a percentage - normalized to ${a.confidence_threshold / 100}.`,
           );
         }
       }
 
       // Activity field references
+      const isReference = (str: string) => /\d/.test(str);
       if (a.fields && Array.isArray(a.fields)) {
         for (const ref of a.fields) {
           const fieldName = typeof ref === "string" ? ref : ref.name;
           if (!fieldNames.has(fieldName)) {
-            errors.push(
-              `Activity '${a.name}' references field '${fieldName}' which is not defined in information. Available fields: ${[...fieldNames].join(", ")}.`,
-            );
+            if (isReference((fieldName))) {
+              warnings.push(
+                `Activity '${a.name}' references field '${fieldName}' which is not defined in information. Likely a layout element reference.`
+              );
+            } else {
+              errors.push(
+                `Activity '${a.name}' references field '${fieldName}' which is not defined in information. Available fields: ${[...fieldNames].join(", ")}.`,
+              );
+            }
           }
         }
       }
@@ -797,7 +804,7 @@ export function validateDesign(
           `Flow references state '${f.from}' (from) which is not defined. Available states: ${[...stateNames].join(", ")}.`,
         );
       }
-      if (!stateNames.has(f.to)) {
+      if (f.to !== undefined && !stateNames.has(f.to)) {
         errors.push(
           `Flow references state '${f.to}' (to) which is not defined. Available states: ${[...stateNames].join(", ")}.`,
         );
@@ -1201,12 +1208,12 @@ export function designWorkflow(
   const useParsed = parsedStates.length > 0;
   const states = useParsed
     ? parsedStates.map((name, i) => ({
-        name,
-        color: suggestColorForState(name),
-        ...(i === 0 ? { initial: true } : {}),
-        ai_hint: "",
-        ai_instruction: "",
-      }))
+      name,
+      color: suggestColorForState(name),
+      ...(i === 0 ? { initial: true } : {}),
+      ai_hint: "",
+      ai_instruction: "",
+    }))
     : baseStates[pattern];
 
   return {

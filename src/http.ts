@@ -104,9 +104,20 @@ function sendUnauthorized(res: express.Response, description: string) {
   });
 }
 
-app.get("/mcp", (_req, res) => sendUnauthorized(res, "Missing Authorization header"));
-app.delete("/mcp", (_req, res) => sendUnauthorized(res, "Missing Authorization header"));
-
+app.get("/mcp", (_req, res) => {
+  res.set("ALLOW", "POST").status(405).json({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Method not allowed." },
+    id: null,
+  })
+});
+app.delete("/mcp", (_req, res) => {
+  res.set("ALLOW", "POST").status(405).json({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Method not allowed." },
+    id: null,
+  })
+});
 app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) => {
   try {
     const authHeader = req.headers["authorization"] as string | undefined;

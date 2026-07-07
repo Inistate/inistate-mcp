@@ -159,6 +159,7 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     if (client.client_name) {
       query.set("mcp_client_name", client.client_name);
     }
+    query.set("mcp_client_redirectURI", new URL(params.redirectUri).origin);
     const loginUrl = `${this.appUrl}${this.loginPath}?${query.toString()}`;
 
     res.redirect(302, loginUrl);
