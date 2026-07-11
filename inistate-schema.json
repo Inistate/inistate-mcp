@@ -112,7 +112,7 @@
 
     "ActivityDefinition": {
       "type": "object",
-      "description": "A custom activity (e.g. Approve, Reject). Standard activities (create, edit, delete, etc.) are implicit.",
+      "description": "A custom activity (e.g. Approve, Reject). Standard activities are implicit — never define one named Create, Edit, View, Quick View, Delete, Change State, Duplicate, Comment, History, Assign, Import or Print (any casing); name business actions distinctly, e.g. 'Assign Technician' not 'Assign'.",
       "required": ["name"],
       "properties": {
         "id": {
@@ -243,7 +243,7 @@
         "activities": {
           "type": "array",
           "items": { "$ref": "#/definitions/ActivityDefinition" },
-          "description": "Custom activities (e.g. Approve, Reject). Standard activities (create, edit, delete, view, assign, comment, etc.) are always available. Omit for record list modules that only need standard activities."
+          "description": "Custom activities (e.g. Approve, Reject). Standard activities (Create, Edit, View, Quick View, Delete, Change State, Duplicate, Comment, History, Assign, Import, Print) are always available on every module — never redefine them here or reference them in flows. Omit for record list modules that only need standard activities."
         },
         "flows": {
           "type": "array",
@@ -1120,6 +1120,7 @@
       "Always call get_form() before submit_activity() to discover required fields and valid options",
       "Use tier='basic' by default; only request 'extended' when activity details are needed",
       "Not all modules have workflows — record list modules (master data, lookup tables) have no states, activities, or flows. Use standard create/edit/delete activities directly.",
+      "Every module has the standard activities Create, Edit, View, Quick View, Delete, Change State, Duplicate, Comment, History, Assign, Import and Print built in — never define user activities with these names (any casing) or reference them in flows. Define only business transition activities, named distinctly (e.g. 'Assign Technician' not 'Assign').",
       "File/Image fields use object values, not plain strings. Retrieval returns { name, path }. Submission accepts { name, path } where path is from request_upload_url()+confirm_upload() (always the default flow; fall back to upload_file() only if it fails) or an external URL. Files/Images (plural) use arrays of these objects. To download, prepend /api/mcp/download/{moduleName} to any /s/ path.",
       "Module/User fields use object values. Retrieval returns { value, id } for Module and { value, id, username } for User. Submission accepts the same shape — the MCP layer decomposes these into internal storage format. Modules/Users (plural) use arrays of these objects."
     ],

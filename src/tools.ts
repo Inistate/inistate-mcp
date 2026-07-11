@@ -30,6 +30,7 @@ import {
   normalizeOptionList,
   normalizeStateColor,
   resolveDesignRefs,
+  stripRedundantStandardActivities,
   unwrapItems,
   validateDesign,
 } from "./schema.js";
@@ -1604,7 +1605,8 @@ Load resource inistate://schema before modifying to know valid field types, colo
       description: `Generate a scaffolded ModuleSchema template from a natural language description. Use when the user wants to create a new module or workflow.
 
 Design workflow: design_workflow → (complete template) → validate_design → create_module → get_module_schema(tier=extended).
-Load resources inistate://schema and inistate://design-guide before designing for valid field types, colors, and design rules.`,
+Load resources inistate://schema and inistate://design-guide before designing for valid field types, colors, and design rules.
+Every module has Create, Edit, View, Quick View, Delete, Change State, Duplicate, Comment, History, Assign, Import and Print built in — never define activities with these names or model them as flows; define only business transition activities (e.g. Submit, Approve, Reject).`,
       inputSchema: {
         description: z
           .string()
@@ -1727,6 +1729,11 @@ Load resources inistate://schema and inistate://design-guide before designing fo
             },
           });
         }
+        // Run the reserved-activity strip here (validateDesign repeats it
+        // idempotently) so its teaching note can ride on the success
+        // response — silently dropping schema elements would leave the agent
+        // believing they were created.
+        const stripNotes = stripRedundantStandardActivities(body as Record<string, any>);
         // Validate post-normalization — the same rules validate_design applies,
         // so a failing design costs a structured error, not an API 422 (and the
         // agent no longer needs a separate validate_design round trip).
@@ -1750,6 +1757,9 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         log("create_module", `name=${name}`);
         const data = await backend.createModule(body);
         log("create_module", `name=${name} → ok`);
+        if (stripNotes.length > 0 && data && typeof data === "object" && !Array.isArray(data)) {
+          return ok({ ...(data as Record<string, unknown>), hint: stripNotes.join(" ") });
+        }
         return ok(data);
       } catch (e) {
         log("create_module", `name=${name} → FAILED: ${e instanceof Error ? e.message : String(e)}`);
@@ -1823,7 +1833,13 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         // `information`) can legitimately reference fields that live on the
         // server-side canvas, which the validator cannot see — let the
         // platform validate those.
+        const stripNotes: string[] = [];
         if (information) {
+          // After stripUnknownSectionIds, a surviving id is a verified canvas
+          // element — the strip leaves those untouched and only removes
+          // id-less (new) reserved-named orphans/self-loops. Run it here so
+          // the teaching note can ride on the success response.
+          stripNotes.push(...stripRedundantStandardActivities(body as Record<string, any>));
           const validation = validateDesign(body as Record<string, any>, "update");
           const connErrors = await checkConnectionTargets(body.information, name);
           if (!validation.valid || connErrors.length > 0) {
@@ -1843,10 +1859,16 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         log("update_module", `id=${id}${name ? ` newName=${name}` : ""}${idRepairs.length > 0 ? ` idRepairs=${idRepairs.length}` : ""}`);
         const data = await backend.updateModule(body);
         log("update_module", `id=${id} → ok`);
-        if (idRepairs.length > 0 && data && typeof data === "object" && !Array.isArray(data)) {
+        const hints = [
+          ...(idRepairs.length > 0
+            ? [`Ids matching no existing element were removed; these items were created as new: ${idRepairs.join(", ")}. Use ids from get_module_canvas to update/rename existing items.`]
+            : []),
+          ...stripNotes,
+        ];
+        if (hints.length > 0 && data && typeof data === "object" && !Array.isArray(data)) {
           return ok({
             ...(data as Record<string, unknown>),
-            hint: `Ids matching no existing element were removed; these items were created as new: ${idRepairs.join(", ")}. Use ids from get_module_canvas to update/rename existing items.`,
+            hint: hints.join(" "),
           });
         }
         return ok(data);

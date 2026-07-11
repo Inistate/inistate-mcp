@@ -422,8 +422,7 @@ types:
   Integer, Number,   Numeric values
   Currency           
 
-  Date, DateTime,    Date/time fields
-  DateRange          
+  Date, DateTime     Date/time fields (model a date range as two Date fields)
 
   User, Users        Reference to workspace members (needs connection)
 
@@ -450,6 +449,14 @@ state. Use only the 8 hex colors from Section 3. Always include an
 ai_hint explaining when an entry should be in this state.
 
 ## 5.4 Activities
+
+Every module has the standard activities **Create, Edit, View, Quick
+View, Delete, Change State, Duplicate, Comment, History, Assign, Import
+and Print** built in — never define a user activity with one of these
+names (any casing: \"changeStatus\", \"Quick View\" and \"quick_view\"
+all collide) and never reference them in flows. Define only business
+transition activities, named distinctly (e.g. \"Assign Technician\" not
+\"Assign\", \"Cancel Order\" not \"Delete\").
 
 Each activity defines a custom action. Include:
 
@@ -529,8 +536,9 @@ The prefix generates IDs like PREFIX-YYYY-NNNN (e.g., SVC-2026-0001).
 2.  Mark decision fields as required (e.g., remarks when rejecting,
     feedback when verifying).
 
-3.  Keep activity names short and action-oriented (Triage, Assign,
-    Escalate, Resolve, Verify).
+3.  Keep activity names short and action-oriented (Triage, Escalate,
+    Resolve, Verify) — but never reuse a reserved standard activity
+    name (see 5.4), e.g. use \"Assign Technician\", not \"Assign\".
 
 4.  Every activity that performs a state transition must have a matching
     flow entry.

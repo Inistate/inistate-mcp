@@ -845,6 +845,133 @@ describe("update_module unknown-id stripping", () => {
   });
 });
 
+describe("reserved standard activities — write-path guard", () => {
+  it("create_module strips reserved self-loops/orphans from the sent payload and hints", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Tickets",
+        information: [{ name: "Title", type: "Text" }],
+        states: [
+          { name: "Open", color: "#5A6070", initial: true },
+          { name: "Closed", color: "#1E6B45" },
+        ],
+        activities: [
+          { name: "Comment", actor: "human" },
+          { name: "Create", actor: "human" },
+          { name: "Resolve", actor: "human" },
+        ],
+        flows: [
+          { from: "Open", to: "Open", activity: "Comment" },
+          { from: "Open", to: "Closed", activity: "Resolve" },
+          { from: "Closed", to: "Closed", activity: "History" },
+        ],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const acts = lastCreatePayload!.activities as Array<Record<string, unknown>>;
+    expect(acts.map((a) => a.name)).toEqual(["Resolve"]);
+    expect(lastCreatePayload!.flows as unknown[]).toHaveLength(1);
+    const res = parse(result);
+    expect(res.hint).toContain("Removed reserved standard activities");
+    expect(res.hint).toContain("'Comment', 'Create'");
+  });
+
+  it("create_module blocks a reserved-named activity doing a real transition", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Jobs",
+        information: [{ name: "Title", type: "Text" }],
+        states: [
+          { name: "Draft", color: "#5A6070", initial: true },
+          { name: "Assigned", color: "#2968A8" },
+        ],
+        activities: [{ name: "Assign", actor: "human" }],
+        flows: [{ from: "Draft", to: "Assigned", activity: "Assign" }],
+      },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("validation_failed");
+    expect(res.errors.some((e: string) => e.includes("reserved standard activity name") && e.includes("'Assign Technician'"))).toBe(true);
+  });
+
+  it("create_module steers a real-transition flow naming an undefined standard activity toward removal", async () => {
+    const result = await client.callTool({
+      name: "create_module",
+      arguments: {
+        name: "Docs",
+        information: [{ name: "Title", type: "Text" }],
+        states: [
+          { name: "Open", color: "#5A6070", initial: true },
+          { name: "Done", color: "#1E6B45" },
+        ],
+        activities: [{ name: "Finish", actor: "human" }],
+        flows: [
+          { from: "Open", to: "Done", activity: "Finish" },
+          { from: "Open", to: "Done", activity: "Change State" },
+        ],
+      },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.errors.some((e: string) => e.includes("built-in standard activity") && e.includes("remove this flow"))).toBe(true);
+  });
+
+  it("update_module leaves a known-id reserved-named activity untouched", async () => {
+    // Renaming the existing 'act-start' element to 'Edit' via its id is an
+    // explicit user instruction about an existing canvas element — never
+    // stripped, never errored.
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: {
+        id: 1,
+        information: [{ name: "Title", type: "Text" }],
+        states: [
+          { name: "Open", color: "#5A6070", initial: true },
+          { name: "Closed", color: "#1E6B45" },
+        ],
+        activities: [{ id: "act-start", name: "Edit", actor: "human" }],
+        flows: [{ from: "Open", to: "Open", activity: "Edit" }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const acts = lastUpdatePayload!.activities as Array<Record<string, unknown>>;
+    expect(acts).toHaveLength(1);
+    expect(acts[0].id).toBe("act-start");
+    expect(lastUpdatePayload!.flows as unknown[]).toHaveLength(1);
+    expect(parse(result).hint).toBeUndefined();
+  });
+
+  it("update_module strips an id-less reserved self-loop on a full-canvas payload and hints", async () => {
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: {
+        id: 1,
+        information: [{ name: "Title", type: "Text" }],
+        states: [
+          { name: "Open", color: "#5A6070", initial: true },
+          { name: "Closed", color: "#1E6B45" },
+        ],
+        activities: [
+          { id: "act-start", name: "Start", actor: "human" },
+          { name: "Comment", actor: "human" },
+        ],
+        flows: [
+          { from: "Open", to: "Closed", activity: "Start" },
+          { from: "Open", to: "Open", activity: "Comment" },
+        ],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const acts = lastUpdatePayload!.activities as Array<Record<string, unknown>>;
+    expect(acts.map((a) => a.name)).toEqual(["Start"]);
+    expect(lastUpdatePayload!.flows as unknown[]).toHaveLength(1);
+    expect(parse(result).hint).toContain("Removed reserved standard activities");
+  });
+});
+
 describe("reference id sanity", () => {
   const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
 

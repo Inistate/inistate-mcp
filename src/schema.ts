@@ -150,6 +150,66 @@ export function isReferenceFieldType(type: string): boolean {
   return REFERENCE_TYPES_LOWER.has(baseTypeOf(type));
 }
 
+// Internal-only types the platform renders but agents must NOT create. "DateRange"
+// (canvas type 30) is FE-internal ("not supported (date range)"). Kept recognized so
+// existing fields round-trip on update; new fields of these types are rejected in
+// validateDesign. normalizeFieldType folds "Date Range"/"date_range" → "DateRange"
+// first, so baseTypeOf here always sees the canonical key.
+const BLOCKED_CREATE_TYPES_LOWER = new Set(["daterange"]);
+
+export function isBlockedCreateType(type: string): boolean {
+  return BLOCKED_CREATE_TYPES_LOWER.has(baseTypeOf(type));
+}
+
+/** Guidance appended to every "agents cannot create this type" message. */
+export const BLOCKED_CREATE_TYPE_HINT =
+  "'Date Range' is an internal field type that cannot be created by agents. Model a date range as two Date fields instead (e.g. 'Start Date' and 'End Date').";
+
+// Standard activities the platform stamps onto every module canvas. A
+// user-defined activity reusing one of these names ships a duplicate of
+// built-in behavior (a redundant Create/Edit/Comment self-loop on the
+// stateflow). Both ids and display names participate in matching.
+const STANDARD_ACTIVITIES: ReadonlyArray<{ id: string; name: string }> = [
+  { id: "createEditView", name: "Create / Edit / View" },
+  { id: "create", name: "Create" },
+  { id: "edit", name: "Edit" },
+  { id: "view", name: "View" },
+  { id: "quickView", name: "Quick View" },
+  { id: "delete", name: "Delete" },
+  { id: "changeStatus", name: "Change State" },
+  { id: "duplicate", name: "Duplicate" },
+  { id: "comment", name: "Comment" },
+  { id: "history", name: "History" },
+  { id: "assign", name: "Assign" },
+  { id: "import", name: "Import" },
+  { id: "print", name: "Print" },
+];
+
+// Human-readable enumeration used by every reserved-name message.
+export const STANDARD_ACTIVITY_LIST =
+  "Create, Edit, View, Quick View, Delete, Change State, Duplicate, Comment, History, Assign, Import and Print";
+
+function normalizeActivityToken(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+}
+
+// Normalized (lowercase alphanumeric) ids AND display names, so "Change
+// State", "changeStatus" and "change_status" all fold to one token.
+const STANDARD_ACTIVITY_TOKENS = new Set(
+  STANDARD_ACTIVITIES.flatMap((a) => [a.id, a.name])
+    .map(normalizeActivityToken)
+    .filter((t) => t.length > 0),
+);
+
+/**
+ * True when the name (any casing/punctuation) collides with one of the
+ * standard activities the platform stamps on every module.
+ */
+export function isStandardActivityName(name: unknown): boolean {
+  return STANDARD_ACTIVITY_TOKENS.has(normalizeActivityToken(name));
+}
+
 // ---------- Input normalization ----------
 //
 // Agents guess near-miss vocabulary ("Select", "LongText", "gray", "#D4A017").
@@ -541,6 +601,91 @@ export function resolveDesignRefs(schema: Record<string, any>): string[] {
   return notes;
 }
 
+/**
+ * Standard activities (Create, Edit, View, Quick View, Delete, Change State,
+ * Duplicate, Comment, History, Assign, Import, Print) are stamped onto every
+ * module by the platform — a user-defined activity reusing one of those names
+ * ships a duplicate of built-in behavior. Removes, in place, the redundant
+ * ones agents tend to emit: id-less (i.e. new) reserved-named activities whose
+ * flows are all pure self-loops, or that no flow references, together with
+ * those self-loop flows. Removal here never breaks reachability. Reserved-named
+ * activities carrying an id are existing canvas elements (update path) and are
+ * left untouched; id-less ones used as real transitions are also left —
+ * validateDesign errors on those so the agent renames them coherently instead
+ * of a strip silently orphaning states.
+ */
+export function stripRedundantStandardActivities(schema: Record<string, any>): string[] {
+  const warnings: string[] = [];
+  const activities = schema?.activities;
+  if (!Array.isArray(activities)) return warnings;
+  const flows: any[] = Array.isArray(schema.flows) ? schema.flows : [];
+
+  const hasId = (it: any): boolean =>
+    it.id !== undefined && it.id !== null && String(it.id) !== "";
+  const sameName = (x: unknown, y: unknown): boolean =>
+    typeof x === "string" && typeof y === "string" && x.toLowerCase() === y.toLowerCase();
+
+  const removed: string[] = [];
+  for (let i = activities.length - 1; i >= 0; i--) {
+    const act = activities[i];
+    if (!act || typeof act !== "object") continue;
+    const name = act.name;
+    if (typeof name !== "string" || name === "") continue;
+    if (hasId(act)) continue;
+    if (!isStandardActivityName(name)) continue;
+
+    const actFlows = flows.filter(
+      (f) => f && typeof f === "object" && sameName(f.activity, name),
+    );
+    const allSelfLoops = actFlows.every(
+      (f) => typeof f.from === "string" && f.from !== "" && sameName(f.from, f.to),
+    );
+    if (!allSelfLoops) continue;
+
+    activities.splice(i, 1);
+    for (const f of actFlows) {
+      const idx = flows.indexOf(f);
+      if (idx !== -1) flows.splice(idx, 1);
+    }
+    removed.push(name);
+  }
+
+  // Self-loop flows naming a reserved activity the schema never defined are
+  // the same redundancy (built-ins work in every state without modeling) —
+  // drop them too instead of letting the undefined-activity check push the
+  // agent into defining the activity.
+  const definedNames = new Set(
+    activities
+      .map((a: any) => (a && typeof a === "object" ? a.name : undefined))
+      .filter((n: unknown): n is string => typeof n === "string" && n !== "")
+      .map((n: string) => n.toLowerCase()),
+  );
+  let removedFlows = 0;
+  for (let i = flows.length - 1; i >= 0; i--) {
+    const f = flows[i];
+    if (!f || typeof f !== "object") continue;
+    const act = f.activity;
+    if (typeof act !== "string" || act === "" || definedNames.has(act.toLowerCase())) continue;
+    if (!isStandardActivityName(act)) continue;
+    if (typeof f.from !== "string" || f.from === "" || !sameName(f.from, f.to)) continue;
+    flows.splice(i, 1);
+    removedFlows++;
+  }
+
+  if (removed.length > 0 || removedFlows > 0) {
+    removed.reverse(); // schema order — the strip loop walked backwards
+    const what =
+      removed.length > 0
+        ? `reserved standard activities (and their self-loop flows): ${removed.map((n) => `'${n}'`).join(", ")}`
+        : `${removedFlows} self-loop flow(s) referencing built-in standard activities`;
+    warnings.push(
+      `Removed ${what}. Every module has ${STANDARD_ACTIVITY_LIST} built in — ` +
+        "define only business transition activities (e.g. Submit, Approve, Reject).",
+    );
+  }
+  return warnings;
+}
+
 interface ValidationResult {
   valid: boolean;
   errors: string[];
@@ -573,6 +718,9 @@ export function validateDesign(
   // mirroring what create_module/update_module send to the platform.
   warnings.push(...repairDesignInput(schema));
   warnings.push(...resolveDesignRefs(schema));
+  // Redundant reserved-named activities (orphans / pure self-loops) are
+  // repaired away, not errored — the platform provides them on every module.
+  warnings.push(...stripRedundantStandardActivities(schema));
 
   const name: string = schema.name || "";
   const information: any[] = schema.information || [];
@@ -620,6 +768,12 @@ export function validateDesign(
       errors.push(
         `Field '${f.name}' has invalid type '${f.type}'. Valid types: ${VALID_FIELD_TYPES.join(", ")}.`,
       );
+    }
+
+    // Block creation of internal-only types (Date Range). Existing fields carry an id and
+    // round-trip untouched; only new (id-less) fields are rejected.
+    if (isBlockedCreateType(ftype) && !f.id) {
+      errors.push(`Field '${f.name}': ${BLOCKED_CREATE_TYPE_HINT}`);
     }
 
     const base = baseTypeOf(ftype);
@@ -728,6 +882,23 @@ export function validateDesign(
 
     // Validate activity properties
     for (const a of activities) {
+      // Id-less reserved-named activities that survive the strip above are
+      // being used as real transitions — the built-in standard activity never
+      // changes state, so error and let the agent rename the business action
+      // instead. Id'd ones are existing canvas elements (update path) and
+      // stay valid.
+      if (
+        (a.id === undefined || a.id === null || String(a.id) === "") &&
+        isStandardActivityName(a.name)
+      ) {
+        errors.push(
+          `Activity '${a.name}' reuses a reserved standard activity name — ${STANDARD_ACTIVITY_LIST} ` +
+            "are built into every module and must not be user-defined. Rename it to a distinct " +
+            "business action (e.g. 'Assign Technician' instead of 'Assign', 'Cancel Order' instead " +
+            "of 'Delete'), or drop it and its flows if the built-in behavior already covers it.",
+        );
+      }
+
       // Actor validation
       if (a.actor && !isValidActor(a.actor)) {
         errors.push(
@@ -803,9 +974,21 @@ export function validateDesign(
         );
       }
       if (!activityNames.has(f.activity)) {
-        errors.push(
-          `Flow from '${f.from}' to '${f.to}' references activity '${f.activity}' which is not defined in activities. Available activities: ${[...activityNames].join(", ")}.`,
-        );
+        // A reserved name here means the agent modeled built-in behavior as a
+        // transition — steer it to delete the flow, not define the activity.
+        // (Self-loop rows were already stripped; only real transitions reach
+        // this.)
+        if (isStandardActivityName(f.activity)) {
+          errors.push(
+            `Flow '${f.from} → ${f.to}' references '${f.activity}', a built-in standard activity. ` +
+              "Standard activities (Create, Edit, Comment, ...) exist on every module, work in " +
+              "every state and never change state — remove this flow rather than defining the activity.",
+          );
+        } else {
+          errors.push(
+            `Flow from '${f.from}' to '${f.to}' references activity '${f.activity}' which is not defined in activities. Available activities: ${[...activityNames].join(", ")}.`,
+          );
+        }
       }
     }
 
@@ -1071,11 +1254,16 @@ export function normalizeIndustry(industry?: string | null): string {
 // Returned with every design_workflow call — the design funnel's first step is
 // where agents form their vocabulary, so the constraints ride along.
 const DESIGN_CONSTRAINTS = {
-  field_types: VALID_FIELD_TYPES,
+  // Advertised creatable types exclude internal-only ones agents must not author (Date Range).
+  field_types: VALID_FIELD_TYPES.filter((t) => !isBlockedCreateType(t)),
   state_colors: VALID_COLORS,
   reference_fields:
     "User/Users/Module/Modules fields require 'connection': the name of a module that exists in this workspace. Not supported inside Table sub-fields.",
   actors: VALID_ACTOR_TYPES,
+  reserved_activities:
+    `${STANDARD_ACTIVITY_LIST} are built into every module — never define them as activities ` +
+    "or reference them in flows. Define only business transition activities, named distinctly " +
+    "(e.g. 'Assign Technician' not 'Assign', 'Cancel Order' not 'Delete').",
 };
 
 export function designWorkflow(
@@ -1153,7 +1341,9 @@ export function designWorkflow(
     ],
     ticket_management: [
       { name: "Triage", actor: "hybrid", fields: [], ai_hint: "", ai_instruction: "", confidence_threshold: 0 },
-      { name: "Assign", actor: "human", fields: [], ai_hint: "", ai_instruction: "", confidence_threshold: 0 },
+      // "Assign" alone is a reserved standard activity name — validateDesign
+      // rejects it, so the scaffold models assignment as a distinct action.
+      { name: "Assign Agent", actor: "human", fields: [], ai_hint: "", ai_instruction: "", confidence_threshold: 0 },
       { name: "Resolve", actor: "human", fields: [], ai_hint: "", ai_instruction: "", confidence_threshold: 0 },
       { name: "Close", actor: "human", fields: [], ai_hint: "", ai_instruction: "", confidence_threshold: 0 },
     ],
@@ -1174,7 +1364,7 @@ export function designWorkflow(
     ],
     ticket_management: [
       { from: "New", to: "Triaged", activity: "Triage" },
-      { from: "Triaged", to: "In Progress", activity: "Assign" },
+      { from: "Triaged", to: "In Progress", activity: "Assign Agent" },
       { from: "In Progress", to: "Resolved", activity: "Resolve" },
       { from: "Resolved", to: "Closed", activity: "Close" },
     ],

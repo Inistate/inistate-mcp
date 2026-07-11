@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  isStandardActivityName,
   isValidFieldType,
   isValidColor,
   isValidActor,
+  stripRedundantStandardActivities,
   suggestColorForState,
   validateDesign,
   designWorkflow,
@@ -148,6 +150,27 @@ describe("validateDesign", () => {
     };
     const result = validateDesign(schema);
     expect(result.errors.some((e) => e.includes("invalid type 'Bogus'"))).toBe(true);
+  });
+
+  it("blocks new Date Range fields (spaced or canonical)", () => {
+    for (const type of ["Date Range", "DateRange", "date_range"]) {
+      const result = validateDesign({
+        ...minimalWorkflow,
+        information: [{ name: "Period", type }],
+      });
+      expect(result.errors.some((e) => e.includes("cannot be created"))).toBe(true);
+    }
+  });
+
+  it("allows an existing Date Range field (with id) to round-trip on update", () => {
+    const result = validateDesign(
+      {
+        ...minimalWorkflow,
+        information: [{ id: "fld-existing", name: "Period", type: "DateRange" }],
+      },
+      "update",
+    );
+    expect(result.errors.some((e) => e.includes("cannot be created"))).toBe(false);
   });
 
   it("catches Table fields without sub-fields", () => {
@@ -487,6 +510,249 @@ describe("validateDesign — platform parity", () => {
     });
     expect(result.valid).toBe(true);
     expect(result.warnings.some((w) => w.includes("'Title'") && w.includes("'required'"))).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Reserved standard activities
+// ──────────────────────────────────────────────
+//
+// Mirrors AITeammateService.StripRedundantStandardActivities semantics:
+// id-less reserved-named activities that are orphans or pure self-loops are
+// silently repaired away (with one teaching warning); id'd ones (existing
+// canvas elements on update) are never touched; id-less ones performing a
+// real from!=to transition survive the strip and fail validation with
+// rename guidance.
+
+describe("isStandardActivityName", () => {
+  it("matches ids and display names in any casing/punctuation", () => {
+    for (const n of [
+      "create", "Create", "CREATE",
+      "createEditView", "Create / Edit / View",
+      "quickView", "Quick View", "quick_view",
+      "changeStatus", "Change State", "change-state", "ChangeState",
+      "edit", "view", "delete", "duplicate", "comment", "history",
+      "assign", "import", "print",
+    ]) {
+      expect(isStandardActivityName(n), `'${n}' should be reserved`).toBe(true);
+    }
+  });
+
+  it("leaves near-misses and business names alone", () => {
+    for (const n of ["Reassign", "Review", "Print Label", "Assign Technician", "Submit", "", undefined]) {
+      expect(isStandardActivityName(n), `'${n}' should not be reserved`).toBe(false);
+    }
+  });
+});
+
+describe("stripRedundantStandardActivities", () => {
+  it("removes self-loop and orphan reserved activities plus their flows", () => {
+    const schema: Record<string, any> = {
+      name: "Invoice",
+      states: [
+        { name: "Draft", initial: true },
+        { name: "Submitted" },
+      ],
+      activities: [
+        { name: "Create", actor: "human" },
+        { name: "Edit", actor: "human" },
+        { name: "Comment", actor: "human" },
+        { name: "Submit", actor: "human" },
+      ],
+      flows: [
+        { from: "Draft", to: "Draft", activity: "Edit" },
+        { from: "Draft", to: "Draft", activity: "Comment" },
+        { from: "Submitted", to: "Submitted", activity: "Comment" },
+        { from: "Draft", to: "Submitted", activity: "Submit" },
+        { from: "Submitted", to: "Submitted", activity: "History" },
+      ],
+    };
+
+    const warnings = stripRedundantStandardActivities(schema);
+
+    // Create (orphan), Edit and Comment (self-loops) go; Submit stays. The
+    // self-loop flow naming never-defined 'History' goes too.
+    expect(schema.activities.map((a: any) => a.name)).toEqual(["Submit"]);
+    expect(schema.flows).toHaveLength(1);
+    expect(schema.flows[0].activity).toBe("Submit");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("'Create', 'Edit', 'Comment'");
+    expect(warnings[0]).toContain("Submit, Approve, Reject");
+
+    // Idempotent — a second pass strips nothing further.
+    expect(stripRedundantStandardActivities(schema)).toEqual([]);
+  });
+
+  it("recognizes reserved-name variants and keeps near-misses", () => {
+    const schema: Record<string, any> = {
+      activities: [
+        { name: "Change State" },
+        { name: "changeStatus" },
+        { name: "Quick View" },
+        { name: "Reassign" },
+        { name: "Review" },
+        { name: "Print Label" },
+      ],
+      flows: [],
+    };
+
+    stripRedundantStandardActivities(schema);
+
+    // Reserved variants fold to the built-in tokens; near-misses are
+    // ordinary names.
+    expect(schema.activities.map((a: any) => a.name)).toEqual(["Reassign", "Review", "Print Label"]);
+  });
+
+  it("keeps id'd reserved activities and id-less ones doing real transitions", () => {
+    const schema: Record<string, any> = {
+      states: [{ name: "Draft", initial: true }, { name: "Assigned" }],
+      activities: [
+        { id: "a1", name: "Edit" },
+        { name: "Assign" },
+      ],
+      flows: [
+        { from: "Draft", to: "Draft", activity: "Edit" },
+        { from: "Draft", to: "Assigned", activity: "Assign" },
+      ],
+    };
+
+    const warnings = stripRedundantStandardActivities(schema);
+
+    // The id'd 'Edit' is an existing canvas element (update path) —
+    // untouched, flow and all. The id-less 'Assign' does a real transition,
+    // so it survives the strip and is left for validateDesign to error on
+    // (rename guidance beats silently orphaning the Assigned state).
+    expect(warnings).toEqual([]);
+    expect(schema.activities).toHaveLength(2);
+    expect(schema.flows).toHaveLength(2);
+  });
+
+  it("reports flow-only removals when every reserved activity is undefined", () => {
+    const schema: Record<string, any> = {
+      states: [{ name: "Open", initial: true }],
+      activities: [{ name: "Submit" }],
+      flows: [
+        { from: "Open", to: "Open", activity: "Comment" },
+        { from: "Open", to: "open", activity: "History" },
+      ],
+    };
+
+    const warnings = stripRedundantStandardActivities(schema);
+
+    expect(schema.flows).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("2 self-loop flow(s) referencing built-in standard activities");
+  });
+});
+
+describe("validateDesign — reserved standard activities", () => {
+  const base = {
+    name: "Ticket",
+    information: [{ name: "Title", type: "Text" }],
+  };
+
+  it("repairs redundant reserved self-loops in place and stays valid", () => {
+    const schema: Record<string, any> = {
+      ...base,
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [
+        { name: "Comment", actor: "human" },
+        { name: "Close", actor: "human" },
+      ],
+      flows: [
+        { from: "Open", to: "Open", activity: "Comment" },
+        { from: "Open", to: "Closed", activity: "Close" },
+      ],
+    };
+
+    const result = validateDesign(schema);
+
+    // The strip mutates the schema create_module/update_module will send.
+    expect(result.valid).toBe(true);
+    expect(schema.activities.map((a: any) => a.name)).toEqual(["Close"]);
+    expect(schema.flows).toHaveLength(1);
+    expect(result.warnings.some((w) => w.includes("Removed reserved standard activities") && w.includes("'Comment'"))).toBe(true);
+    expect(result.summary!.activity_count).toBe(1);
+  });
+
+  it("errors on an id-less reserved-named activity doing a real transition", () => {
+    const schema: Record<string, any> = {
+      ...base,
+      states: [
+        { name: "Draft", color: "#5A6070", initial: true },
+        { name: "Assigned", color: "#2968A8" },
+      ],
+      activities: [{ name: "Assign", actor: "human" }],
+      flows: [{ from: "Draft", to: "Assigned", activity: "Assign" }],
+    };
+
+    const result = validateDesign(schema);
+
+    // Kept, not stripped — the error tells the agent to rename coherently.
+    expect(schema.activities).toHaveLength(1);
+    expect(result.valid).toBe(false);
+    expect(
+      result.errors.some(
+        (e) => e.includes("'Assign'") && e.includes("reserved standard activity name") && e.includes("'Assign Technician'"),
+      ),
+    ).toBe(true);
+  });
+
+  it("steers flows referencing an undefined standard activity toward removal", () => {
+    const schema: Record<string, any> = {
+      ...base,
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Done", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Finish", actor: "human" }],
+      flows: [
+        { from: "Open", to: "Done", activity: "Finish" },
+        { from: "Open", to: "Done", activity: "Change State" },
+      ],
+    };
+
+    const result = validateDesign(schema);
+
+    expect(result.valid).toBe(false);
+    expect(
+      result.errors.some(
+        (e) =>
+          e.includes("'Change State'") &&
+          e.includes("built-in standard activity") &&
+          e.includes("remove this flow rather than defining the activity"),
+      ),
+    ).toBe(true);
+    // The generic undefined-activity message is replaced, not duplicated.
+    expect(result.errors.some((e) => e.includes("which is not defined in activities"))).toBe(false);
+  });
+
+  it("accepts id'd reserved-named activities on the update path untouched", () => {
+    const schema: Record<string, any> = {
+      ...base,
+      states: [
+        { name: "Open", color: "#5A6070", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+      activities: [
+        { id: "act_1", name: "Edit", actor: "human" },
+        { id: "act_2", name: "Close", actor: "human" },
+      ],
+      flows: [
+        { from: "Open", to: "Open", activity: "Edit" },
+        { from: "Open", to: "Closed", activity: "Close" },
+      ],
+    };
+
+    const result = validateDesign(schema, "update");
+
+    expect(result.valid).toBe(true);
+    expect(schema.activities).toHaveLength(2);
+    expect(schema.flows).toHaveLength(2);
+    expect(result.warnings.every((w) => !w.includes("Removed"))).toBe(true);
   });
 });
 
