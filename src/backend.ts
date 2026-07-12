@@ -188,12 +188,14 @@ export class CloudBackend implements Backend {
   }
 
   listWorkspaces(search?: string): Promise<unknown> {
+    // The /api/mcp mirror (not /api/workspace) so scoped connection tokens
+    // pass the deny-by-default endpoint guard; same Mongo source, slim shape.
     const query = search ? `?search=${encodeURIComponent(search)}` : "";
-    return api.get(`/api/workspace${query}`);
+    return api.get(`/api/mcp/workspace${query}`);
   }
 
   getWorkspace(workspaceId: string): Promise<unknown> {
-    return api.get(`/api/workspace/${api.enc(workspaceId)}`);
+    return api.get(`/api/mcp/workspace/${api.enc(workspaceId)}`);
   }
 
   listModules(): Promise<unknown> {

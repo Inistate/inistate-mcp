@@ -11,7 +11,13 @@ import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./server.js";
 import { requestContext, RequestContext } from "./context.js";
-import { InistateOAuthProvider, decodeJwtSub } from "./oauth-provider.js";
+import {
+  InistateOAuthProvider,
+  decodeJwtSub,
+  isConnectionToken,
+  connectionModeKey,
+  SUPPORTED_SCOPES,
+} from "./oauth-provider.js";
 import { getUserMode } from "./mode-store.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -58,6 +64,7 @@ app.use(mcpAuthRouter({
   issuerUrl: new URL(ISSUER_URL),
   baseUrl: new URL(ISSUER_URL),
   resourceServerUrl: new URL("/mcp", ISSUER_URL),
+  scopesSupported: SUPPORTED_SCOPES,
 }));
 
 /* ------------------------------------------------------------------ */
@@ -117,9 +124,13 @@ app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) =>
 
     const body = JSON.parse(req.body.toString());
 
-    // Extract per-request auth context from HTTP headers
+    // Extract per-request auth context from HTTP headers. Connection tokens
+    // (ist_) are opaque — key per-user state off a hash of the token instead
+    // of the JWT subject; stable for the session, reset on rotation.
     const bearer = authHeader.replace(/^Bearer\s+/i, "");
-    const userId = decodeJwtSub(bearer);
+    const userId =
+      decodeJwtSub(bearer) ??
+      (isConnectionToken(bearer) ? connectionModeKey(bearer) : undefined);
     const mode = userId ? getUserMode(userId) : undefined;
 
     const ctx: RequestContext = {

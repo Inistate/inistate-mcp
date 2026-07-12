@@ -485,10 +485,18 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   const slimWorkspace = (workspaceId: string | number, data: unknown): unknown => {
     if (!data || typeof data !== "object") return data;
     const ws = data as Record<string, unknown>;
-    if (!Array.isArray(ws.vectors)) return data;
-    const modules = (ws.vectors as Array<Record<string, unknown>>)
-      .filter((v) => v && typeof v === "object" && v.published !== false)
-      .map((v) => ({ name: v.name, emoji: v.emoji }));
+    // Two backend shapes: /api/workspace/{id} exposes `vectors` (needs the
+    // published filter); the /api/mcp/workspace/{id} mirror pre-filters and
+    // exposes `modules`.
+    const source = Array.isArray(ws.vectors)
+      ? (ws.vectors as Array<Record<string, unknown>>).filter(
+          (v) => v && typeof v === "object" && v.published !== false,
+        )
+      : Array.isArray(ws.modules)
+        ? (ws.modules as Array<Record<string, unknown>>)
+        : null;
+    if (!source) return data;
+    const modules = source.map((v) => ({ name: v.name, emoji: v.emoji }));
     return {
       workspaceId: ws.id ?? workspaceId,
       name: ws.name,
