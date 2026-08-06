@@ -650,7 +650,7 @@ Workflow sequences after workspace is set:
     {
       title: "Get Module Schema",
       description:
-        "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.\n\nBoth tiers include your accessible `listings`: each carries its designed filter (applied automatically when that listing is queried — pick the listing whose conditions already match the question and do NOT re-add them as `filters`), plus profileOnly (rows limited to the current user's own entries) and scripted markers. Pass a listing's `name` as list_entries' `listing`.",
+        "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.\n\nBoth tiers include your accessible `listings`: each carries its designed filter in the SAME shape as list_entries' `filters` (applied automatically when that listing is queried — pick the listing whose conditions already match the question and do NOT re-add them as `filters`), plus partialFilter (an inexpressible formula/script condition also applies), profileOnly (rows limited to the current user's own entries) and scripted markers. Pass a listing's `name` as list_entries' `listing`.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         tier: z
