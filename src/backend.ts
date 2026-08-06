@@ -48,6 +48,7 @@ export interface Capabilities {
 
 export interface ListEntriesParams {
   module: string;
+  listing?: string;
   state?: string;
   search?: string;
   filters?: Record<string, unknown>;
@@ -220,6 +221,7 @@ export class CloudBackend implements Backend {
 
   listEntries(p: ListEntriesParams): Promise<unknown> {
     const body: Record<string, unknown> = { module: p.module };
+    if (p.listing) body.listing = p.listing;
     if (p.state) body.state = p.state;
     if (p.search) body.search = p.search;
     if (p.filters) body.filters = p.filters;

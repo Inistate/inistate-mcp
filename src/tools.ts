@@ -712,9 +712,15 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "List Entries",
       description:
-        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. System fields (id, state, audit metadata, etc.) are always returned regardless.",
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nAccess: non-admin users cannot query the unfiltered default 'Everything' view on modules that have listings — pass `listing` with one of their accessible listings (an access-denied response names them).\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. System fields (id, state, audit metadata, etc.) are always returned regardless.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
+        listing: z
+          .string()
+          .optional()
+          .describe(
+            "Listing (saved view) name to query, case-insensitive; 'archive' targets archived entries. Defaults to the unfiltered 'Everything' view, which is admin-only on modules with listings — non-admins must name an accessible listing (an access-denied response lists them).",
+          ),
         state: z.string().optional(),
         search: z.string().optional().describe("Free-text search across document ID, state, and text-like fields; supports * and ? wildcards"),
         filters: z.record(z.unknown()).optional(),
@@ -732,11 +738,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ module: moduleName, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
+    async ({ module: moduleName, listing, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
         const data = await backend.listEntries({
           module: moduleName,
+          listing,
           state,
           search,
           filters,
