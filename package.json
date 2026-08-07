@@ -1,7 +1,7 @@
 {
   "name": "inistate-mcp",
   "mcpName": "io.github.Inistate/inistate-mcp",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "MCP server for the Inistate platform — no-code apps creation powered by AI",
   "type": "module",
   "author": "Inistate",
@@ -54,7 +54,7 @@
     "test:watch": "vitest",
     "changeset": "changeset",
     "version": "npx changeset version && node scripts/sync-server-json.js",
-    "release:mcp": "npm run test && npm run version && mcp-publisher login && mcp-publisher publish",
+    "release:mcp": "npm run test && npm run version && mcp-publisher login github && mcp-publisher publish",
     "release:npm": "npm run build && npm run test && npm run version && npm publish",
     "release": "npm i && npm run test && npm run version && mcp-publisher validate && npm publish && mcp-publisher login github && mcp-publisher publish",
     "sync:server": "node scripts/sync-server-json.js",

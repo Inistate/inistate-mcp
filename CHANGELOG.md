@@ -1,5 +1,11 @@
 # inistate-mcp
 
+## 1.1.2
+
+### Patch Changes
+
+- Improve tools robustness, improve authentication and fix listing authorization issues.
+
 ## 1.1.1
 
 ### Patch Changes
