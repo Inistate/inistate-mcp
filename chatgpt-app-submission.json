@@ -3,8 +3,8 @@
   "schema_version": 1,
   "app_info": {
     "display_name": "Inistate",
-    "subtitle": "AI teammates with audit trails",
-    "description": "Create, manage, and automate apps in Inistate directly from Claude using simple natural language. Your AI teammate can manage workflows, update records, trigger approvals, upload files, and handle daily operations entirely through Claude or any AI client. Full traceability, confidence-gated escalation, and human oversight are built in. No system prompt required—the schema is the prompt.",
+    "subtitle": "Make & run business workflows",
+    "description": "Turn ChatGPT into a governed AI teammate for your business operations. Inistate lets ChatGPT create workflows, update records, trigger approvals, upload files, query entries, and execute state transitions through structured forms — with every action captured in a full audit trail. No prompt engineering required. The schema is the prompt.",
     "category": "BUSINESS",
     "developer": "Inistate",
     "website_url": "https://inistate.com",
@@ -209,12 +209,12 @@
     "scaffold_module": {
       "annotations": {
         "readOnlyHint": true,
-        "openWorldHint": true,
+        "openWorldHint": false,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Only reads the shape of existing data (a Notion database, Airtable base/table, or local SQLite table) and returns a drafted module schema; it does not create or modify any Inistate module or the source data.",
-        "open_world_justification": "May read data from external services such as Notion or Airtable, using credentials supplied via the environment, in order to infer a schema.",
+        "read_only_justification": "On the submitted hosted backend, returns a structured capability-unavailable response and does not create or modify any data.",
+        "open_world_justification": "Does not publish content, send messages, or change public internet state or external third-party systems.",
         "destructive_justification": "Only reads source data and produces a draft; it does not delete, overwrite, or irreversibly change the source or any Inistate records."
       }
     },

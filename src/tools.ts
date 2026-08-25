@@ -899,7 +899,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         ...reliabilityParams,
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
     },
     async ({
       module: moduleName,
@@ -1130,7 +1130,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           ),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
     },
     async ({ module: moduleName, activity, ai, items, confirmed, workspaceId }) => {
       try {
@@ -1455,7 +1455,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("MIME type of the file"),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
     },
     async ({ module: moduleName, name: fileName, file: fileContent, mimeType, workspaceId }) => {
       if (!caps.files) return ok(capabilityMessage("files", backend.kind));
@@ -1538,7 +1538,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("File size in bytes. Must be > 0 and ≤ 500MB (524288000)."),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
     },
     async ({ module: moduleName, fileName, contentType, fileSize, workspaceId }) => {
       if (!caps.files) return ok(capabilityMessage("files", backend.kind));
@@ -1577,7 +1577,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .describe("The s3Key returned from request_upload_url."),
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
     },
     async ({ s3Key, workspaceId }) => {
       if (!caps.files) return ok(capabilityMessage("files", backend.kind));
@@ -1695,7 +1695,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
     },
     async ({
       name,
@@ -1775,7 +1775,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         ...moduleSectionsShape,
         workspaceId: wsParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: true },
     },
     async ({
       id,
@@ -1922,7 +1922,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         "Local-runtime only; use design_workflow to draft a module here.",
       ),
       inputSchema: scaffoldInput,
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ source, table, name, state }) => {
       if (!caps.scaffold) return ok(capabilityMessage("scaffold", backend.kind));
