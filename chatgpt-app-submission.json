@@ -1,0 +1,338 @@
+{
+  "$schema": "https://developers.openai.com/apps-sdk/schemas/chatgpt-app-submission.v1.json",
+  "schema_version": 1,
+  "app_info": {
+    "display_name": "Inistate",
+    "subtitle": "Make & run business workflows",
+    "description": "Turn ChatGPT into a governed AI teammate for your business operations. Inistate lets ChatGPT create workflows, update records, trigger approvals, upload files, query entries, and execute state transitions through structured forms — with every action captured in a full audit trail. No prompt engineering required. The schema is the prompt.",
+    "category": "BUSINESS",
+    "developer": "Inistate",
+    "website_url": "https://inistate.com",
+    "support_url": "https://support.inistate.com/",
+    "privacy_policy_url": "https://inistate.com/privacyPolicy",
+    "terms_of_service_url": "https://inistate.com/terms",
+    "demo_recording_url": "https://gneysoft-my.sharepoint.com/:v:/g/personal/dylon_wongchungyee_inistate_com/IQAFc0uXmVkjSIPskW9JScMrAY4mA-ZYKrtJ5XEjoY_0D-o?e=43gaE0"
+  },
+  "tools": {
+    "list_workspaces": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only retrieves the workspaces available to the authenticated user without changing any records.",
+        "open_world_justification": "Only reads private workspace data in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Does not delete, overwrite, or perform any irreversible action."
+      }
+    },
+    "set_workspace": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Changes the active workspace context for subsequent backend operations in the current session.",
+        "open_world_justification": "Only changes private session context for Inistate workspace operations and does not affect public internet state.",
+        "destructive_justification": "Does not delete data or perform an irreversible mutation."
+      }
+    },
+    "list_modules": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only lists modules in the current workspace without modifying their definitions.",
+        "open_world_justification": "Only reads private module data in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Does not remove, overwrite, or irreversibly change data."
+      }
+    },
+    "get_module_schema": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only retrieves a module schema so the user can inspect fields, states, activities, and flows.",
+        "open_world_justification": "Only reads private module configuration in Inistate and does not affect public internet state.",
+        "destructive_justification": "Does not delete, overwrite, or make irreversible changes."
+      }
+    },
+    "get_module_canvas": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only fetches the current module definition and stable IDs for inspection or later editing.",
+        "open_world_justification": "Only reads private module configuration in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Does not remove data or perform irreversible actions."
+      }
+    },
+    "list_entries": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only queries and returns matching module entries without changing any records.",
+        "open_world_justification": "Only reads private workspace records in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Does not delete, overwrite, revoke, or perform irreversible actions."
+      }
+    },
+    "get_entry": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only retrieves a single entry and its current state without modifying it.",
+        "open_world_justification": "Only reads private workspace entry data in Inistate and does not affect public internet state.",
+        "destructive_justification": "Does not delete or irreversibly alter data."
+      }
+    },
+    "get_form": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only returns form fields, options, and requirements for an activity without submitting anything.",
+        "open_world_justification": "Only reads private workflow form metadata in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Does not delete, overwrite, or trigger irreversible actions."
+      }
+    },
+    "submit_activity": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Creates, updates, comments on, deletes, or changes the state of workflow entries and therefore modifies backend data.",
+        "open_world_justification": "Only updates private workflow records inside Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Can perform high-impact persistent actions such as deleting entries or changing workflow state."
+      }
+    },
+    "get_entry_history": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only retrieves the audit trail and comments for an entry without modifying the record.",
+        "open_world_justification": "Only reads private audit data in Inistate and does not affect public internet state.",
+        "destructive_justification": "Does not delete, overwrite, or perform irreversible actions."
+      }
+    },
+    "upload_file": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Uploads a file into workspace storage and therefore creates new stored data.",
+        "open_world_justification": "Only uploads files for private Inistate workspace use and does not publish them to public internet destinations.",
+        "destructive_justification": "Creates a file artifact but does not itself delete or irreversibly overwrite existing records."
+      }
+    },
+    "download_file": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only retrieves a temporary download link or file data for an existing workspace file.",
+        "open_world_justification": "Only retrieves private Inistate file access data and does not publish or modify public internet state.",
+        "destructive_justification": "Does not delete, overwrite, or trigger irreversible changes."
+      }
+    },
+    "request_upload_url": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Creates a presigned upload session for workspace storage and therefore initiates a write-oriented operation.",
+        "open_world_justification": "Only prepares a private Inistate file upload and does not publish content to public internet destinations.",
+        "destructive_justification": "Does not delete data or perform an irreversible mutation by itself."
+      }
+    },
+    "confirm_upload": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Registers a completed upload with the backend and therefore changes stored workspace metadata.",
+        "open_world_justification": "Only finalizes private Inistate file state and does not publish or modify public internet state.",
+        "destructive_justification": "Does not delete or irreversibly overwrite existing records."
+      }
+    },
+    "design_workflow": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only generates a workflow schema draft in the response and does not persist anything.",
+        "open_world_justification": "Computes a schema draft locally from the provided prompt without calling external services.",
+        "destructive_justification": "Does not delete, overwrite, or make irreversible changes."
+      }
+    },
+    "validate_design": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only validates a proposed schema and returns checks without saving any changes.",
+        "open_world_justification": "Analyzes the provided schema locally without calling external services.",
+        "destructive_justification": "Does not delete, overwrite, or perform irreversible actions."
+      }
+    },
+    "scaffold_module": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "On the submitted hosted backend, returns a structured capability-unavailable response and does not create or modify any data.",
+        "open_world_justification": "Does not publish content, send messages, or change public internet state or external third-party systems.",
+        "destructive_justification": "Only reads source data and produces a draft; it does not delete, overwrite, or irreversibly change the source or any Inistate records."
+      }
+    },
+    "create_module": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Creates a new module in the workspace and therefore persists new configuration data.",
+        "open_world_justification": "Only creates private workspace configuration in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Creates a new module but does not delete, overwrite, revoke access, or perform an irreversible destructive action."
+      }
+    },
+    "update_module": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Updates an existing module definition and therefore modifies persistent workspace configuration.",
+        "open_world_justification": "Only updates private workspace configuration in Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Can overwrite important module structure such as fields, states, activities, or flows."
+      }
+    },
+    "submit_activities": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Bulk variant of submit_activity — creates, updates, deletes, or changes state of multiple workflow entries in a single call, modifying backend data.",
+        "open_world_justification": "Only updates private workflow records inside Inistate and does not publish or modify public internet state.",
+        "destructive_justification": "Can perform high-impact persistent actions across multiple entries at once, including deletion and workflow state changes."
+      }
+    },
+    "switch_mode": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Enables or disables tool groups and resources on the server, changing the active tool surface for the session.",
+        "open_world_justification": "Modifies only local server-side state; does not call any external APIs.",
+        "destructive_justification": "Does not delete data or perform any irreversible action—mode can be switched back at any time."
+      }
+    }
+  },
+  "test_cases": [
+    {
+      "description": "List workspaces.",
+      "user_prompt": "List workspaces",
+      "file_attachment_urls": null,
+      "tools_triggered": "list_workspaces",
+      "expected_output": "A list of workspaces you are in.",
+      "expected_output_url": null
+    },
+    {
+      "description": "List modules.",
+      "user_prompt": "List modules in MCP Demo",
+      "file_attachment_urls": null,
+      "tools_triggered": "set_workspace, list_modules",
+      "expected_output": "A list of modules in MCP Demo workspace.",
+      "expected_output_url": null
+    },
+    {
+      "description": "List unfinished tasks from To Do List module.",
+      "user_prompt": "List unfinished tasks",
+      "file_attachment_urls": null,
+      "tools_triggered": "list_entries",
+      "expected_output": "A list of tasks that are not marked as done in the to do list.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Adds a new entry to todo list.",
+      "user_prompt": "Add TODO: Mop the floor at 2pm today",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_form, get_module_schema, submit_activity",
+      "expected_output": "A new task entry \"Mop the floor\" should be added to todo list at the given date time with To Do state.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Mark task as done.",
+      "user_prompt": "Done mop the floor",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_form, submit_activity",
+      "expected_output": "The entry \"Mop the floor\" should be marked as done state.",
+      "expected_output_url": null
+    }
+  ],
+  "negative_test_cases": [
+    {
+      "description": "Create workspace.",
+      "user_prompt": "Create Test Company workspace",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because creating workspaces is outside the supported tool surface.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Ask weather.",
+      "user_prompt": "What's the weather today",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because weather requests are outside Inistate workspace operations.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Upload a file.",
+      "user_prompt": "Upload this to s3",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because generic S3 upload requests are outside the intended Inistate workflow context.",
+      "expected_output_url": null
+    }
+  ]
+}
