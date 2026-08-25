@@ -1,5 +1,11 @@
 # inistate-mcp
 
+## 1.1.3
+
+### Patch Changes
+
+- Annotations update
+
 ## 1.1.2
 
 ### Patch Changes
