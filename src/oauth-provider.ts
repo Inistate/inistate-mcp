@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Response } from "express";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
+import { FileClientsStore } from "./client-store.js";
 import type {
   OAuthClientInformationFull,
   OAuthTokens,
@@ -143,50 +144,19 @@ interface MintedConnection {
   expiresAt?: string;
 }
 
-class InMemoryClientsStore implements OAuthRegisteredClientsStore {
-  private clients = new Map<string, OAuthClientInformationFull>();
-
-  constructor() {
-    const seed = process.env.OAUTH_KNOWN_CLIENTS;
-    if (seed) {
-      try {
-        for (const client of JSON.parse(seed) as OAuthClientInformationFull[]) {
-          this.clients.set(client.client_id, client);
-        }
-        console.log(`OAuth client store seeded with ${this.clients.size} client(s)`);
-      } catch {
-        console.error("Failed to parse OAUTH_KNOWN_CLIENTS — must be a JSON array");
-      }
-    }
-  }
-
-  getClient(clientId: string): OAuthClientInformationFull | undefined {
-    return this.clients.get(clientId);
-  }
-
-  registerClient(
-    client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
-  ): OAuthClientInformationFull {
-    const full: OAuthClientInformationFull = {
-      ...client,
-      client_id: randomUUID(),
-      client_id_issued_at: Math.floor(Date.now() / 1000),
-    };
-    this.clients.set(full.client_id, full);
-    return full;
-  }
-
-  dump(): OAuthClientInformationFull[] {
-    return [...this.clients.values()];
-  }
-}
+/*
+ * SS05806: the clients store used to be a process-local Map, so every restart wiped every
+ * DCR-registered client_id and previously-registered connectors got `invalid_client` at
+ * /authorize. FileClientsStore keeps the same shape but survives a restart. See client-store.ts
+ * for what is deliberately NOT persisted (tokens, codes, pending auths).
+ */
 
 /* ------------------------------------------------------------------ */
 /*  Provider                                                           */
 /* ------------------------------------------------------------------ */
 
 export class InistateOAuthProvider implements OAuthServerProvider {
-  readonly clientsStore: InMemoryClientsStore;
+  readonly clientsStore: FileClientsStore;
   private codes = new Map<string, StoredCode>();
   private pendingAuth = new Map<string, PendingAuth>();
   private tokens = new Map<string, IssuedToken>();
@@ -202,7 +172,7 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     mcpUrl: string,
     loginPath: string = "/#/login",
   ) {
-    this.clientsStore = new InMemoryClientsStore();
+    this.clientsStore = new FileClientsStore();
     this.baseUrl = inistateBaseUrl.replace(/\/+$/, "");
     this.appUrl = appUrl.replace(/\/$/, "");
     this.mcpUrl = mcpUrl;
