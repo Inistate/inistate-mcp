@@ -13,6 +13,9 @@ import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.
 
 const CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const PAT_VERIFY_TTL_MS = 5 * 60 * 1000; // whoami re-check cadence for connection tokens
+// A minted ist_ token leaves the local issued-token map after this long; from then on
+// verifyAccessToken introspects it via /v1/whoami (which also sees revocation).
+const ISSUED_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Scope vocabulary of the Inistate Connections API (ApiScopes.cs). Advertised as
@@ -344,14 +347,21 @@ export class InistateOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * Mint (or rotate) the Inistate connection token backing this MCP session.
+   * Mint the Inistate connection token backing this MCP session.
    *
-   * One connection per client app: an active connection with the same name is
-   * updated to the new grant and rotated (rotation is the only way to get a
-   * fresh plaintext token), so repeat authorizations don't pile up rows on the
-   * Connections page. The backend keeps the previous token alive for the
-   * configured overlap window, so an existing session on another device fades
-   * out rather than breaking mid-call.
+   * One connection per authorization. Connections used to be reused by name
+   * (`"<client> (MCP)"`) and rotated, which made two instances of the same
+   * client — n8n prod and staging, ChatGPT on two devices — rotate each
+   * other's token: the older one died once the overlap window closed
+   * (docs/integration-oauth-dcr-proposal.md, I-1). Repeat authorizations now
+   * add a row on the Connections page, where the user revokes stale ones;
+   * the exchange never touches an existing connection.
+   *
+   * Reach: the consent step that picks workspaces does not exist yet, so the
+   * grant is narrowed only where that is unambiguous — a user with exactly
+   * one accessible workspace gets that workspace. Everyone else keeps
+   * all-workspace reach (the pre-fix default) rather than a connector that
+   * can see nothing until the user widens it on the Connections page.
    *
    * Returns null when the Connections feature is unavailable (flag off, older
    * backend, network failure) — the caller falls back to the JWT flow.
@@ -371,43 +381,32 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       .replace(/[\u0000-\u001F\u007F]/g, " ")
       .trim()
       .slice(0, 60) || "MCP client";
-    const name = `${clientLabel} (MCP)`;
+    // Per-authorization discriminator: tells two sessions of one client apart
+    // on the Connections page, and stops a second authorization from finding
+    // (and rotating) the first.
+    const sessionTag = randomUUID().replace(/-/g, "").slice(0, 6);
+    const name = `${clientLabel} (MCP) · ${sessionTag}`;
+    const reach = await this.defaultReach(headers.Authorization);
     const body = {
       name,
       description: `OAuth connector session for ${clientLabel}`,
       scopes,
-      allWorkspaces: true,
-      workspaceIds: [] as number[],
+      allWorkspaces: reach.allWorkspaces,
+      workspaceIds: reach.workspaceIds,
       expiresAt: null as string | null,
     };
 
     try {
-      const listRes = await fetch(`${this.baseUrl}/api/connections`, {
-        headers: { Authorization: headers.Authorization, Accept: headers.Accept },
-      });
-      if (listRes.status === 404) {
-        // not_enabled — feature flag off on this environment
-        console.log("Connections API disabled on backend; falling back to JWT session");
-        return null;
-      }
-      if (listRes.ok) {
-        const mine = (await listRes.json()) as Array<Record<string, unknown>> | unknown;
-        const existing = Array.isArray(mine)
-          ? mine.find((c) => c && c.name === name && c.status === "active")
-          : undefined;
-        const existingId = existing ? String((existing as Record<string, unknown>).id ?? "") : "";
-        if (existingId) {
-          const reused = await this.updateAndRotate(existingId, body, headers);
-          if (reused) return { ...reused, scopes };
-          // fall through to create a fresh connection
-        }
-      }
-
       const createRes = await fetch(`${this.baseUrl}/api/connections`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
       });
+      if (createRes.status === 404) {
+        // not_enabled — feature flag off on this environment
+        console.log("Connections API disabled on backend; falling back to JWT session");
+        return null;
+      }
       if (!createRes.ok) {
         // 400/403 are policy answers (pricing gate, limit) — deny the exchange
         // outright. Everything else is an availability problem — fall back.
@@ -433,41 +432,35 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     }
   }
 
-  /** Re-grant (scopes may have changed) then rotate for a fresh plaintext token. */
-  private async updateAndRotate(
-    connectionId: string,
-    body: Record<string, unknown>,
-    headers: Record<string, string>,
-  ): Promise<{ token: string; connectionId: string; expiresAt?: string } | null> {
+  /**
+   * Workspace grant for a new OAuth connection: the single accessible
+   * workspace when there is exactly one, otherwise all of them. Any failure
+   * to read the list keeps the old default — reach must never silently
+   * shrink because a lookup hiccuped.
+   */
+  private async defaultReach(
+    authorization: string,
+  ): Promise<{ allWorkspaces: boolean; workspaceIds: number[] }> {
+    const all = { allWorkspaces: true, workspaceIds: [] as number[] };
     try {
-      const updateRes = await fetch(`${this.baseUrl}/api/connections/${connectionId}`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify(body),
+      const res = await fetch(`${this.baseUrl}/api/mcp/workspace`, {
+        headers: { Authorization: authorization, Accept: "application/json" },
       });
-      if (!updateRes.ok) return null;
-
-      const rotateRes = await fetch(`${this.baseUrl}/api/connections/${connectionId}/rotate`, {
-        method: "POST",
-        headers,
-      });
-      if (!rotateRes.ok) {
-        await throwIfPolicyDenial(rotateRes);
-        return null;
+      if (!res.ok) return all;
+      const list = (await res.json()) as unknown;
+      if (!Array.isArray(list)) return all;
+      const ids = list
+        .map((w) => Number((w as { id?: unknown })?.id))
+        .filter((id) => Number.isInteger(id) && id > 0);
+      if (ids.length === 1) return { allWorkspaces: false, workspaceIds: ids };
+      if (ids.length > 1) {
+        console.log(
+          `OAuth connection keeps all-workspace reach: ${ids.length} workspaces and no consent step picks one yet`,
+        );
       }
-      const rotated = (await rotateRes.json()) as {
-        token?: string;
-        connection?: { id?: string; expiresAt?: string };
-      };
-      if (!rotated?.token || !isConnectionToken(rotated.token)) return null;
-      return {
-        token: rotated.token,
-        connectionId,
-        expiresAt: rotated.connection?.expiresAt ?? undefined,
-      };
-    } catch (error) {
-      if (error instanceof ConnectionMintDeniedError) throw error;
-      return null;
+      return all;
+    } catch {
+      return all;
     }
   }
 
@@ -595,6 +588,16 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     }
     for (const [key, val] of this.patVerify) {
       if (now - val.at > PAT_VERIFY_TTL_MS) this.patVerify.delete(key);
+    }
+    for (const [key, val] of this.tokens) {
+      // JWT sessions die with the JWT; minted ist_ tokens leave the map after
+      // a day and are introspected from then on. Without this the map only
+      // ever grew (docs/integration-oauth-dcr-proposal.md, O-0 leak).
+      const exp = decodeJwtExp(key);
+      const expired = exp !== undefined
+        ? exp * 1000 <= now
+        : now - val.createdAt > ISSUED_TOKEN_TTL_MS;
+      if (expired) this.tokens.delete(key);
     }
   }
 }

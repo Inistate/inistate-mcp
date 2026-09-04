@@ -134,10 +134,11 @@ describe("exchangeAuthorizationCode → connection token", () => {
 
     const create = calls.find((c) => c.method === "POST" && c.path === "/api/connections");
     expect(create?.body).toMatchObject({
-      name: "Claude (MCP)",
       scopes: ["data.entries:read"],
       allWorkspaces: true,
     });
+    // Per-authorization name: the client label plus a short session tag.
+    expect((create?.body as { name: string }).name).toMatch(/^Claude \(MCP\) · [0-9a-f]{6}$/);
   });
 
   it("grants the full scope set when the client requests none", async () => {
@@ -157,14 +158,16 @@ describe("exchangeAuthorizationCode → connection token", () => {
     expect(create?.body).toMatchObject({ scopes: SUPPORTED_SCOPES });
   });
 
-  it("reuses the per-client connection: update + rotate instead of create", async () => {
+  it("never touches an existing connection: a second authorization gets its own row", async () => {
+    // Two instances of one client (n8n prod + staging, ChatGPT on two devices)
+    // used to land on the same "<client> (MCP)" row and rotate each other's
+    // token; the older instance died once the overlap window closed.
     const { calls } = mockFetch({
       "GET /api/connections": () => ({
         body: [{ id: "conn-9", name: "Claude (MCP)", status: "active" }],
       }),
-      "PUT /api/connections/conn-9": () => ({ body: { id: "conn-9" } }),
-      "POST /api/connections/conn-9/rotate": () => ({
-        body: { connection: { id: "conn-9", expiresAt: null }, token: ROTATED_PAT },
+      "POST /api/connections": () => ({
+        body: { connection: { id: "conn-10", expiresAt: null }, token: PAT },
       }),
     });
 
@@ -172,10 +175,45 @@ describe("exchangeAuthorizationCode → connection token", () => {
     const code = await obtainCode(provider, { jwt: jwt("user-1") });
     const tokens = await provider.exchangeAuthorizationCode(CLIENT, code);
 
-    expect(tokens.access_token).toBe(ROTATED_PAT);
-    expect(calls.some((c) => c.method === "POST" && c.path === "/api/connections")).toBe(false);
-    const update = calls.find((c) => c.method === "PUT" && c.path === "/api/connections/conn-9");
-    expect(update?.body).toMatchObject({ name: "Claude (MCP)", allWorkspaces: true });
+    expect(tokens.access_token).toBe(PAT);
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    expect(calls.some((c) => c.path.endsWith("/rotate"))).toBe(false);
+    const create = calls.find((c) => c.method === "POST" && c.path === "/api/connections");
+    expect((create?.body as { name: string }).name).not.toBe("Claude (MCP)");
+  });
+
+  it("narrows a single-workspace user to that workspace", async () => {
+    const { calls } = mockFetch({
+      "GET /api/mcp/workspace": () => ({ body: [{ id: 7, name: "Ops" }] }),
+      "POST /api/connections": () => ({
+        body: { connection: { id: "conn-1", expiresAt: null }, token: PAT },
+      }),
+    });
+
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    const code = await obtainCode(provider, { jwt: jwt("user-1") });
+    await provider.exchangeAuthorizationCode(CLIENT, code);
+
+    const create = calls.find((c) => c.method === "POST" && c.path === "/api/connections");
+    expect(create?.body).toMatchObject({ allWorkspaces: false, workspaceIds: [7] });
+  });
+
+  it("keeps all-workspace reach when the user has several workspaces (no consent step yet)", async () => {
+    const { calls } = mockFetch({
+      "GET /api/mcp/workspace": () => ({
+        body: [{ id: 7, name: "Ops" }, { id: 8, name: "Finance" }],
+      }),
+      "POST /api/connections": () => ({
+        body: { connection: { id: "conn-1", expiresAt: null }, token: PAT },
+      }),
+    });
+
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    const code = await obtainCode(provider, { jwt: jwt("user-1") });
+    await provider.exchangeAuthorizationCode(CLIENT, code);
+
+    const create = calls.find((c) => c.method === "POST" && c.path === "/api/connections");
+    expect(create?.body).toMatchObject({ allWorkspaces: true, workspaceIds: [] });
   });
 
   it("maps a connection expiry to expires_in", async () => {
@@ -262,34 +300,36 @@ describe("exchangeAuthorizationCode → connection token", () => {
     );
   });
 
-  it("denies via the rotate path too when the gate closes on an existing connection", async () => {
-    mockFetch({
-      "GET /api/connections": () => ({
-        body: [{ id: "conn-9", name: "Claude (MCP)", status: "active" }],
-      }),
-      "PUT /api/connections/conn-9": () => ({ body: { id: "conn-9" } }),
-      "POST /api/connections/conn-9/rotate": () => ({
-        status: 403,
-        body: {
-          error: "connections_not_permitted",
-          message: "API connections are not included in your current membership plan.",
-        },
-      }),
-      "POST /api/connections": () => ({
-        status: 403,
-        body: {
-          error: "connections_not_permitted",
-          message: "API connections are not included in your current membership plan.",
-        },
-      }),
-    });
+});
 
-    const provider = new InistateOAuthProvider(BASE, APP, MCP);
-    const code = await obtainCode(provider, { jwt: jwt("downgraded-user") });
+describe("issued-token map hygiene", () => {
+  it("forgets a minted connection token after a day and introspects it instead", async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = mockFetch({
+        "POST /api/connections": () => ({
+          body: { connection: { id: "conn-1", expiresAt: null }, token: PAT },
+        }),
+        "GET /v1/whoami": () => ({
+          body: { userId: "user-1", connection: { id: "conn-1", scopes: ["data.entries:read"] } },
+        }),
+      });
 
-    await expect(provider.exchangeAuthorizationCode(CLIENT, code)).rejects.toThrow(
-      /membership plan/,
-    );
+      const provider = new InistateOAuthProvider(BASE, APP, MCP);
+      const code = await obtainCode(provider, { jwt: jwt("user-1", 48 * 3600) });
+      await provider.exchangeAuthorizationCode(CLIENT, code);
+      await provider.verifyAccessToken(PAT);
+      expect(calls.some((c) => c.path === "/v1/whoami")).toBe(false);
+
+      // The cleanup timer fires every minute; a day later the local entry is gone.
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000 + 61_000);
+
+      const info = await provider.verifyAccessToken(PAT);
+      expect(info.clientId).toBe("conn-1");
+      expect(calls.some((c) => c.path === "/v1/whoami")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
