@@ -1,5 +1,11 @@
 # inistate-mcp
 
+## 1.1.4
+
+### Patch Changes
+
+- Persist OAuth DCR client registrations across restarts (SS05806). Registered connectors (ChatGPT, Claude) no longer get `invalid_client` after a deploy or pm2 restart; the store falls back to memory if the file is unreadable.
+
 ## 1.1.3
 
 ### Patch Changes
