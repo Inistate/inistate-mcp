@@ -514,7 +514,7 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       title: "List Workspaces",
       description: gatedDesc(
         caps.workspaces,
-        "List workspaces the current user has access to. Typically the first call of a session. If exactly one workspace matches, it is selected automatically and its module list is returned — no set_workspace or list_modules needed; otherwise call set_workspace next.",
+        "List workspaces the current user has access to. Typically the first call of a session. If exactly one workspace matches, it is selected automatically and its module list is returned — no set_workspace or list_modules needed; otherwise call set_workspace next. Administrators: without `search` this lists your own memberships; pass `search` to find any workspace by name.",
       ),
       inputSchema: {
         search: z
@@ -588,14 +588,19 @@ Workflow sequences after workspace is set:
         try {
           data = await backend.getWorkspace(resolved);
         } catch {
-          // Id lookup failed — the agent may have sent a name. Resolve it.
-          const list = await backend.listWorkspaces().catch(() => null);
-          const all = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : [];
+          // Id lookup failed — the agent may have sent a name. Resolve it, searching by that
+          // name: for an Administrator the unsearched list is only their own memberships,
+          // while a search reaches every workspace. The unsearched list is still what
+          // `available` shows when nothing matches.
+          const searched = await backend.listWorkspaces(requested).catch(() => null);
+          const candidates = Array.isArray(searched) ? (searched as Array<Record<string, unknown>>) : [];
           const lower = requested.toLowerCase();
           const match =
-            all.find((w) => String(w?.id) === requested) ??
-            all.find((w) => typeof w?.name === "string" && (w.name as string).toLowerCase() === lower);
+            candidates.find((w) => String(w?.id) === requested) ??
+            candidates.find((w) => typeof w?.name === "string" && (w.name as string).toLowerCase() === lower);
           if (!match) {
+            const list = await backend.listWorkspaces().catch(() => null);
+            const all = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : candidates;
             return err({
               structured: {
                 error: "workspace_not_found",

@@ -785,7 +785,7 @@
     "_description": "INISTATE operations map to MCP endpoints. Each operation uses display names exclusively — the MCP layer handles all internal ID resolution.",
 
     "list_workspaces": {
-      "description": "List workspaces the current user can access. Call this first when no workspace is set — the chosen workspace ID must be passed on subsequent calls via the wsid header or the workspaceId tool parameter, otherwise every downstream call scopes to the wrong tenant.",
+      "description": "List workspaces the current user can access. Call this first when no workspace is set — the chosen workspace ID must be passed on subsequent calls via the wsid header or the workspaceId tool parameter, otherwise every downstream call scopes to the wrong tenant. Administrators see their own memberships here; pass search to find any workspace by name (capped at 50 rows).",
       "parameters": {
         "search": { "type": "string", "description": "Optional case-insensitive name filter. Use when the user names a workspace and you need to resolve it to an ID." }
       },

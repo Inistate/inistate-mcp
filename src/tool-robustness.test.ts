@@ -60,6 +60,7 @@ const WORKSPACES = [
 ];
 
 const setWorkspaceCalls: string[] = [];
+const listWorkspaceSearches: Array<string | undefined> = [];
 let lastSubmitPayload: Record<string, unknown> | null = null;
 let lastBulkPayload: Record<string, unknown> | null = null;
 let lastCreatePayload: Record<string, unknown> | null = null;
@@ -84,7 +85,8 @@ class FakeBackend implements Backend {
     setWorkspaceCalls.push(wsid);
   }
 
-  async listWorkspaces(): Promise<unknown> {
+  async listWorkspaces(search?: string): Promise<unknown> {
+    listWorkspaceSearches.push(search);
     return WORKSPACES;
   }
 
@@ -221,6 +223,18 @@ describe("set_workspace robustness", () => {
     }));
     expect(res.workspaceId).toBe(1138);
     expect(setWorkspaceCalls.at(-1)).toBe("1138");
+  });
+
+  it("resolves a name through the searched list, not the caller's own memberships", async () => {
+    // An Administrator's unsearched list is only their memberships; a search reaches every
+    // workspace. The name must therefore go to the backend as the search term.
+    const before = listWorkspaceSearches.length;
+    parse(await client.callTool({
+      name: "set_workspace",
+      arguments: { workspaceId: "Test" },
+    }));
+    expect(listWorkspaceSearches.slice(before)).toEqual(["Test"]);
+    expect(setWorkspaceCalls.at(-1)).toBe("2234");
   });
 
   it("returns workspace_not_found without mutating the active workspace", async () => {
