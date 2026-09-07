@@ -128,6 +128,48 @@ interface PendingAuth {
   clientId: string;
   params: AuthorizationParams;
   createdAt: number;
+  /** Ties the flow to the browser that started it; see browserSecretCookieName (SS05808). */
+  browserSecret: string;
+}
+
+/**
+ * SS05808: the login page POSTs the user's JWT back to /authorize/callback with only the
+ * nonce to name the flow, and the nonce travels in the login URL - a referrer leak, an IdP
+ * log, or any script on the login page can read it, and whoever holds it could complete
+ * the victim's flow with their OWN JWT, so the victim's MCP client would then act inside
+ * the attacker's workspace. The flow is therefore also bound to the browser that started
+ * it: /authorize sets an HttpOnly cookie the callback must present. app.* and mcp.* share
+ * one registrable domain, so a Lax cookie rides the login page's top-level form POST.
+ */
+export function browserSecretCookieName(nonce: string): string {
+  return `mcp_auth_${nonce}`;
+}
+
+/** The value of one cookie out of a raw Cookie header, or undefined. */
+export function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return part.slice(eq + 1).trim();
+    }
+  }
+  return undefined;
+}
+
+/** Cookie attributes for the browser-binding cookie: only the callback path ever needs it. */
+export function browserSecretCookieOptions(secure: boolean) {
+  return {
+    httpOnly: true,
+    secure,
+    sameSite: "lax" as const,
+    path: "/authorize",
+    maxAge: CODE_TTL_MS,
+  };
 }
 
 interface IssuedToken {
@@ -191,11 +233,25 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     res: Response,
   ): Promise<void> {
     const nonce = randomUUID();
+    const browserSecret = randomUUID();
     this.pendingAuth.set(nonce, {
       clientId: client.client_id,
       params,
       createdAt: Date.now(),
+      browserSecret,
     });
+
+    // Bind the flow to this browser (SS05808). The SDK hands us the express response;
+    // a bare redirect-only response (tests, embedded use) simply gets no cookie.
+    const setCookie = (res as unknown as { cookie?: (name: string, value: string, options: object) => void }).cookie;
+    if (typeof setCookie === "function") {
+      setCookie.call(
+        res,
+        browserSecretCookieName(nonce),
+        browserSecret,
+        browserSecretCookieOptions(this.mcpUrl.startsWith("https:")),
+      );
+    }
 
     // Redirect to the app's login page with MCP callback params.
     // The path is configurable via INISTATE_APP_LOGIN_PATH; defaults to "/#/login"
@@ -230,12 +286,18 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     nonce: string,
     jwt: string,
     refreshToken?: string,
+    browserSecret?: string,
   ): { redirectUrl: string } {
     const pending = this.pendingAuth.get(nonce);
     if (!pending) throw new Error("Invalid or expired authorization nonce");
     if (Date.now() - pending.createdAt > CODE_TTL_MS) {
       this.pendingAuth.delete(nonce);
       throw new Error("Authorization session expired");
+    }
+    // SS05808: only the browser that started the flow may finish it. The pending flow is
+    // kept, so the legitimate browser can still complete after a stray or forged callback.
+    if (!browserSecret || browserSecret !== pending.browserSecret) {
+      throw new Error("Authorization session does not belong to this browser");
     }
     this.pendingAuth.delete(nonce);
 
@@ -531,44 +593,44 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       };
     }
 
-    // Connection tokens minted by another process (or before a restart):
-    // introspect via /v1/whoami — scope-free by design, only reflects the
-    // caller's own token — and cache briefly so revocation still bites.
-    if (isConnectionToken(token)) {
-      const cached = this.patVerify.get(token);
-      if (cached && Date.now() - cached.at < PAT_VERIFY_TTL_MS) return cached.info;
+    // Anything else - a connection token minted by another process or before a
+    // restart, or a login JWT handed straight to an MCP client - is introspected
+    // via /v1/whoami (scope-free by design, only reflects the caller's own
+    // token) and cached briefly so revocation still bites. Bearers used to be
+    // accepted unverified as "legacy" (SS05807): that made the OAuth layer
+    // decorative and let a forged JWT choose whose stored mode a request used.
+    return this.introspect(token);
+  }
 
-      const res = await fetch(`${this.baseUrl}/v1/whoami`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      });
-      if (!res.ok) {
-        this.patVerify.delete(token);
-        throw new Error("Connection token is unknown, revoked, or expired");
-      }
-      const data = (await res.json()) as {
-        userId?: string;
-        connection?: { id?: string; scopes?: string[] };
-      };
-      const info: AuthInfo = {
-        token,
-        clientId: String(data?.connection?.id ?? "connection"),
-        scopes: Array.isArray(data?.connection?.scopes) ? data.connection.scopes : [],
-        ...(data?.userId ? { extra: { userId: data.userId } } : {}),
-      };
-      this.patVerify.set(token, { info, at: Date.now() });
-      return info;
+  private async introspect(token: string): Promise<AuthInfo> {
+    const cached = this.patVerify.get(token);
+    if (cached && Date.now() - cached.at < PAT_VERIFY_TTL_MS) return cached.info;
+
+    const res = await fetch(`${this.baseUrl}/v1/whoami`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    });
+    if (!res.ok) {
+      this.patVerify.delete(token);
+      throw new Error(
+        isConnectionToken(token)
+          ? "Connection token is unknown, revoked, or expired"
+          : "Bearer token is invalid or expired",
+      );
     }
-
-    // For tokens not issued through OAuth (e.g. direct API key / legacy),
-    // accept them but mark with a generic clientId — the backend remains the
-    // enforcement point for these.
-    const expiresAt = decodeJwtExp(token);
-    return {
-      token,
-      clientId: "legacy",
-      scopes: [],
-      ...(expiresAt !== undefined ? { expiresAt } : {}),
+    const data = (await res.json()) as {
+      userId?: string;
+      connection?: { id?: string; scopes?: string[] };
     };
+    const expiresAt = decodeJwtExp(token); // undefined for ist_ tokens
+    const info: AuthInfo = {
+      token,
+      clientId: String(data?.connection?.id ?? (isConnectionToken(token) ? "connection" : "session")),
+      scopes: Array.isArray(data?.connection?.scopes) ? data.connection.scopes : [],
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      ...(data?.userId ? { extra: { userId: data.userId } } : {}),
+    };
+    this.patVerify.set(token, { info, at: Date.now() });
+    return info;
   }
 
   /* ---- Revocation ---- */

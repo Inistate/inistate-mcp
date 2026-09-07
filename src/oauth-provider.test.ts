@@ -6,6 +6,8 @@ import {
   SUPPORTED_SCOPES,
   isConnectionToken,
   connectionModeKey,
+  browserSecretCookieName,
+  readCookie,
 } from "./oauth-provider.js";
 
 const BASE = "https://api.example.com";
@@ -51,15 +53,21 @@ function mockFetch(routes: Record<string, (body?: unknown) => RouteResult>) {
   return { fn, calls };
 }
 
-/** Drive authorize → login callback → code, returning the authorization code. */
-async function obtainCode(
+/** Start a flow the way a browser would: the login URL plus the cookie /authorize set on it. */
+async function startFlow(
   provider: InistateOAuthProvider,
-  opts: { scopes?: string[]; jwt: string; refreshToken?: string },
-): Promise<string> {
+  opts: { scopes?: string[] } = {},
+): Promise<{ nonce: string; cookies: Record<string, string>; cookieOptions: Record<string, Record<string, unknown>> }> {
   let loginUrl = "";
+  const cookies: Record<string, string> = {};
+  const cookieOptions: Record<string, Record<string, unknown>> = {};
   const res = {
     redirect: (_status: number, url: string) => {
       loginUrl = url;
+    },
+    cookie: (name: string, value: string, options: Record<string, unknown>) => {
+      cookies[name] = value;
+      cookieOptions[name] = options;
     },
   } as unknown as ExpressResponse;
 
@@ -76,10 +84,20 @@ async function obtainCode(
 
   const nonce = /[?&]mcp_nonce=([^&]+)/.exec(loginUrl)?.[1];
   expect(nonce).toBeTruthy();
+  return { nonce: decodeURIComponent(nonce!), cookies, cookieOptions };
+}
+
+/** Drive authorize → login callback → code, returning the authorization code. */
+async function obtainCode(
+  provider: InistateOAuthProvider,
+  opts: { scopes?: string[]; jwt: string; refreshToken?: string },
+): Promise<string> {
+  const { nonce, cookies } = await startFlow(provider, { scopes: opts.scopes });
   const { redirectUrl } = provider.completeAuthorization(
-    decodeURIComponent(nonce!),
+    nonce,
     opts.jwt,
     opts.refreshToken,
+    cookies[browserSecretCookieName(nonce)],
   );
   const code = new URL(redirectUrl).searchParams.get("code");
   expect(code).toBeTruthy();
@@ -348,11 +366,83 @@ describe("verifyAccessToken", () => {
     await expect(provider.verifyAccessToken(PAT)).rejects.toThrow(/revoked|expired|unknown/i);
   });
 
-  it("keeps the legacy passthrough for non-connection bearer tokens", async () => {
+  /* SS05807: a bearer this process did not issue used to be accepted unverified as
+     "legacy", so the OAuth layer was decorative and a forged JWT could pick whose stored
+     mode a request ran under through its unverified subject. */
+  it("introspects an unknown login JWT via /v1/whoami instead of trusting it", async () => {
+    const { calls } = mockFetch({
+      "GET /v1/whoami": () => ({ body: { userId: "user-2", userName: "two@example.com", callerKind: "web" } }),
+    });
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    const token = jwt("user-2", 60);
+
+    const info = await provider.verifyAccessToken(token);
+    expect(info.clientId).toBe("session");
+    expect(info.extra?.userId).toBe("user-2");
+    expect(info.expiresAt).toBeDefined();
+    expect(calls.filter((c) => c.path === "/v1/whoami")).toHaveLength(1);
+
+    // cached: a second check within the TTL does not hit the backend again
+    await provider.verifyAccessToken(token);
+    expect(calls.filter((c) => c.path === "/v1/whoami")).toHaveLength(1);
+  });
+
+  it("rejects a bearer the backend refuses - a forged or expired JWT no longer passes", async () => {
+    mockFetch({ "GET /v1/whoami": () => ({ status: 401 }) });
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    await expect(provider.verifyAccessToken(jwt("attacker", 60))).rejects.toThrow(/invalid or expired/);
+  });
+});
+
+/* SS05808: the login page POSTs the JWT back with only the nonce to name the flow, and the
+   nonce is in the login URL where a referrer leak or a script on the page can read it. Whoever
+   held it could complete the victim's flow with their OWN JWT. The flow is now also bound to
+   the browser that started it through an HttpOnly cookie the callback must present. */
+describe("authorize callback is bound to the browser that started the flow", () => {
+  it("sets an HttpOnly, Lax, callback-scoped cookie on the login redirect", async () => {
     mockFetch({});
     const provider = new InistateOAuthProvider(BASE, APP, MCP);
-    const info = await provider.verifyAccessToken(jwt("user-2", 60));
-    expect(info.clientId).toBe("legacy");
-    expect(info.expiresAt).toBeDefined();
+    const { nonce, cookies, cookieOptions } = await startFlow(provider);
+
+    const name = browserSecretCookieName(nonce);
+    expect(cookies[name]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(cookieOptions[name]).toMatchObject({ httpOnly: true, secure: true, sameSite: "lax", path: "/authorize" });
+  });
+
+  it("does not mark the cookie Secure for a plain-http issuer (local development)", async () => {
+    mockFetch({});
+    const provider = new InistateOAuthProvider(BASE, APP, "http://localhost:3000");
+    const { nonce, cookieOptions } = await startFlow(provider);
+    expect(cookieOptions[browserSecretCookieName(nonce)]).toMatchObject({ secure: false, httpOnly: true });
+  });
+
+  it("refuses a callback that only knows the nonce", async () => {
+    mockFetch({});
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    const { nonce } = await startFlow(provider);
+
+    expect(() => provider.completeAuthorization(nonce, jwt("attacker"))).toThrow(/does not belong to this browser/);
+    expect(() => provider.completeAuthorization(nonce, jwt("attacker"), undefined, "guess")).toThrow(/does not belong/);
+  });
+
+  it("keeps the flow alive for the real browser after a forged callback was refused", async () => {
+    mockFetch({});
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    const { nonce, cookies } = await startFlow(provider);
+
+    expect(() => provider.completeAuthorization(nonce, jwt("attacker"), undefined, "guess")).toThrow();
+
+    const { redirectUrl } = provider.completeAuthorization(nonce, jwt("victim"), undefined, cookies[browserSecretCookieName(nonce)]);
+    expect(new URL(redirectUrl).searchParams.get("code")).toBeTruthy();
+    // and the flow is single-use once completed
+    expect(() => provider.completeAuthorization(nonce, jwt("victim"), undefined, cookies[browserSecretCookieName(nonce)])).toThrow(/Invalid or expired/);
+  });
+
+  it("reads one cookie out of a raw Cookie header", () => {
+    const header = "other=1; mcp_auth_n1=abc%20def ; last=x";
+    expect(readCookie(header, "mcp_auth_n1")).toBe("abc def");
+    expect(readCookie(header, "last")).toBe("x");
+    expect(readCookie(header, "missing")).toBeUndefined();
+    expect(readCookie(undefined, "mcp_auth_n1")).toBeUndefined();
   });
 });
