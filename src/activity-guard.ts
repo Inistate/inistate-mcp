@@ -39,6 +39,8 @@ interface CanvasSchema {
 
 const REF_FIELD_TYPES = new Set(["User", "Users", "Module", "Modules"]);
 
+const LOCATION_FIELD_TYPE = "Location";
+
 // Standard activities are inherent platform operations and have no actor in the
 // module schema. They bypass the actor check (but state-change checks still run).
 // The platform uses both names for the direct state change — availableActivities
@@ -513,6 +515,128 @@ function checkSingleRef(
   };
 }
 
+// ---------- Location-shape pre-flight ----------
+//
+// A Location field stores `{ lat, lng, placeName }` (canvas type 9). The
+// platform persists whatever it is handed, so a wrong shape is not an error —
+// it is silent corruption: `placeName` filters, spreadsheet export and
+// notification templates all read those keys back and find nothing.
+//
+// The read paths surface Location wrapped as `{ value: X }` (get_entry /
+// list_entries / get_form defaults) and the submit path unwraps that same
+// envelope, so agents mirroring a read back into a submit send the envelope —
+// accepted here. What agents get wrong is the payload inside it: a single
+// "lat,lng" string instead of the object (SS06091).
+
+const LOCATION_SHAPE_HINT =
+  '{ lat: <number>, lng: <number>, placeName: "<place display name>" } ' +
+  '(e.g. { lat: 1.5329204, lng: 103.7995367, placeName: "Taman Universiti, Skudai" })';
+
+const LOCATION_KEYS = ["lat", "lng", "placeName"];
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+/** Short description of what arrived, for the correction hint. */
+function describeReceived(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "string") return `the string ${JSON.stringify(v)}`;
+  if (typeof v === "number") return `the number ${v}`;
+  if (typeof v === "boolean") return `the boolean ${v}`;
+  return `a ${typeof v}`;
+}
+
+function checkLocationValue(
+  field: string,
+  value: unknown,
+): RefShapeError | null {
+  // null/undefined clears the field — allowed, same as references.
+  if (value === null || value === undefined) return null;
+
+  // Unwrap the read-path `{ value: X }` envelope so a read → submit
+  // round-trip passes. Only when it carries no location key itself, so a
+  // genuine payload is never mistaken for an envelope.
+  let target: unknown = value;
+  let locator = field;
+  if (
+    isPlainObject(value) &&
+    "value" in value &&
+    !LOCATION_KEYS.some((k) => k in value)
+  ) {
+    target = value.value;
+    locator = `${field}.value`;
+    if (target === null || target === undefined) return null;
+  }
+
+  const reject = (message: string): RefShapeError => ({
+    field,
+    type: LOCATION_FIELD_TYPE,
+    received: value,
+    message,
+  });
+
+  if (!isPlainObject(target)) {
+    return reject(
+      `Location field '${locator}' must be an object shaped ${LOCATION_SHAPE_HINT} — got ${describeReceived(target)}. ` +
+        `A combined "lat,lng" string is not a Location: split it into numeric 'lat' and 'lng' keys and set 'placeName' to the place's display name.`,
+    );
+  }
+
+  const { lat, lng, placeName } = target;
+  const hasLat = lat !== undefined && lat !== null;
+  const hasLng = lng !== undefined && lng !== null;
+  const hasPlaceName = placeName !== undefined && placeName !== null;
+
+  // Numeric coordinates only — the platform filters and exports read these as
+  // numbers, so "1.53" stored as a string reads back unusable.
+  for (const [key, val, present] of [
+    ["lat", lat, hasLat],
+    ["lng", lng, hasLng],
+  ] as Array<[string, unknown, boolean]>) {
+    if (present && !isFiniteNumber(val)) {
+      return reject(
+        `Location field '${locator}' has '${key}' as ${describeReceived(val)}; it must be a number (unquoted), as in ${LOCATION_SHAPE_HINT}.`,
+      );
+    }
+  }
+  if (hasLat !== hasLng) {
+    return reject(
+      `Location field '${locator}' has only '${hasLat ? "lat" : "lng"}' — latitude and longitude must be given together, as in ${LOCATION_SHAPE_HINT}.`,
+    );
+  }
+  if (hasLat && ((lat as number) < -90 || (lat as number) > 90)) {
+    return reject(
+      `Location field '${locator}' has 'lat' ${lat} out of range — latitude must be between -90 and 90. Check that 'lat' and 'lng' are not swapped.`,
+    );
+  }
+  if (hasLng && ((lng as number) < -180 || (lng as number) > 180)) {
+    return reject(
+      `Location field '${locator}' has 'lng' ${lng} out of range — longitude must be between -180 and 180. Check that 'lat' and 'lng' are not swapped.`,
+    );
+  }
+  if (hasPlaceName && typeof placeName !== "string") {
+    return reject(
+      `Location field '${locator}' has 'placeName' as ${describeReceived(placeName)}; it must be a string, as in ${LOCATION_SHAPE_HINT}.`,
+    );
+  }
+
+  // Matches the platform's own validity rule (FTSLocation.vue): a location is
+  // meaningful with a place name, or with a coordinate pair, or both.
+  const placeNameOk = typeof placeName === "string" && placeName.trim().length > 0;
+  if (!placeNameOk && !(hasLat && hasLng)) {
+    return reject(
+      `Location field '${locator}' carries no location — supply 'lat' and 'lng', or a non-empty 'placeName', as in ${LOCATION_SHAPE_HINT}.`,
+    );
+  }
+  return null;
+}
+
 function checkRefValue(
   field: string,
   type: string,
@@ -593,8 +717,13 @@ export function validateInputShapesWith(
   const errors: RefShapeError[] = [];
   for (const [key, val] of Object.entries(input)) {
     const type = types.get(key);
-    if (!type || !REF_FIELD_TYPES.has(type)) continue;
-    const e = checkRefValue(key, type, val);
+    if (!type) continue;
+    const e =
+      type === LOCATION_FIELD_TYPE
+        ? checkLocationValue(key, val)
+        : REF_FIELD_TYPES.has(type)
+          ? checkRefValue(key, type, val)
+          : null;
     if (e) errors.push(e);
   }
   return errors;
@@ -649,8 +778,8 @@ export function resolveInputKeys(
 }
 
 /**
- * Validate that User/Module/Users/Modules fields in `input` carry the
- * correct shape. Convenience wrapper around getModuleFieldTypes +
+ * Validate that User/Module/Users/Modules and Location fields in `input`
+ * carry the correct shape. Convenience wrapper around getModuleFieldTypes +
  * validateInputShapesWith — use this for one-shot calls (submit_activity).
  * Bulk callers should fetch the map once and use validateInputShapesWith
  * directly.
@@ -663,6 +792,47 @@ export async function validateInputShapes(
   if (!input) return [];
   const types = await getModuleFieldTypes(moduleName, fetchSchema);
   return validateInputShapesWith(types, input);
+}
+
+/**
+ * Wording for the structured error returned when pre-flight rejects an input
+ * shape. Reference and Location failures need different corrections, so the
+ * envelope adapts to whichever kinds are present rather than naming
+ * "User/Module" for a Location problem.
+ */
+export function describeShapeErrors(errors: RefShapeError[]): {
+  error: string;
+  message: string;
+  agent_action: string;
+} {
+  const hasLocation = errors.some((e) => e.type === LOCATION_FIELD_TYPE);
+  const hasRef = errors.some((e) => e.type !== LOCATION_FIELD_TYPE);
+
+  if (hasLocation && !hasRef) {
+    return {
+      error: "invalid_location_field_shape",
+      message:
+        'One or more Location fields were submitted with the wrong shape. A Location is an object { lat, lng, placeName } — lat/lng unquoted numbers, placeName the place\'s display name — never a combined "lat,lng" string.',
+      agent_action:
+        "Rebuild each Location as { lat: <number>, lng: <number>, placeName: \"<display name>\" } and resubmit. Values read from an entry or get_form round-trip unchanged.",
+    };
+  }
+  if (hasLocation && hasRef) {
+    return {
+      error: "invalid_field_shape",
+      message:
+        "One or more fields were submitted with the wrong shape. User/Module fields require { id, value } objects (plural variants take arrays of them); Location fields require { lat, lng, placeName }.",
+      agent_action:
+        "Re-read the entry or call get_form and copy those values back unchanged (they round-trip), then resubmit. Do not pass bare ids, display strings, or a combined \"lat,lng\" string.",
+    };
+  }
+  return {
+    error: "invalid_reference_field_shape",
+    message:
+      "One or more User/Module fields were submitted with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+    agent_action:
+      "Re-read the entry or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
+  };
 }
 
 /**

@@ -6,6 +6,7 @@ import { Backend } from "./backend.js";
 import { capabilityMessage } from "./capability.js";
 import {
   clearFlagged,
+  describeShapeErrors,
   evaluateActivity,
   FLAGGED_ANNOTATION,
   getHumanBlockedStates,
@@ -18,6 +19,7 @@ import {
   seedSchemaCache,
   validateInputShapesWith,
   type CanvasFetcher,
+  type RefShapeError,
   type SchemaFetcher,
 } from "./activity-guard.js";
 import {
@@ -889,7 +891,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
         entryIds: z.array(z.union([z.string(), z.number()])).optional().describe("For bulk ops"),
         input: z
           .preprocess(v => (v != null && typeof v === "object" && !Array.isArray(v) ? v : undefined), z.record(z.unknown()).optional())
-          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
+          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. Location: {lat,lng,placeName} — lat/lng unquoted numbers, placeName the place's display name; never a combined \"lat,lng\" string. User/Module/Location shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
@@ -997,23 +999,21 @@ Load resource inistate://schema before modifying to know valid field types, colo
             (r) => `Input key '${r.from}' matched field '${r.to}' — use exact field names.`,
           );
         }
-        // Reference-shape pre-flight: User/Module fields must be { id, value }.
+        // Input-shape pre-flight: User/Module fields must be { id, value };
+        // Location fields must be { lat, lng, placeName }.
         if (input) {
           const shapeErrors = validateInputShapesWith(fieldTypes, input);
           if (shapeErrors.length > 0) {
             const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+            const described = describeShapeErrors(shapeErrors);
             const structured = {
-              error: "invalid_reference_field_shape",
-              message:
-                "One or more User/Module fields were submitted with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+              ...described,
               activity,
               fields: shapeErrors,
-              agent_action:
-                "Re-read the entry or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
             };
             log(
               "submit_activity",
-              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: invalid_reference_field_shape (${shapeErrors.length} field${shapeErrors.length === 1 ? "" : "s"})`,
+              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${described.error} (${shapeErrors.length} field${shapeErrors.length === 1 ? "" : "s"})`,
             );
             return err({ structured });
           }
@@ -1303,18 +1303,17 @@ Load resource inistate://schema before modifying to know valid field types, colo
           return err({ structured });
         }
         if (shapeFailures.length > 0) {
+          const described = describeShapeErrors(
+            shapeFailures.flatMap((f) => f.fields as RefShapeError[]),
+          );
           const structured = {
-            error: "invalid_reference_field_shape",
-            message:
-              "One or more items submit User/Module fields with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+            ...described,
             activity,
             items: shapeFailures,
-            agent_action:
-              "Re-read the entries or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
           };
           log(
             "submit_activities",
-            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: invalid_reference_field_shape (${shapeFailures.length} items)`,
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: ${described.error} (${shapeFailures.length} items)`,
           );
           return err({ structured });
         }

@@ -3,6 +3,7 @@ import * as api from "./api.js";
 import {
   __resetGuardCaches,
   clearFlagged,
+  describeShapeErrors,
   evaluateActivity,
   getModuleFieldTypes,
   getPriorFlag,
@@ -10,6 +11,7 @@ import {
   resolveInputKeys,
   validateInputShapes,
   validateInputShapesWith,
+  type RefShapeError,
 } from "./activity-guard.js";
 
 const SCHEMA = {
@@ -690,5 +692,146 @@ describe("getPriorFlag (used by submit_activities per-item check)", () => {
     recordFlagged("Leave", 42, "AutoTriage", 0.45);
     clearFlagged("Leave", 42, "AutoTriage");
     expect(getPriorFlag("Leave", 42, "AutoTriage")).toBeUndefined();
+  });
+});
+
+describe("validateInputShapes — Location pre-flight (SS06091)", () => {
+  const SCHEMA_WITH_LOCATION = {
+    activities: [],
+    information: [
+      { name: "Title", type: "Text" },
+      { name: "Location", type: "Location" },
+      { name: "Assignee", type: "User" },
+    ],
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_LOCATION);
+  });
+
+  const loc = (v: unknown) => validateInputShapes("Ticket", { Location: v });
+
+  it("accepts the canonical { lat, lng, placeName } object", async () => {
+    expect(
+      await loc({ lat: 1.5329204, lng: 103.7995367, placeName: "Taman Universiti" }),
+    ).toEqual([]);
+  });
+
+  it("accepts the read-path { value: {...} } envelope so a round-trip passes", async () => {
+    expect(
+      await loc({ value: { lat: 1.53, lng: 103.79, placeName: "Skudai" } }),
+    ).toEqual([]);
+  });
+
+  it("accepts coordinates without a place name", async () => {
+    expect(await loc({ lat: 1.53, lng: 103.79 })).toEqual([]);
+  });
+
+  it("accepts a place name without coordinates", async () => {
+    expect(await loc({ placeName: "Kuala Lumpur" })).toEqual([]);
+  });
+
+  it("accepts negative and zero coordinates", async () => {
+    expect(await loc({ lat: 0, lng: -103.79, placeName: "Null Island-ish" })).toEqual([]);
+  });
+
+  // The exact payload from SS06091: the model mirrored the read envelope but
+  // flattened the object into one "lat,lng" string.
+  it("rejects the reported { value: 'lat,lng' } string payload", async () => {
+    const errs = await loc({ value: "1.5329204,103.7995367" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Location");
+    expect(errs[0].type).toBe("Location");
+    expect(errs[0].message).toMatch(/lat/);
+    expect(errs[0].message).toMatch(/placeName/);
+  });
+
+  it("rejects a bare 'lat,lng' string", async () => {
+    const errs = await loc("1.5329204,103.7995367");
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/must be an object/);
+  });
+
+  it("rejects quoted (string) coordinates", async () => {
+    const errs = await loc({ lat: "1.53", lng: "103.79", placeName: "Skudai" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/must be a number/);
+  });
+
+  it("rejects lat without lng", async () => {
+    const errs = await loc({ lat: 1.53, placeName: "Skudai" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/together/);
+  });
+
+  it("rejects out-of-range coordinates (swapped lat/lng)", async () => {
+    const errs = await loc({ lat: 103.79, lng: 1.53, placeName: "Swapped" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/out of range/);
+  });
+
+  it("rejects an array", async () => {
+    expect((await loc([1.53, 103.79])).length).toBe(1);
+  });
+
+  it("rejects an object carrying no location at all", async () => {
+    const errs = await loc({ placeName: "   " });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/no location/);
+  });
+
+  it("rejects a non-string placeName", async () => {
+    const errs = await loc({ lat: 1.53, lng: 103.79, placeName: 12345 });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/placeName/);
+  });
+
+  it("allows null and an empty envelope to clear the field", async () => {
+    expect(await loc(null)).toEqual([]);
+    expect(await loc({ value: null })).toEqual([]);
+  });
+
+  it("tolerates extra keys alongside a valid location", async () => {
+    expect(
+      await loc({ lat: 1.53, lng: 103.79, placeName: "Skudai", address: "extra" }),
+    ).toEqual([]);
+  });
+
+  it("reports Location and reference failures together", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Location: "1.53,103.79",
+      Assignee: 42,
+    });
+    expect(errs.length).toBe(2);
+    expect(errs.map((e) => e.type).sort()).toEqual(["Location", "User"]);
+  });
+});
+
+describe("describeShapeErrors — envelope wording", () => {
+  const mk = (type: string): RefShapeError => ({
+    field: "F",
+    type,
+    message: "m",
+    received: null,
+  });
+
+  it("names the Location correction when only Location failed", () => {
+    const d = describeShapeErrors([mk("Location")]);
+    expect(d.error).toBe("invalid_location_field_shape");
+    expect(d.message).toMatch(/lat, lng, placeName/);
+  });
+
+  it("keeps the reference wording when only references failed", () => {
+    const d = describeShapeErrors([mk("User")]);
+    expect(d.error).toBe("invalid_reference_field_shape");
+    expect(d.message).toMatch(/User\/Module/);
+  });
+
+  it("covers both when mixed", () => {
+    const d = describeShapeErrors([mk("Location"), mk("Module")]);
+    expect(d.error).toBe("invalid_field_shape");
+    expect(d.message).toMatch(/Location/);
+    expect(d.message).toMatch(/User\/Module/);
   });
 });
