@@ -498,7 +498,7 @@
           "type": "string",
           "description": "Target state name (resolved to internal ID automatically)."
         },
-        "comment": { "type": "string" },
+        "comment": { "type": "string", "description": "Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields." },
         "assignees": {
           "type": "array",
           "items": { "type": "string" },

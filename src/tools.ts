@@ -891,7 +891,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .preprocess(v => (v != null && typeof v === "object" && !Array.isArray(v) ? v : undefined), z.record(z.unknown()).optional())
           .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
-        comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
+        comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
         due: z.string().optional().describe("ISO 8601"),
         ai: submitAiParam,
@@ -1112,7 +1112,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
                 .optional()
                 .describe("Field values keyed by display name. Same shape as submit_activity.input."),
               state: z.string().optional().describe("Per-item target state name"),
-              comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
+              comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
               assignees: z.array(z.string()).optional(),
               due: z.string().optional().describe("ISO 8601"),
               ai: bulkAiShape
