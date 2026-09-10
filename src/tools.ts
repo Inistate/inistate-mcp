@@ -227,6 +227,68 @@ const flowShape = z.preprocess(repairFlow, z.object({
   ai_hint: z.string().optional(),
 }));
 
+// ---------- Listing card (the `card` block on create_module / update_module) ----------
+// The listing card is part of the design, not a follow-up: the same call that writes
+// the fields says how an entry shows in the module's list. Names, never ids — the
+// platform maps them, validates the card and stamps it; a card that does not pass
+// never fails the create (the module gets the platform's default card and the
+// response's `cardStatus` says why). Every shape below is therefore loose on the
+// wire: repairs fold the common near-misses, the platform is the judge.
+const repairCardItem = (raw: unknown): unknown => {
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return null;
+    return s.toLowerCase() === "state" ? { type: "state" } : { type: "field", name: s };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const it: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  if (typeof it.name !== "string" || it.name === "") {
+    const alias = it.field ?? it.activity ?? it.widget ?? it.information ?? it.id ?? it.displayName ?? it.label;
+    if (typeof alias === "string" && alias !== "") it.name = alias;
+  }
+  if (typeof it.type !== "string" || it.type === "") {
+    if (typeof it.activity === "string") it.type = "activity";
+    else if (typeof it.widget === "string") it.type = "widget";
+    else if (typeof it.name === "string" && it.name.toLowerCase() === "state") it.type = "state";
+    else it.type = "field";
+  } else if (it.type === "information") {
+    it.type = "field";
+  }
+  for (const k of ["field", "activity", "widget", "information", "displayName", "label"]) delete it[k];
+  return it;
+};
+
+const cardItemShape = z.preprocess(repairCardItem, z.object({
+  type: z.string().describe("field | state | activity | widget"),
+  name: z.string().optional().describe("Field or activity name; 'defaultCard' for the widget; unused for state"),
+  size: z.string().optional().describe("S | M | L — Text, number and date fields only"),
+  style: z.string().optional().describe("l | n | b — Text, number and date fields only"),
+  ratio: z.string().optional().describe("Image/File fields only: 1:1 | 3:2 | 4:3 | 16:9"),
+  orientation: z.string().optional().describe("Image/File fields only: portrait | landscape"),
+  settings: z.record(z.any()).optional().describe("defaultCard widget switches (booleans): title, state, assignees, comment, createdBy, createdDate, due, documentId"),
+}));
+
+const cardRowShape = z.preprocess(
+  (v) => (Array.isArray(v) ? { items: v } : v),
+  z.object({ items: arrayish(z.array(cardItemShape)).describe("1–3 items") }),
+);
+
+const cardIconShape = z.preprocess(
+  (v) => (typeof v === "string" ? { field: v } : v),
+  z.object({
+    field: z.string().describe("An Image, Images, File, Files or Selection field, by name"),
+    size: z.string().optional().describe("XS | S | M | L (S for a Selection, M for an image)"),
+  }),
+);
+
+const cardShape = z.object({
+  type: z.string().describe("'grid' when the module has an Image/Images field (the image alone in row 1); otherwise 'detail' with an icon"),
+  action: z.string().optional().describe("'view' (the default when activities exist), 'edit', or an activity name"),
+  size: z.string().optional().describe("Grid only: S | M | L"),
+  icon: cardIconShape.optional().describe("Detail only"),
+  rows: arrayish(z.array(cardRowShape)).optional().describe("1–5 rows of 1–3 items: the state row first (or the defaultCard widget alone), the title field L/b, secondary fields S/M, activities in their own row"),
+});
+
 const moduleSectionsShape = {
   icon: z.string().optional().describe("Emoji identifier"),
   description: z.string().optional(),
@@ -234,6 +296,7 @@ const moduleSectionsShape = {
   states: arrayish(z.array(stateShape)).optional().describe("Workflow states. Omit for record list modules."),
   activities: arrayish(z.array(activityShape)).optional().describe("Custom activities. Omit for record list modules."),
   flows: arrayish(z.array(flowShape)).optional().describe("State transition rules: { from, to, activity } by name. Omit for record list modules."),
+  card: cardShape.optional().describe("The listing card designed with the schema — how each entry shows in the module's list (mobile and web). Fields and activities by NAME. See CardDefinition in inistate://schema/configure. A card that does not pass never fails the call: the module gets the platform's default card and the response's cardStatus says why."),
 };
 
 /**
@@ -1709,6 +1772,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       states,
       activities,
       flows,
+      card,
       workspaceId,
     }) => {
       try {
@@ -1720,6 +1784,10 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        // The listing card rides with the schema only where the backend honours it; a
+        // backend without the capability would silently drop it, so say so instead.
+        if (card && caps.card) body.card = card;
+        else if (card) log("create_module", `name=${name} → card ignored: this backend does not accept listing cards`);
         normalizeModuleSections(body);
         if (!Array.isArray(body.information) || (body.information as unknown[]).length === 0) {
           return err({
@@ -1790,6 +1858,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       states,
       activities,
       flows,
+      card,
       workspaceId,
     }) => {
       try {
@@ -1802,6 +1871,10 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        // A `card` replaces the module's card (the platform keeps a person's own card and
+        // says so in cardStatus); omit it to leave the card alone.
+        if (card && caps.card) body.card = card;
+        else if (card) log("update_module", `id=${id} → card ignored: this backend does not accept listing cards`);
         normalizeModuleSections(body);
         const idRepairs = await stripUnknownSectionIds(String(id), body);
         // Partial payloads skip validateDesign below, and flows are loose on

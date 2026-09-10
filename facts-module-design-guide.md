@@ -535,6 +535,63 @@ The prefix generates IDs like PREFIX-YYYY-NNNN (e.g., SVC-2026-0001).
 4.  Every activity that performs a state transition must have a matching
     flow entry.
 
+## 6.4 Listing Card
+
+Every entry shows as a card in the module's list, on the phone and on the
+web. The card is part of the design: send it with the schema as `card`,
+referencing fields and activities by name. The platform maps the names,
+validates the card and stamps it; a card that does not pass never fails
+the create — the module gets the platform's default card and the
+response's `cardStatus` says why. `get_module_schema` returns the card by
+names, so it round-trips through `update_module`.
+
+1.  `type`: `grid` when the module has an Image or Images field (the image
+    alone in row 1, `size` `L` for photos or `M` for collections);
+    otherwise `detail` with an `icon` — an Image, Images, File, Files or
+    Selection field (`size` `S` for a Selection, `M` for an image).
+    `size` is grid-only, `icon` detail-only.
+
+2.  `action`: `view` when the module has activities, else `edit`.
+
+3.  `rows`: 1–5 rows of 1–3 items. Items are
+    `{ "type": "field", "name": "...", "size": "S|M|L", "style": "l|n|b" }`,
+    `{ "type": "state" }`, `{ "type": "activity", "name": "..." }` and
+    `{ "type": "widget", "name": "defaultCard", "settings": { "createdBy": false } }`.
+
+4.  The title field first, `size` `L` `style` `b`, alone or with one short
+    field; secondary fields `S` or `M` with `l` or `n`; long values on
+    their own row.
+
+5.  `size` and `style` only on Text, MultiText, Integer, Number, Currency,
+    Date, DateTime, Phone, Email, Link and Formula fields — never on
+    Selection, Tag, User, Users, Module, Modules, YesNo, Location, Table,
+    Signature, the state row, activities or the widget.
+
+6.  States exist → the state row first, unless the `defaultCard` widget is
+    on the card (alone in its row; use it for tickets, tasks, approvals —
+    anything assigned and discussed). Image, Images, File and Files items
+    also go alone in their row, with `ratio` and `orientation` instead of
+    size/style.
+
+7.  Business activities only on the card, at most 3, in their own row —
+    never Create, Edit or View. Leave MultiText, Table, Signature and Files
+    off the card (a File may be the icon).
+
+```json
+"card": {
+  "type": "detail",
+  "action": "view",
+  "icon": { "field": "Category", "size": "S" },
+  "rows": [
+    { "items": [ { "type": "state" } ] },
+    { "items": [ { "type": "field", "name": "Merchant", "size": "L", "style": "b" },
+                 { "type": "field", "name": "Amount", "size": "S", "style": "n" } ] },
+    { "items": [ { "type": "field", "name": "Date", "size": "S", "style": "l" } ] },
+    { "items": [ { "type": "activity", "name": "Approve" }, { "type": "activity", "name": "Reject" } ] }
+  ]
+}
+```
+
 # 7. Complete Example: Aircon Service Issues
 
 Below is a complete FACTS module designed for an aircon service company
@@ -663,6 +720,10 @@ Before delivering the final output, verify each item:
 -   Activity fields use required/readOnly constraints appropriately
 
 -   No orphan states (every state is reachable via at least one flow)
+
+-   A `card` block: names only, 1–5 rows, the title field L/b, the state
+    row (or the defaultCard widget) first, size/style only on text, number
+    and date fields (see 6.4)
 
 -   Listings include All Items, My Items, and per-actionable-state views
 

@@ -44,6 +44,12 @@ export interface Capabilities {
   scaffold: boolean;
   /** switch_mode targets this backend allows (cloud: all three; local: runtime + configure). */
   modes: Array<"runtime" | "configure" | "frontend">;
+  /**
+   * The listing card designed with the schema (`card` on create_module /
+   * update_module) is mapped, validated and stored by this backend. Absent or
+   * false: the tools drop the block and log it rather than let it vanish silently.
+   */
+  card?: boolean;
 }
 
 export interface ListEntriesParams {
@@ -181,6 +187,7 @@ export class CloudBackend implements Backend {
       governance: true,
       scaffold: false,
       modes: ["runtime", "configure", "frontend"],
+      card: true,
     };
   }
 

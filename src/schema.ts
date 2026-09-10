@@ -59,6 +59,10 @@ const CONFIGURE_DEFINITIONS = [
   "ActivityDefinition",
   "ActivityFieldRef",
   "FlowDefinition",
+  "CardItemDefinition",
+  "CardRowDefinition",
+  "CardIconDefinition",
+  "CardDefinition",
   "ModuleSchema",
 ];
 
@@ -573,6 +577,9 @@ export function validateDesign(
   // mirroring what create_module/update_module send to the platform.
   warnings.push(...repairDesignInput(schema));
   warnings.push(...resolveDesignRefs(schema));
+  // The listing card: warnings, never errors — a card that does not pass on the
+  // platform gives way to its default card, so the module is never held back by it.
+  warnings.push(...validateCard(schema));
 
   const name: string = schema.name || "";
   const information: any[] = schema.information || [];
@@ -1076,7 +1083,188 @@ const DESIGN_CONSTRAINTS = {
   reference_fields:
     "User/Users/Module/Modules fields require 'connection': the name of a module that exists in this workspace. Not supported inside Table sub-fields.",
   actors: VALID_ACTOR_TYPES,
+  listing_card:
+    "The template's `card` is how each entry shows in the module's list; keep it in step with the fields you add (names, never ids). 1–5 rows of 1–3 items; the state row first (or the defaultCard widget alone, for tickets and tasks); the title field L/b; size/style only on Text, number and date fields; Image/File items alone in their row; at most 3 business activities in their own row. A card that does not pass never fails create_module — the module gets the platform's default card and cardStatus says why.",
 };
+
+// ---------- Listing card: scaffold + cheap checks ----------
+//
+// The listing card is part of the design, not a follow-up: the platform accepts a
+// name-referenced `card` with the schema (create_module / update_module). A template
+// card that references only the template's own fields always passes the platform's
+// guard, so an agent that sends the scaffold unchanged still gets a designed list;
+// the agent refines it once the fields are final.
+
+const CARD_STYLEABLE = new Set([
+  "text", "multitext", "integer", "number", "currency", "date", "datetime", "phone", "email", "link", "formula",
+]);
+const CARD_SHORT = new Set([
+  "text", "integer", "number", "currency", "date", "datetime", "selection", "tag", "email", "phone", "yesno",
+]);
+const CARD_MEDIA = new Set(["image", "images", "file", "files"]);
+const CARD_ICON = new Set(["image", "images", "file", "files", "selection"]);
+const CARD_STANDARD_ACTIONS = new Set([
+  "create", "edit", "update", "view", "quick view", "delete", "change state", "duplicate", "comment",
+  "history", "assign", "import", "print",
+]);
+
+function cardTypeOf(field: { type?: string } | undefined): string {
+  return baseTypeOf(String(field?.type || "Text")) || "text";
+}
+
+export function scaffoldCard(
+  pattern: PatternName,
+  information: Array<{ name: string; type?: string }>,
+  states: unknown[],
+  activities: unknown[],
+): Record<string, any> | undefined {
+  const fields = (information || []).filter((f) => f && typeof f.name === "string" && f.name);
+  if (fields.length === 0) return undefined;
+
+  const image = fields.find((f) => cardTypeOf(f) === "image" || cardTypeOf(f) === "images");
+  const title =
+    fields.find((f) => cardTypeOf(f) === "text")
+    ?? fields.find((f) => CARD_STYLEABLE.has(cardTypeOf(f)))
+    ?? fields[0];
+  const item = (f: { name: string; type?: string }, size: string, style: string) =>
+    CARD_STYLEABLE.has(cardTypeOf(f)) ? { type: "field", name: f.name, size, style } : { type: "field", name: f.name };
+
+  const rows: Array<{ items: Record<string, any>[] }> = [];
+  if (image) rows.push({ items: [{ type: "field", name: image.name, ratio: "16:9", orientation: "landscape" }] });
+  if (pattern === "ticket_management" && states.length > 0) {
+    rows.push({ items: [{ type: "widget", name: "defaultCard", settings: { createdBy: false } }] });
+  } else {
+    if (states.length > 0) rows.push({ items: [{ type: "state" }] });
+    rows.push({ items: [item(title, "L", "b")] });
+  }
+  const secondary = fields
+    .filter((f) => f !== title && f !== image && CARD_SHORT.has(cardTypeOf(f)))
+    .slice(0, 2);
+  if (secondary.length > 0 && rows.length < 5) rows.push({ items: secondary.map((f) => item(f, "S", "n")) });
+
+  const card: Record<string, any> = {
+    type: image ? "grid" : "detail",
+    action: activities.length > 0 ? "view" : "edit",
+    rows,
+  };
+  if (image) {
+    card.size = "L";
+  } else {
+    const icon = fields.find((f) => f !== title && CARD_ICON.has(cardTypeOf(f)));
+    if (icon) card.icon = { field: icon.name, size: cardTypeOf(icon) === "selection" ? "S" : "M" };
+  }
+  return card;
+}
+
+/**
+ * The cheap listing-card checks a design-time validator can make against the
+ * schema's own names — the same rules the platform's guard enforces at create.
+ * Always warnings (see validateDesign). Null or absent card → nothing to say.
+ */
+export function validateCard(schema: Record<string, any>): string[] {
+  const issues: string[] = [];
+  const card = schema?.card;
+  if (card == null) return issues;
+  if (typeof card !== "object" || Array.isArray(card)) return ["card must be an object { type, action, icon, rows }."];
+
+  const information: any[] = Array.isArray(schema.information) ? schema.information : [];
+  const fieldTypes = new Map<string, string>();
+  for (const f of information) {
+    if (f && typeof f.name === "string" && f.name && !fieldTypes.has(f.name.toLowerCase())) {
+      fieldTypes.set(f.name.toLowerCase(), cardTypeOf(f));
+    }
+  }
+  const activityNames = new Set(
+    ((Array.isArray(schema.activities) ? schema.activities : []) as any[])
+      .map((a) => String(a?.name ?? "").toLowerCase())
+      .filter(Boolean),
+  );
+  const fieldList = fieldTypes.size > 0 ? information.map((f) => f?.name).filter(Boolean).join(", ") : "(none)";
+
+  const type = card.type;
+  if (type !== "detail" && type !== "grid") issues.push(`card 'type' must be 'detail' or 'grid'. Got: '${type}'.`);
+  if (type === "grid" && card.icon != null) issues.push("card: a grid card has no 'icon' — 'icon' is for 'detail'.");
+  if (type === "detail" && card.size != null) issues.push("card: a detail card has no 'size' — 'size' is for 'grid'.");
+
+  const action = card.action;
+  if (action != null && action !== "view" && action !== "edit" && !activityNames.has(String(action).toLowerCase())) {
+    issues.push(`card 'action' must be 'view', 'edit' or an activity name. Got: '${action}'.`);
+  }
+
+  if (card.icon != null) {
+    const iconField = typeof card.icon === "string" ? card.icon : card.icon?.field;
+    if (!iconField) issues.push("card 'icon' needs a 'field' (an Image, Images, File, Files or Selection field).");
+    else {
+      const iconType = fieldTypes.get(String(iconField).toLowerCase());
+      if (!iconType) issues.push(`card 'icon' names field '${iconField}', which is not defined. Fields: ${fieldList}.`);
+      else if (!CARD_ICON.has(iconType)) issues.push(`card 'icon' field '${iconField}' is a ${iconType} field; only Image, Images, File, Files or Selection fields can be the icon.`);
+    }
+  }
+
+  const rows = card.rows;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    issues.push("card 'rows' must contain 1 to 5 rows.");
+    return issues;
+  }
+  if (rows.length > 5) issues.push(`card has ${rows.length} rows; the maximum is 5.`);
+
+  rows.forEach((row: any, r: number) => {
+    const where = `card row ${r + 1}`;
+    const items: any[] = Array.isArray(row) ? row : Array.isArray(row?.items) ? row.items : [];
+    if (items.length === 0) {
+      issues.push(`${where} has no items.`);
+      return;
+    }
+    if (items.length > 3) issues.push(`${where} has ${items.length} items; the maximum is 3.`);
+    let hasActivity = false;
+    let hasOther = false;
+    items.forEach((raw: any, i: number) => {
+      const itemWhere = `${where} item ${i + 1}`;
+      const it = typeof raw === "string" ? { type: raw.toLowerCase() === "state" ? "state" : "field", name: raw } : raw;
+      if (!it || typeof it !== "object") {
+        issues.push(`${itemWhere} is not an object.`);
+        return;
+      }
+      const itemType = it.type === "information" ? "field" : it.type;
+      const name = it.name ?? it.field ?? it.activity;
+      const styled = it.size != null || it.style != null;
+      switch (itemType) {
+        case "state":
+          hasOther = true;
+          if (styled) issues.push(`${itemWhere}: the state row takes no 'size'/'style'.`);
+          break;
+        case "field": {
+          hasOther = true;
+          if (!name) issues.push(`${itemWhere}: a field item needs a 'name'.`);
+          else {
+            const fieldType = fieldTypes.get(String(name).toLowerCase());
+            if (!fieldType) issues.push(`${itemWhere}: field '${name}' is not defined. Fields: ${fieldList}.`);
+            else {
+              if (styled && !CARD_STYLEABLE.has(fieldType)) issues.push(`${itemWhere}: '${name}' is a ${fieldType} field and takes no 'size'/'style'.`);
+              if (CARD_MEDIA.has(fieldType) && items.length > 1) issues.push(`${itemWhere}: image/file field '${name}' must be the only item in its row.`);
+            }
+          }
+          break;
+        }
+        case "activity":
+          hasActivity = true;
+          if (!name) issues.push(`${itemWhere}: an activity item needs a 'name'.`);
+          else if (CARD_STANDARD_ACTIONS.has(String(name).toLowerCase())) issues.push(`${itemWhere}: '${name}' is a standard action, not a card button.`);
+          else if (!activityNames.has(String(name).toLowerCase())) issues.push(`${itemWhere}: activity '${name}' is not defined.`);
+          if (styled) issues.push(`${itemWhere}: activity items take no 'size'/'style'.`);
+          break;
+        case "widget":
+          hasOther = true;
+          if (items.length > 1) issues.push(`${itemWhere}: the defaultCard widget must be the only item in its row.`);
+          break;
+        default:
+          issues.push(`${itemWhere}: 'type' must be field, state, activity or widget. Got: '${it.type}'.`);
+      }
+    });
+    if (hasActivity && hasOther) issues.push(`${where} mixes activities with fields; activities go in their own row.`);
+  });
+  return issues;
+}
 
 export function designWorkflow(
   description: string,
@@ -1107,6 +1295,12 @@ export function designWorkflow(
           parsedInformation.length > 0
             ? parsedInformation
             : [{ name: "Name", type: "Text", ai_hint: "" }],
+        card: scaffoldCard(
+          "record_list",
+          parsedInformation.length > 0 ? parsedInformation : [{ name: "Name", type: "Text" }],
+          [],
+          [],
+        ),
       },
       suggestions: {
         detected_pattern: "record_list",
@@ -1209,19 +1403,23 @@ export function designWorkflow(
       }))
     : baseStates[pattern];
 
+  const templateInformation =
+    parsedInformation.length > 0
+      ? parsedInformation
+      : [{ name: "Title", type: "Text", ai_hint: "" }];
+  const templateActivities = useParsed ? [] : baseActivities[pattern];
+
   return {
     template: {
       name: "",
       icon: "",
       description: "",
       published: true,
-      information:
-        parsedInformation.length > 0
-          ? parsedInformation
-          : [{ name: "Title", type: "Text", ai_hint: "" }],
+      information: templateInformation,
       states,
-      activities: useParsed ? [] : baseActivities[pattern],
+      activities: templateActivities,
       flows: useParsed ? [] : baseFlows[pattern],
+      card: scaffoldCard(pattern, templateInformation, states, templateActivities),
     },
     suggestions: {
       detected_pattern: pattern,

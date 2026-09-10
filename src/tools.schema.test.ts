@@ -195,14 +195,14 @@ describe("configure tool schemas", () => {
 
   it("create_module", () => {
     expect(shape(tools, "create_module")).toEqual({
-      props: ["activities", "description", "flows", "icon", "information", "name", "states", "workspaceId"],
+      props: ["activities", "card", "description", "flows", "icon", "information", "name", "states", "workspaceId"],
       required: ["name"],
     });
   });
 
   it("update_module", () => {
     expect(shape(tools, "update_module")).toEqual({
-      props: ["activities", "description", "flows", "icon", "id", "information", "name", "states", "workspaceId"],
+      props: ["activities", "card", "description", "flows", "icon", "id", "information", "name", "states", "workspaceId"],
       required: ["id"],
     });
   });

@@ -5,7 +5,9 @@ import {
   isValidActor,
   suggestColorForState,
   validateDesign,
+  validateCard,
   designWorkflow,
+  scaffoldCard,
   normalizeFieldType,
   normalizeStateColor,
   normalizeIndustry,
@@ -327,6 +329,62 @@ describe("validateDesign", () => {
     };
     const result = validateDesign(schema);
     expect(result.errors.some((e) => e.includes("confidence_threshold"))).toBe(true);
+  });
+
+  it("warns about listing-card slips and never fails the design for them", () => {
+    const schema = {
+      name: "Expense Claims",
+      information: [
+        { name: "Category", type: "Selection", options: ["Meals", "Transport"] },
+        { name: "Merchant", type: "Text" },
+        { name: "Amount", type: "Currency" },
+        { name: "Receipt", type: "Image" },
+      ],
+      states: [
+        { name: "Submitted", color: "#5A6070", initial: true },
+        { name: "Approved", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Approve", actor: "human" }],
+      flows: [{ from: "Submitted", to: "Approved", activity: "Approve" }],
+      card: {
+        type: "detail",
+        action: "Archive",
+        rows: [
+          { items: [{ type: "field", name: "Category", size: "S", style: "n" }, { type: "field", name: "Receipt" }] },
+          { items: [{ type: "field", name: "Merchants" }, { type: "activity", name: "Approve" }] },
+          { items: [{ type: "activity", name: "Create" }] },
+          { items: [{ type: "widget", name: "defaultCard" }, { type: "state" }] },
+        ],
+      },
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    const text = result.warnings.join("\n");
+    expect(text).toContain("'action' must be 'view', 'edit' or an activity name");
+    expect(text).toContain("'Category' is a selection field and takes no 'size'/'style'");
+    expect(text).toContain("image/file field 'Receipt' must be the only item");
+    expect(text).toContain("field 'Merchants' is not defined");
+    expect(text).toContain("mixes activities with fields");
+    expect(text).toContain("'Create' is a standard action");
+    expect(text).toContain("widget must be the only item");
+
+    // A well-formed card, including the string and alias shorthands the tool repairs, has nothing to say.
+    const clean = {
+      ...schema,
+      card: {
+        type: "detail",
+        action: "view",
+        icon: { field: "Category", size: "S" },
+        rows: [
+          { items: [{ type: "state" }] },
+          { items: [{ type: "field", name: "Merchant", size: "L", style: "b" }, { type: "field", name: "Amount", size: "S", style: "n" }] },
+          { items: [{ type: "activity", name: "Approve" }] },
+        ],
+      },
+    };
+    expect(validateCard(clean)).toEqual([]);
+    expect(validateCard({ ...schema, card: undefined })).toEqual([]);
   });
 
   it("warns about unreachable states", () => {
@@ -864,6 +922,49 @@ describe("designWorkflow", () => {
         expect(f.type).toBeTruthy();
       }
     }
+  });
+
+  it("scaffolds a listing card that references only the template's own fields", () => {
+    for (const result of [
+      designWorkflow("approval workflow"),
+      designWorkflow("support ticket system for customer issues"),
+      designWorkflow("a directory of vendors"),
+      designWorkflow("Track client projects. Fields: project name (text), client (text), budget (currency), photo (image)"),
+    ]) {
+      const card = result.template.card;
+      expect(card).toBeDefined();
+      expect(["detail", "grid"]).toContain(card.type);
+      expect(card.rows.length).toBeGreaterThan(0);
+      expect(card.rows.length).toBeLessThanOrEqual(5);
+      // The template's own validator finds nothing to say about the scaffold.
+      expect(validateCard(result.template)).toEqual([]);
+      const fieldNames = new Set(result.template.information.map((f: any) => f.name));
+      for (const row of card.rows) {
+        expect(row.items.length).toBeGreaterThan(0);
+        expect(row.items.length).toBeLessThanOrEqual(3);
+        for (const item of row.items) {
+          if (item.type === "field") expect(fieldNames.has(item.name)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("leads a ticket card with the defaultCard widget and a photo module with the image", () => {
+    const tickets = designWorkflow("support ticket system for customer issues").template.card;
+    expect(tickets.rows[0].items[0]).toEqual({ type: "widget", name: "defaultCard", settings: { createdBy: false } });
+    expect(tickets.action).toBe("view");
+
+    const photos = designWorkflow("Property listings. Fields: address (text), price (currency), photo (image)").template.card;
+    expect(photos.type).toBe("grid");
+    expect(photos.size).toBe("L");
+    expect(photos.icon).toBeUndefined();
+    expect(photos.rows[0].items[0]).toMatchObject({ type: "field", name: "Photo", ratio: "16:9" });
+
+    const vendors = designWorkflow("a directory of vendors").template.card;
+    expect(vendors.type).toBe("detail");
+    expect(vendors.action).toBe("edit");
+    expect(vendors.rows[0].items[0]).toMatchObject({ type: "field", name: "Name", size: "L", style: "b" });
+    expect(scaffoldCard("record_list", [], [], [])).toBeUndefined();
   });
 
   it("uses states enumerated in the description over the pattern template", () => {
