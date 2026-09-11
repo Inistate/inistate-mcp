@@ -60,6 +60,25 @@ function ok(data: unknown) {
   };
 }
 
+function mimeTypeFromFilename(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "pdf":
+      return "application/pdf";
+    default:
+      return "application/octet-stream";
+  }
+}
+
 function err(e: unknown) {
   if (e && typeof e === "object" && "structured" in e) {
     return {
@@ -1502,7 +1521,16 @@ Load resource inistate://schema before modifying to know valid field types, colo
         applyWorkspace(workspaceId);
         const result = await backend.downloadFile({ moduleName, guid, fileName });
         if (result.redirectUrl) {
-          return ok({ downloadUrl: result.redirectUrl, fileName });
+          return {
+            content: [
+              {
+                type: "resource_link" as const,
+                uri: result.redirectUrl,
+                name: fileName,
+                mimeType: mimeTypeFromFilename(fileName),
+              },
+            ],
+          };
         }
         return ok(result.body);
       } catch (e) {
