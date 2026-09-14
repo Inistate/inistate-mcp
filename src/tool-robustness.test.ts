@@ -107,6 +107,8 @@ class FakeBackend implements Backend {
         { name: "Title", type: "Text" },
         { name: "Due Date", type: "Date" },
         { name: "Owner", type: "User", module: "Users" },
+        { name: "Billable", type: "YesNo" },
+        { name: "Notes", type: "MultilineText" },
       ],
       states: ["Draft", "Active", "Closed"],
     };
@@ -856,6 +858,63 @@ describe("update_module unknown-id stripping", () => {
     expect(res.hint).toBeUndefined();
     const info = lastUpdatePayload!.information as Array<Record<string, unknown>>;
     expect(info[2].id).toBe("FLD_OWNER");
+  });
+});
+
+describe("value-type pre-flight (SS06108, SS06110)", () => {
+  const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
+
+  it("submit_activity blocks a YesNo sent as \"yes\" before it reaches the platform", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x", Billable: "yes" }, ai },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("invalid_field_value_type");
+    expect(res.fields[0].field).toBe("Billable");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity blocks a MultilineText sent as an array", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x", Notes: ["a", "b"] }, ai },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("invalid_field_value_type");
+    expect(res.agent_action).toContain("\\n");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity passes a boolean and a multi-line string through unchanged", async () => {
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x", Billable: true, Notes: "a\nb" }, ai },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.input).toEqual({ Title: "x", Billable: true, Notes: "a\nb" });
+  });
+
+  it("submit_activities blocks the batch and names the failing item", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        ai,
+        items: [{ input: { Title: "a", Notes: "fine" } }, { input: { Title: "b", Notes: ["x", "y"] } }],
+      },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("invalid_field_value_type");
+    expect(res.items.map((i: { idx: number }) => i.idx)).toEqual([1]);
+    expect(lastBulkPayload).toBeNull();
   });
 });
 

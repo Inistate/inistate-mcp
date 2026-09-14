@@ -637,6 +637,48 @@ function checkLocationValue(
   return null;
 }
 
+// ---------- Value-type pre-flight (YesNo / text fields) ----------
+//
+// The platform stores whatever it is handed here too: a YesNo given the string
+// "yes" or a MultilineText given an array is persisted verbatim (SS06110,
+// SS06108). Nothing surfaces it at write time — the web view prints the value —
+// but YesNo filters stop matching and the mobile edit form grey-screens on the
+// entry. These values round-trip bare (no read envelope), and null or "" clears
+// (the platform skips both), so only a present value of the wrong JSON type is
+// rejected.
+
+const YESNO_FIELD_TYPE = "YesNo";
+const TEXT_FIELD_TYPES = new Set(["Text", "MultilineText", "Email"]);
+
+function checkValueType(
+  field: string,
+  type: string,
+  value: unknown,
+): RefShapeError | null {
+  if (value === null || value === undefined || value === "") return null;
+
+  if (type === YESNO_FIELD_TYPE) {
+    if (typeof value === "boolean") return null;
+    return {
+      field,
+      type,
+      received: value,
+      message: `YesNo field '${field}' must be a boolean, true or false — got ${describeReceived(value)}.`,
+    };
+  }
+
+  if (typeof value === "string") return null;
+  const joinHint = Array.isArray(value)
+    ? " To keep several lines, join them into one string with \\n between them."
+    : "";
+  return {
+    field,
+    type,
+    received: value,
+    message: `${type} field '${field}' must be a string — got ${describeReceived(value)}.${joinHint}`,
+  };
+}
+
 function checkRefValue(
   field: string,
   type: string,
@@ -723,7 +765,9 @@ export function validateInputShapesWith(
         ? checkLocationValue(key, val)
         : REF_FIELD_TYPES.has(type)
           ? checkRefValue(key, type, val)
-          : null;
+          : type === YESNO_FIELD_TYPE || TEXT_FIELD_TYPES.has(type)
+            ? checkValueType(key, type, val)
+            : null;
     if (e) errors.push(e);
   }
   return errors;
@@ -779,7 +823,8 @@ export function resolveInputKeys(
 
 /**
  * Validate that User/Module/Users/Modules and Location fields in `input`
- * carry the correct shape. Convenience wrapper around getModuleFieldTypes +
+ * carry the correct shape, and YesNo/text fields a value of the right type.
+ * Convenience wrapper around getModuleFieldTypes +
  * validateInputShapesWith — use this for one-shot calls (submit_activity).
  * Bulk callers should fetch the map once and use validateInputShapesWith
  * directly.
@@ -805,9 +850,30 @@ export function describeShapeErrors(errors: RefShapeError[]): {
   message: string;
   agent_action: string;
 } {
+  const isValueType = (e: RefShapeError) =>
+    e.type === YESNO_FIELD_TYPE || TEXT_FIELD_TYPES.has(e.type);
+  const hasValueType = errors.some(isValueType);
   const hasLocation = errors.some((e) => e.type === LOCATION_FIELD_TYPE);
-  const hasRef = errors.some((e) => e.type !== LOCATION_FIELD_TYPE);
+  const hasRef = errors.some((e) => e.type !== LOCATION_FIELD_TYPE && !isValueType(e));
 
+  if (hasValueType && !hasLocation && !hasRef) {
+    return {
+      error: "invalid_field_value_type",
+      message:
+        "One or more fields were submitted with a value of the wrong type. A YesNo field takes a boolean (true or false), never a string such as \"yes\"; Text, MultilineText and Email fields take a single string, never an array or object.",
+      agent_action:
+        "Send each YesNo as true or false and each text field as one string (join several lines with \\n), then resubmit.",
+    };
+  }
+  if (hasValueType) {
+    return {
+      error: "invalid_field_shape",
+      message:
+        "One or more fields were submitted with the wrong shape or type. User/Module fields require { id, value } objects (plural variants take arrays of them); Location fields require { lat, lng, placeName }; YesNo fields take a boolean; Text, MultilineText and Email fields take a single string.",
+      agent_action:
+        "Re-read the entry or call get_form and copy reference and Location values back unchanged, send YesNo as true/false and text as one string, then resubmit.",
+    };
+  }
   if (hasLocation && !hasRef) {
     return {
       error: "invalid_location_field_shape",

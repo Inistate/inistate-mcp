@@ -808,12 +808,117 @@ describe("validateInputShapes — Location pre-flight (SS06091)", () => {
   });
 });
 
+describe("validateInputShapes — YesNo / text value types (SS06108, SS06110)", () => {
+  const SCHEMA_WITH_SCALARS = {
+    activities: [],
+    information: [
+      { name: "Name", type: "Text" },
+      { name: "Attended", type: "YesNo" },
+      { name: "Inistate Application", type: "MultilineText" },
+      { name: "Contact", type: "Email" },
+      { name: "Headcount", type: "Integer" },
+      { name: "Assignee", type: "User" },
+    ],
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_SCALARS);
+  });
+
+  const check = (input: Record<string, unknown>) => validateInputShapes("Growth", input);
+
+  // SS06110: MCP00007 on App02 was created with Attended: "yes".
+  it("rejects the reported YesNo string \"yes\"", async () => {
+    const errs = await check({ Name: "Charlie", Attended: "yes" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Attended");
+    expect(errs[0].type).toBe("YesNo");
+    expect(errs[0].received).toBe("yes");
+    expect(errs[0].message).toMatch(/must be a boolean/);
+  });
+
+  it("rejects other stand-ins for a boolean", async () => {
+    for (const v of ["true", "no", 1, 0, ["yes"], { value: true }]) {
+      const errs = await check({ Attended: v });
+      expect(errs.length, `Attended: ${JSON.stringify(v)}`).toBe(1);
+    }
+  });
+
+  it("accepts true and false", async () => {
+    expect(await check({ Attended: true })).toEqual([]);
+    expect(await check({ Attended: false })).toEqual([]);
+  });
+
+  // SS06108: GTM00002 on App02 was created with both MultilineText fields as arrays.
+  it("rejects the reported MultilineText array and says how to keep the lines", async () => {
+    const errs = await check({
+      "Inistate Application": [
+        "Create concise onboarding and re-engagement emails ...",
+        "Use behavior-triggered nudges rather than generic newsletters where possible.",
+      ],
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Inistate Application");
+    expect(errs[0].type).toBe("MultilineText");
+    expect(errs[0].message).toMatch(/must be a string — got an array/);
+    expect(errs[0].message).toContain("\\n");
+  });
+
+  it("holds Text and Email to the same rule", async () => {
+    expect((await check({ Name: { first: "Charlie" } })).length).toBe(1);
+    expect((await check({ Name: 42 })).length).toBe(1);
+    expect((await check({ Contact: ["a@b.com"] })).length).toBe(1);
+    expect((await check({ Contact: true })).length).toBe(1);
+  });
+
+  it("accepts strings, including multi-line text", async () => {
+    expect(
+      await check({
+        Name: "Charlie",
+        "Inistate Application": "line one\nline two",
+        Contact: "charlie@example.com",
+      }),
+    ).toEqual([]);
+  });
+
+  it("lets null and an empty string through — the platform skips both", async () => {
+    expect(await check({ Attended: null, Name: null, Contact: "" })).toEqual([]);
+    expect(await check({ Attended: "" })).toEqual([]);
+  });
+
+  it("leaves field types outside this check alone", async () => {
+    expect(await check({ Headcount: "12" })).toEqual([]);
+  });
+
+  it("reports value-type and reference failures together", async () => {
+    const errs = await check({ Attended: "yes", Assignee: 42 });
+    expect(errs.map((e) => e.type).sort()).toEqual(["User", "YesNo"]);
+  });
+});
+
 describe("describeShapeErrors — envelope wording", () => {
   const mk = (type: string): RefShapeError => ({
     field: "F",
     type,
     message: "m",
     received: null,
+  });
+
+  it("names the value-type correction when only YesNo/text values failed", () => {
+    const d = describeShapeErrors([mk("YesNo"), mk("MultilineText")]);
+    expect(d.error).toBe("invalid_field_value_type");
+    expect(d.message).toMatch(/boolean/);
+    expect(d.message).toMatch(/single string/);
+    expect(d.message).not.toMatch(/User\/Module/);
+  });
+
+  it("covers value types alongside shape failures", () => {
+    const d = describeShapeErrors([mk("Text"), mk("Location"), mk("User")]);
+    expect(d.error).toBe("invalid_field_shape");
+    expect(d.message).toMatch(/YesNo/);
+    expect(d.message).toMatch(/Location/);
+    expect(d.message).toMatch(/User\/Module/);
   });
 
   it("names the Location correction when only Location failed", () => {
