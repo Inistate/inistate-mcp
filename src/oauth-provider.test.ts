@@ -253,7 +253,8 @@ describe("exchangeAuthorizationCode → connection token", () => {
 
   it("falls back to the JWT session when Connections is disabled (404)", async () => {
     mockFetch({
-      "GET /api/connections": () => ({ status: 404, body: { error: "not_enabled" } }),
+      "GET /api/mcp/workspace": () => ({ body: [] }),
+      "POST /api/connections": () => ({ status: 404, body: { error: "not_enabled" } }),
     });
 
     const provider = new InistateOAuthProvider(BASE, APP, MCP);
@@ -266,19 +267,53 @@ describe("exchangeAuthorizationCode → connection token", () => {
     expect(tokens.expires_in).toBeGreaterThan(3500);
   });
 
-  it("falls back to the JWT session when the mint request fails transiently", async () => {
+  // SS06119: a mint that merely failed used to hand the connector the login JWT - the
+  // one credential the backend seat gate never denies (ruled 2026-09-05 for sessions
+  // that already existed). Only an explicit "Connections is off" (404) may still do that.
+  it.each([
+    ["a 5xx from the mint", { status: 500, body: { error: "server_error" } }],
+    ["a 401 from the mint", { status: 401, body: { message: "Authorization has been denied for this request." } }],
+    ["a 2xx without a usable token", { status: 200, body: {} }],
+  ])("refuses the exchange on %s instead of issuing an ungated JWT session", async (_label, answer) => {
     mockFetch({
-      "GET /api/connections": () => ({ body: [] }),
-      "POST /api/connections": () => ({ status: 500, body: { error: "server_error" } }),
+      "GET /api/mcp/workspace": () => ({ body: [] }),
+      "POST /api/connections": () => answer,
+      // Whatever the backend says about the JWT itself, the session must not have
+      // been registered in this process.
+      "GET /v1/whoami": () => ({ status: 401, body: {} }),
     });
 
     const provider = new InistateOAuthProvider(BASE, APP, MCP);
     const userJwt = jwt("user-1");
     const code = await obtainCode(provider, { jwt: userJwt, refreshToken: "rt-1" });
-    const tokens = await provider.exchangeAuthorizationCode(CLIENT, code);
 
-    expect(tokens.access_token).toBe(userJwt);
-    expect(tokens.refresh_token).toBe("rt-1");
+    const exchange = provider.exchangeAuthorizationCode(CLIENT, code);
+    await expect(exchange).rejects.toThrow(/try connecting again/);
+    await expect(exchange).rejects.toHaveProperty("errorCode", "temporarily_unavailable");
+    await expect(provider.verifyAccessToken(userJwt)).rejects.toThrow(/invalid or expired/);
+  });
+
+  it("refuses the exchange when the mint is unreachable instead of issuing an ungated JWT session", async () => {
+    const { fn } = mockFetch({});
+    fn.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if ((init?.method ?? "GET") === "POST" && path === "/api/connections") {
+        throw new TypeError("fetch failed");
+      }
+      return new Response(JSON.stringify(path === "/v1/whoami" ? {} : []), {
+        status: path === "/v1/whoami" ? 401 : 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const provider = new InistateOAuthProvider(BASE, APP, MCP);
+    const userJwt = jwt("user-1");
+    const code = await obtainCode(provider, { jwt: userJwt, refreshToken: "rt-1" });
+
+    const exchange = provider.exchangeAuthorizationCode(CLIENT, code);
+    await expect(exchange).rejects.toThrow(/try connecting again/);
+    await expect(exchange).rejects.toHaveProperty("errorCode", "temporarily_unavailable");
+    await expect(provider.verifyAccessToken(userJwt)).rejects.toThrow(/invalid or expired/);
   });
 
   it("denies the exchange when the pricing gate rejects the user (no JWT fallback)", async () => {

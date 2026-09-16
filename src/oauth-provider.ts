@@ -9,7 +9,7 @@ import type {
   OAuthTokenRevocationRequest,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidGrantError, TemporarilyUnavailableError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
 const CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const PAT_VERIFY_TTL_MS = 5 * 60 * 1000; // whoami re-check cadence for connection tokens
@@ -50,6 +50,26 @@ export class ConnectionMintDeniedError extends Error {
     super(message);
     this.name = "ConnectionMintDeniedError";
     this.code = code;
+  }
+}
+
+/**
+ * The mint could not be completed and the backend did NOT say the feature is off:
+ * a 5xx, an unexpected status, an unusable body, or no answer at all.
+ *
+ * SS06119: this used to fall back to a login-JWT session. That is the one credential
+ * the seat gate cannot price - McpSeatAuthorizeAttribute observes and never denies,
+ * ruled 2026-09-05 so that sessions which already existed keep working - so any hiccup
+ * on the mint handed a brand-new connector exactly the ungated session the gate exists
+ * to refuse. The exchange now fails and the connector retries. The fallback survives
+ * only for the explicit "Connections is off" answer (404), which is what it was for.
+ */
+export class ConnectionMintUnavailableError extends Error {
+  readonly status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "ConnectionMintUnavailableError";
+    this.status = status;
   }
 }
 
@@ -365,6 +385,14 @@ export class InistateOAuthProvider implements OAuthServerProvider {
         // backend's message — never downgrade to a JWT session.
         throw new InvalidGrantError(error.message);
       }
+      if (error instanceof ConnectionMintUnavailableError) {
+        // Availability failure while Connections is on (SS06119): still never a
+        // JWT session - that would bypass the seat gate. The client shows the
+        // error and the user connects again once the backend answers.
+        throw new TemporarilyUnavailableError(
+          "Inistate could not create the connection right now. Please try connecting again.",
+        );
+      }
       throw error;
     }
     if (minted) {
@@ -425,8 +453,10 @@ export class InistateOAuthProvider implements OAuthServerProvider {
    * all-workspace reach (the pre-fix default) rather than a connector that
    * can see nothing until the user widens it on the Connections page.
    *
-   * Returns null when the Connections feature is unavailable (flag off, older
-   * backend, network failure) — the caller falls back to the JWT flow.
+   * Returns null only when the backend says Connections is off (404: flag off or
+   * a backend that predates the feature) — the caller falls back to the JWT flow.
+   * Every other failure throws ConnectionMintUnavailableError: a JWT session is
+   * never the answer to a mint that merely failed (SS06119).
    */
   private async mintConnectionToken(
     jwt: string,
@@ -458,40 +488,61 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       expiresAt: null as string | null,
     };
 
+    let createRes: Awaited<ReturnType<typeof fetch>>;
     try {
-      const createRes = await fetch(`${this.baseUrl}/api/connections`, {
+      createRes = await fetch(`${this.baseUrl}/api/connections`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
       });
-      if (createRes.status === 404) {
-        // not_enabled — feature flag off on this environment
-        console.log("Connections API disabled on backend; falling back to JWT session");
-        return null;
-      }
-      if (!createRes.ok) {
-        // 400/403 are policy answers (pricing gate, limit) — deny the exchange
-        // outright. Everything else is an availability problem — fall back.
-        await throwIfPolicyDenial(createRes);
-        console.error(`Connection create failed: HTTP ${createRes.status} ${await createRes.text()}`);
-        return null;
-      }
-      const created = (await createRes.json()) as {
-        token?: string;
-        connection?: { id?: string; expiresAt?: string };
-      };
-      if (!created?.token || !isConnectionToken(created.token)) return null;
-      return {
-        token: created.token,
-        scopes,
-        connectionId: created.connection?.id,
-        expiresAt: created.connection?.expiresAt ?? undefined,
-      };
     } catch (error) {
-      if (error instanceof ConnectionMintDeniedError) throw error;
-      console.error("Connection mint failed; falling back to JWT session:", error);
+      // No answer at all. Not "feature off" - the exchange fails (SS06119).
+      console.error("Connection mint unreachable; refusing the exchange:", error);
+      throw new ConnectionMintUnavailableError(
+        `Connection mint unreachable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (createRes.status === 404) {
+      // not_enabled — feature flag off on this environment (or a backend that
+      // predates Connections). The only answer that still means a JWT session.
+      console.log("Connections API disabled on backend; falling back to JWT session");
       return null;
     }
+    if (!createRes.ok) {
+      // 400/403 are policy answers (pricing gate, limit) — deny the exchange
+      // outright. Everything else is an availability problem — also fail, never
+      // fall back to an ungated JWT session (SS06119).
+      await throwIfPolicyDenial(createRes);
+      let detail = "";
+      try {
+        detail = await createRes.text();
+      } catch {
+        /* body unreadable; the status is the message */
+      }
+      console.error(`Connection create failed: HTTP ${createRes.status} ${detail}; refusing the exchange`);
+      throw new ConnectionMintUnavailableError(
+        `Connection mint failed: HTTP ${createRes.status}`,
+        createRes.status,
+      );
+    }
+    let created: { token?: string; connection?: { id?: string; expiresAt?: string } };
+    try {
+      created = (await createRes.json()) as typeof created;
+    } catch (error) {
+      console.error("Connection mint answered with an unreadable body; refusing the exchange:", error);
+      throw new ConnectionMintUnavailableError("Connection mint returned an unreadable body", createRes.status);
+    }
+    if (!created?.token || !isConnectionToken(created.token)) {
+      // A 2xx without a usable token is a broken backend, not a disabled feature.
+      console.error("Connection mint answered without a usable token; refusing the exchange");
+      throw new ConnectionMintUnavailableError("Connection mint returned no usable token", createRes.status);
+    }
+    return {
+      token: created.token,
+      scopes,
+      connectionId: created.connection?.id,
+      expiresAt: created.connection?.expiresAt ?? undefined,
+    };
   }
 
   /**
