@@ -30,8 +30,8 @@ import {
   flowCompletenessError,
   normalizeFieldType,
   normalizeOptionList,
-  normalizeStateColor,
   resolveDesignRefs,
+  storableStateColor,
   unwrapItems,
   validateDesign,
 } from "./schema.js";
@@ -322,7 +322,10 @@ function normalizeModuleSections(body: Record<string, unknown>): void {
   if (Array.isArray(body.states)) {
     body.states = (body.states as Array<Record<string, unknown>>).map((s) => ({
       ...s,
-      color: normalizeStateColor(s.color as string | undefined, (s.name as string) || "").color,
+      // Only a value the platform cannot store gets mapped; a parseable hex is kept exactly as the
+      // caller sent it. Snapping every off-palette hex here repainted whole workflows on an update
+      // that was meant to touch one activity - see storableStateColor.
+      color: storableStateColor(s.color as string | undefined, (s.name as string) || "").color,
     }));
   }
   if (Array.isArray(body.activities)) {

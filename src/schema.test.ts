@@ -10,6 +10,7 @@ import {
   scaffoldCard,
   normalizeFieldType,
   normalizeStateColor,
+  storableStateColor,
   normalizeIndustry,
   parseStatesFromDescription,
   parseFieldsFromDescription,
@@ -208,7 +209,7 @@ describe("validateDesign", () => {
     expect(result.errors.some((e) => e.includes("Duplicate state name"))).toBe(true);
   });
 
-  it("normalizes off-palette state colors with a warning instead of erroring", () => {
+  it("keeps an off-palette state color and suggests the palette, on create", () => {
     const schema = {
       ...minimalWorkflow,
       states: [
@@ -218,7 +219,24 @@ describe("validateDesign", () => {
     };
     const result = validateDesign(schema);
     expect(result.valid).toBe(true);
-    expect(result.warnings.some((w) => w.includes("'Open'") && w.includes("normalized to '#C0392B'"))).toBe(true);
+    expect(
+      result.warnings.some((w) => w.includes("'Open'") && w.includes("kept as sent")),
+    ).toBe(true);
+  });
+
+  it("does not nag about existing colors on an update", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { name: "Open", color: "#FF0000", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+    };
+    // These came from the platform: they are the customer's design, and one warning per state
+    // would bury the warnings that matter.
+    const result = validateDesign(schema, "update");
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("palette"))).toBe(false);
   });
 
   it("catches duplicate activity names", () => {
@@ -787,9 +805,11 @@ describe("validateDesign — input normalization", () => {
     };
     const result = validateDesign(schema);
     expect(result.valid).toBe(false);
+    // Wrong key names (source/target) leave no activity, which is the one part a flow cannot do
+    // without. It is reported once, and never as a dangling state reference to 'undefined'.
     const missing = result.errors.filter((e) => e.includes("is missing"));
     expect(missing).toHaveLength(1);
-    expect(missing[0]).toContain("'from', 'to', 'activity'");
+    expect(missing[0]).toContain("is missing 'activity'");
     expect(result.errors.some((e) => e.includes("'undefined'"))).toBe(false);
   });
 
@@ -1003,3 +1023,92 @@ describe("designWorkflow", () => {
   });
 });
 
+// The shapes a real, in-use module actually has. Every one of these was rejected until 2026-09-21,
+// so the platform's own Issue module - fourteen states, thirty-five flows, used daily - could not be
+// updated through this server at all. Read from ws 1138 on the day these were written.
+describe("a real module's canvas round-trips", () => {
+  const realish = {
+    name: "Issue",
+    information: [
+      { name: "Priority", type: "Selection", options: ["High", "Low"] },
+      { name: "Person In Charge", type: "User", connection: "Employee" },
+    ],
+    states: [
+      { name: "Open", color: "#4cbb17", initial: true },
+      { name: "In Progress", color: "#2a52be" },
+      { name: "Closed", color: "#000000" },
+    ],
+    activities: [
+      { name: "Done", fields: [{ name: "Priority" }] },
+      { name: "Assign Person", fields: [{ name: "Person In Charge" }] },
+      { name: "Reopen" },
+    ],
+    flows: [
+      // The activity runs without moving the record: no 'to' at all.
+      { from: "Open", activity: "Done" },
+      // From any state: the canvas writes an empty 'from' literally.
+      { from: "", to: "In Progress", activity: "Assign Person" },
+      // Both: runs anywhere, moves nothing.
+      { from: "", activity: "Done" },
+      { from: "Closed", to: "Open", activity: "Reopen" },
+    ],
+  };
+
+  it("accepts a flow with no 'to' — the activity does not move the record", () => {
+    const result = validateDesign(JSON.parse(JSON.stringify(realish)), "update");
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts a flow with an empty 'from' — it can run from any state", () => {
+    const schema = { ...realish, flows: [{ from: "", to: "In Progress", activity: "Assign Person" }] };
+    const result = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(result.errors).toEqual([]);
+  });
+
+  it("still rejects a flow with no activity", () => {
+    const schema = { ...realish, flows: [{ from: "Open", to: "Closed" }] };
+    const result = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(result.errors.some((e) => e.includes("is missing 'activity'"))).toBe(true);
+  });
+
+  it("still rejects a NAMED state that does not exist", () => {
+    const schema = { ...realish, flows: [{ from: "Open", to: "Atlantis", activity: "Done" }] };
+    const result = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(result.errors.some((e) => e.includes("'Atlantis'"))).toBe(true);
+  });
+
+  it("keeps every state colour exactly as the platform stores it", () => {
+    for (const state of realish.states) {
+      expect(storableStateColor(state.color, state.name).color).toBe(state.color);
+      expect(storableStateColor(state.color, state.name).changed).toBe(false);
+    }
+    // Black had been snapping to a green. Nobody asked for that.
+    expect(storableStateColor("#000000", "Closed").color).toBe("#000000");
+  });
+
+  it("still maps a colour the platform cannot store", () => {
+    expect(storableStateColor("gray", "Draft")).toEqual({ color: "#5A6070", changed: true });
+    expect(storableStateColor("not a colour at all", "Failed").changed).toBe(true);
+    expect(storableStateColor(undefined, "Open")).toEqual({ color: undefined, changed: false });
+  });
+
+  it("warns, rather than fails, on a field ref the canvas read did not return", () => {
+    // Layout elements - labels, dividers - are referenced by activities but are not information
+    // fields, and get_module_canvas does not return them.
+    const schema = {
+      ...realish,
+      activities: [{ name: "Done", fields: [{ name: "Jf4GHyw8Fie9" }] }],
+      flows: [{ from: "Open", activity: "Done" }],
+    };
+
+    const update = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(update.valid).toBe(true);
+    expect(update.warnings.some((w) => w.includes("Jf4GHyw8Fie9"))).toBe(true);
+
+    // On create the same ref is a mistake worth stopping: nothing was read, so nothing was stripped.
+    const create = validateDesign(JSON.parse(JSON.stringify(schema)), "create");
+    expect(create.valid).toBe(false);
+    expect(create.errors.some((e) => e.includes("Jf4GHyw8Fie9"))).toBe(true);
+  });
+});

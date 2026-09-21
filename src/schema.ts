@@ -458,6 +458,36 @@ export function normalizeStateColor(
   return { color: suggestColorForState(stateName), changed: true };
 }
 
+/**
+ * What the platform should actually STORE for a state colour.
+ *
+ * Different question from `normalizeStateColor`, which answers "what is the nearest palette colour"
+ * and is advice. This one answers "can the platform keep what the caller sent", and the answer for any
+ * parseable hex is yes — so it is passed through untouched. Only values the platform cannot store are
+ * mapped: a colour name like "gray", or something that is not a colour at all.
+ *
+ * The write path used the advice function, so every update repainted every off-palette state. A real
+ * module is full of them — the Issue module this was found on has fourteen states, and its black
+ * "Closed" snapped to green — and none of those colours were the caller's to change. An agent editing
+ * one activity would have silently recoloured the whole workflow.
+ */
+export function storableStateColor(
+  color: string | undefined | null,
+  stateName: string,
+): { color: string | undefined; changed: boolean } {
+  if (!color) return { color: undefined, changed: false };
+  if (VALID_COLORS.includes(color)) return { color, changed: false };
+
+  const trimmed = color.trim();
+  if (parseHexColor(trimmed)) {
+    // Storable as-is. validateDesign still warns when it is off-palette, so an agent choosing
+    // colours freehand is nudged towards the palette without anyone's existing design being altered.
+    return { color: trimmed, changed: false };
+  }
+
+  return normalizeStateColor(color, stateName);
+}
+
 export function isValidColor(hex: string): boolean {
   return VALID_COLORS.includes(hex);
 }
@@ -558,10 +588,20 @@ interface ValidationResult {
  * update_module's partial path uses it too, where validateDesign never runs.
  */
 export function flowCompletenessError(f: any, index: number): string | null {
-  const missing = (["from", "to", "activity"] as const).filter((k) => f?.[k] === undefined);
-  return missing.length > 0
-    ? `Flow at index ${index} is missing '${missing.join("', '")}' — flows are { from, to, activity } using state/activity names.`
-    : null;
+  // Only `activity` is structurally required, because only `activity` is required by the platform.
+  // SchemaProcessor writes `from` when fromStateId is set and `to` when toStateId is set, and reads
+  // them back the same way, so both are genuinely optional on the wire:
+  //
+  //   no `to`   — the activity runs without moving the record (the platform's own Issue module has
+  //               eight of these: "Done" from Open, "Verify" from Pending Verification, …)
+  //   no `from` — or an empty one, which the canvas writes literally as "": from any state.
+  //
+  // Requiring all three rejected real modules outright: they could not pass validate, so they could
+  // not be updated through this server at all.
+  if (f?.activity === undefined) {
+    return `Flow at index ${index} is missing 'activity' — a flow is { from, to, activity } using state and activity names. 'to' may be omitted when the activity does not move the record, and 'from' when it can run from any state.`;
+  }
+  return null;
 }
 
 export function validateDesign(
@@ -708,15 +748,23 @@ export function validateDesign(
       stateNames.add(s.name);
     }
 
-    // Normalize state colors — off-palette values snap to the nearest palette
-    // color (create_module/update_module apply the same mapping), so colors
-    // never block a design. Warn so agents learn the palette.
+    // State colours never block a design. A value the platform cannot store - a colour name, or
+    // something that is not a colour - is mapped and the caller told what it became. A parseable hex
+    // is kept exactly as sent, and the palette is offered as a suggestion: it is guidance for agents
+    // choosing colours freehand, not a licence to repaint a workflow somebody already designed.
     for (const s of states) {
       if (s.color) {
-        const norm = normalizeStateColor(s.color, s.name || "");
-        if (norm.changed) {
+        const stored = storableStateColor(s.color, s.name || "");
+        if (stored.changed) {
           warnings.push(
-            `State '${s.name}' color '${s.color}' is not in the palette — normalized to '${norm.color}'.`,
+            `State '${s.name}' color '${s.color}' cannot be stored as a colour — using '${stored.color}'.`,
+          );
+        } else if (mode === "create" && !isValidColor(stored.color as string)) {
+          // Create only. On an update these colours came from the platform - they are the customer's
+          // design, and one warning per state (fourteen, for the module this was found on) would bury
+          // the warnings that matter under a complaint about something nobody asked to change.
+          warnings.push(
+            `State '${s.name}' color '${s.color}' is outside the palette — kept as sent. The palette is ${VALID_COLORS.join(", ")}.`,
           );
         }
       } else {
@@ -759,14 +807,27 @@ export function validateDesign(
         }
       }
 
-      // Activity field references
+      // Activity field references.
+      //
+      // On create this is an error: an agent inventing a field name is a mistake worth stopping.
+      //
+      // On update it is a warning, because an activity may legitimately reference something that is
+      // not an information field - a layout element, a label, a divider - and get_module_canvas does
+      // not return those. The caller edits the canvas it was given, so the server would be rejecting
+      // its own read: the platform's Issue module fails on three such refs and cannot be updated at
+      // all. Stripping them instead would be worse - it would delete the layout on every save.
       if (a.fields && Array.isArray(a.fields)) {
         for (const ref of a.fields) {
           const fieldName = typeof ref === "string" ? ref : ref.name;
           if (!fieldNames.has(fieldName)) {
-            errors.push(
-              `Activity '${a.name}' references field '${fieldName}' which is not defined in information. Available fields: ${[...fieldNames].join(", ")}.`,
-            );
+            const message = `Activity '${a.name}' references field '${fieldName}' which is not defined in information. Available fields: ${[...fieldNames].join(", ")}.`;
+            if (mode === "update") {
+              warnings.push(
+                `${message} Left as-is: on an update this is usually a layout element, which the canvas read does not return.`,
+              );
+            } else {
+              errors.push(message);
+            }
           }
         }
       }
@@ -799,12 +860,16 @@ export function validateDesign(
         errors.push(incomplete);
         continue;
       }
-      if (f.from !== "" && !stateNames.has(f.from)) {
+      // An absent or empty endpoint is not a dangling reference, it is the absence of one: no `from`
+      // means the activity can run from any state, no `to` means it does not move the record. Only a
+      // NAMED state that does not exist is an error.
+      const named = (v: unknown) => typeof v === "string" && v !== "";
+      if (named(f.from) && !stateNames.has(f.from)) {
         errors.push(
           `Flow references state '${f.from}' (from) which is not defined. Available states: ${[...stateNames].join(", ")}.`,
         );
       }
-      if (!stateNames.has(f.to)) {
+      if (named(f.to) && !stateNames.has(f.to)) {
         errors.push(
           `Flow references state '${f.to}' (to) which is not defined. Available states: ${[...stateNames].join(", ")}.`,
         );
