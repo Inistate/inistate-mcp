@@ -195,17 +195,25 @@ npx changeset
 # minor
 # Added new user search tool
 
-# Release
+# Release — see it first, then do it
+npm run release:dry   # runs every check, publishes nothing
 npm run release
 
-# This does:
-# install dependencies
-# test
-# bump version + update changelog + sync server.json
-# validate MCP server config
-# build (via npm prepare hook)
-# publish to npm
-# publish to MCP registry
+# `npm run release` does, in this order:
+#   refuse to start from a dirty working tree, or with no changesets to release
+#   npm ci (exactly the lockfile) -> build -> test
+#   changeset version: bump + changelog + sync server.json, then check the two agree
+#   git commit + tag v<version>
+#   npm publish                      <- the first irreversible step
+#   confirm npm really serves that version
+#   mcp-publisher validate / login / publish
+#   git push --follow-tags
+#
+# The npm-before-registry order is the point, not a preference: server.json names an npm package AND
+# version, so a registry entry published first tells every client to install something that 404s.
+# The registry step refuses to run until `npm view` confirms the version is live.
+#
+# npm run release:npm   publishes to npm and stops (no registry)
 ```
 
 ## PM2 (Ubuntu/AWS)
