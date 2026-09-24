@@ -955,8 +955,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
         activity: z.string().default("create"),
         entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
         entryIds: z.array(z.union([z.string(), z.number()])).optional().describe("For bulk ops"),
+        // `null` is the one non-object worth tolerating: several clients send it for "no fields".
+        // Anything else that is not an object reaches the handler and is REFUSED there. It used to
+        // be coerced to undefined, which meant a string or array of field values was dropped and the
+        // activity submitted with nothing - on create, an empty entry, answered with success.
         input: z
-          .preprocess(v => (v != null && typeof v === "object" && !Array.isArray(v) ? v : undefined), z.record(z.unknown()).optional())
+          .preprocess(v => (v === null ? undefined : v), z.unknown().optional())
           .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. Location: {lat,lng,placeName} — lat/lng unquoted numbers, placeName the place's display name; never a combined \"lat,lng\" string. YesNo: true or false, never \"yes\". Text/MultilineText/Email: one string — join lines with \\n, never an array. User/Module/Location shapes and YesNo/text value types are validated pre-flight — bare ids, bare strings, wrong value types, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
@@ -979,7 +983,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       activity,
       entryId,
       entryIds,
-      input,
+      input: rawInput,
       state,
       comment,
       assignees,
@@ -994,6 +998,21 @@ Load resource inistate://schema before modifying to know valid field types, colo
       const expectedVersion = (extra as Record<string, unknown>).expectedVersion as number | undefined;
       try {
         applyWorkspace(workspaceId);
+        // Field values must arrive as an object keyed by field name. Anything else - a string, a
+        // number, an array - is refused rather than dropped: submitting the activity without it
+        // would create an empty entry and report success, which is the worst possible answer.
+        if (rawInput != null && (typeof rawInput !== "object" || Array.isArray(rawInput))) {
+          const structured = {
+            error: "invalid_input_shape",
+            message: `\`input\` must be an object keyed by field display name, but a ${Array.isArray(rawInput) ? "array" : typeof rawInput} was sent. Nothing was submitted.`,
+            activity,
+            agent_action:
+              "Call get_form for this module and activity, then pass `input` as { \"Field Name\": value, … }. A list of values belongs in submit_activities.items, one object per entry.",
+          };
+          log("submit_activity", `module=${moduleName} activity=${activity} → BLOCKED: invalid_input_shape (${Array.isArray(rawInput) ? "array" : typeof rawInput})`);
+          return err({ structured });
+        }
+        const input = rawInput as Record<string, unknown> | undefined;
         // An empty-string entryId reaches the platform as a 500 — treat it as
         // absent (create).
         if (typeof entryId === "string" && entryId.trim() === "") entryId = undefined;
@@ -1167,8 +1186,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
         module: z.string(),
         activity: z.string().default("create"),
         ai: bulkAiParam,
+        // unwrapItems only unwraps { items: [...] }. It does NOT drop malformed entries any more:
+        // filtering them meant a batch of a hundred could submit eighty-eight and answer success,
+        // and the caller had no way to learn which twelve never happened. A bad item now fails the
+        // whole call, naming its index.
         items: z.preprocess(
-          v => { const a = unwrapItems(v); return Array.isArray(a) ? a.filter(x => x != null && typeof x === "object" && !Array.isArray(x)) : a; },
+          v => unwrapItems(v),
           z
           .array(
             z.object({
@@ -1866,6 +1889,27 @@ Load resources inistate://schema and inistate://design-guide before designing fo
     }) => {
       try {
         applyWorkspace(workspaceId);
+        // A section that arrives EMPTY is refused. An empty array is truthy, and a section that is
+        // passed replaces that section's entire list, so `information: []` deleted every field on
+        // the module - silently, and reported as a successful update. No agent means that; it is
+        // what a filter matching nothing looks like. `flows: []` is the one that can be meant
+        // (a module with no transitions), so it is allowed through.
+        const emptied = (["information", "states", "activities"] as const).filter(
+          (section) => Array.isArray({ information, states, activities }[section])
+            && ({ information, states, activities }[section] as unknown[]).length === 0,
+        );
+        if (emptied.length > 0) {
+          const structured = {
+            error: "empty_section",
+            message: `Refusing to update: ${emptied.map((x) => `'${x}'`).join(", ")} arrived empty, and a section that is passed REPLACES that section entirely — this would have deleted every item in it. Nothing was updated.`,
+            sections: emptied,
+            agent_action:
+              "Omit a section you do not mean to change; it is left untouched. To edit one, call get_module_canvas and send that section back in full, with your change applied.",
+          };
+          log("update_module", `id=${id} → BLOCKED: empty_section (${emptied.join("|")})`);
+          return err({ structured });
+        }
+
         const body: Record<string, unknown> = { id };
         if (name) body.name = name;
         if (icon) body.icon = icon;

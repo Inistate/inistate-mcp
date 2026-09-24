@@ -950,7 +950,8 @@ describe("reference id sanity", () => {
     expect(result.isError).toBeFalsy();
   });
 
-  it("submit_activity coerces array/null input to undefined instead of -32602", async () => {
+  it("submit_activity refuses a non-object input instead of creating an empty entry", async () => {
+    lastSubmitPayload = null;
     const result = await client.callTool({
       name: "submit_activity",
       arguments: {
@@ -960,8 +961,137 @@ describe("reference id sanity", () => {
         ai,
       },
     });
-    // array input must not throw a Zod -32602; call proceeds (input treated as absent)
+
+    // The original intent stands: a bad shape must not surface as a Zod -32602, which tells an
+    // agent nothing it can act on. But it used to be COERCED to undefined, and the create went
+    // through with no fields at all — an empty entry, answered with success. It is now refused.
     const res = parse(result);
     expect(res).not.toHaveProperty("code");
+    expect(result.isError).toBe(true);
+    expect(res.error).toBe("invalid_input_shape");
+    expect(res.agent_action).toContain("get_form");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity refuses a string input the same way", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: "Title: x" as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(parse(result).error).toBe("invalid_input_shape");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity still treats null input as simply absent", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: null as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    // An activity that takes no fields is a real thing, and several clients send null for it.
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.input).toBeUndefined();
+  });
+});
+
+describe("silent write-path losses", () => {
+  const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
+
+  it("submit_activities refuses a batch with a malformed item instead of dropping it", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        items: [
+          { input: { Title: "one" } },
+          "not an item" as unknown as Record<string, unknown>,
+          { input: { Title: "three" } },
+        ],
+        ai,
+      },
+    });
+
+    // Dropping it meant a batch of three submitted two and answered success — the caller had no
+    // way to learn which one never happened. Better to fail the call and name the index.
+    expect(result.isError).toBe(true);
+    expect(lastBulkPayload).toBeNull();
+  });
+
+  it("submit_activities still accepts a well-formed batch and the {items:[…]} wrapper", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        items: { items: [{ input: { Title: "one" } }, { input: { Title: "two" } }] } as never,
+        ai,
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    expect((lastBulkPayload!.items as unknown[]).length).toBe(2);
+  });
+
+  it("update_module refuses an empty section rather than deleting everything in it", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, information: [] },
+    });
+
+    // An empty array is truthy, and a section that is passed replaces that section entirely, so
+    // this used to delete every field on the module and report a successful update.
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("empty_section");
+    expect(res.sections).toEqual(["information"]);
+    expect(lastUpdatePayload).toBeNull();
+  });
+
+  it("update_module names every empty section at once", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, information: [], states: [], activities: [] },
+    });
+    expect(parse(result).sections).toEqual(["information", "states", "activities"]);
+    expect(lastUpdatePayload).toBeNull();
+  });
+
+  it("update_module still allows clearing flows, which can be meant", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, flows: [] },
+    });
+    // A module with no transitions is a real design; the destructive-by-accident cases are the
+    // other three.
+    expect(result.isError).toBeFalsy();
+    expect(lastUpdatePayload!.flows).toEqual([]);
+  });
+
+  it("update_module leaves an omitted section untouched", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, name: "Renamed" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastUpdatePayload).not.toHaveProperty("information");
+    expect(lastUpdatePayload!.name).toBe("Renamed");
   });
 });
