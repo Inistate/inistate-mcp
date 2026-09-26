@@ -206,4 +206,19 @@ describe("configure tool schemas", () => {
       required: ["id"],
     });
   });
+
+  // SS06151: a Module/User field names the connected field it shows (the designer's "Display
+  // Information"). zod strips keys a shape does not declare, so without this the value never
+  // reached /api/configure.
+  it.each(["create_module", "update_module"])("%s information items accept display", (name) => {
+    const tool = tools.find((t) => t.name === name)!;
+    const info = (tool.inputSchema as any).properties.information;
+    const findItems = (node: any): any =>
+      !node || typeof node !== "object" ? null
+        : node.items?.properties ? node.items
+        : [node.anyOf, node.oneOf, node.allOf].flat().filter(Boolean).map(findItems).find(Boolean) ?? null;
+    const items = findItems(info);
+    expect(items, JSON.stringify(info).slice(0, 300)).toBeTruthy();
+    expect(Object.keys(items.properties)).toContain("display");
+  });
 });

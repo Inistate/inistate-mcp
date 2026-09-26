@@ -186,6 +186,7 @@ const fieldShape = z.preprocess(repairItem, z.object({
   name: z.string(),
   type: z.string().optional(),
   connection: z.string().optional().describe("Name of an existing module in this workspace to link to. Required for User/Users/Module/Modules types."),
+  display: z.string().optional().describe("User/Users/Module/Modules only: name of the connected module's field shown for a picked record. Omit to default (Full Name/Name for users, else the first Text field)."),
   options: z.array(z.string()).optional(),
   fields: z.array(subFieldShape).optional().describe("Sub-fields for Table type"),
   ai_hint: z.string().optional(),

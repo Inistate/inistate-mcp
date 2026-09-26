@@ -38,6 +38,10 @@
           "type": "string",
           "description": "Name of the module this field links to (e.g. 'Members' for workspace users). Required for Module/Modules/User/Users types; not allowed on other types. Not supported inside Table sub-fields."
         },
+        "display": {
+          "type": "string",
+          "description": "Module/Modules/User/Users only: display name of the connected module's field shown for a picked record (the designer's 'Display Information'). Omit it and a default is chosen: 'Full Name', then 'Name' for a user module, otherwise the connected module's first Text field. A name the connected module does not have is rejected."
+        },
         "options": {
           "type": "array",
           "items": { "type": "string" },
