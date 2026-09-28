@@ -17,6 +17,8 @@ import {
   VALID_FIELD_TYPES,
   VALID_COLORS,
   VALID_ACTOR_TYPES,
+  RESERVED_ACTIVITY_NAMES,
+  RESERVED_INFORMATION_NAMES,
 } from "./schema.js";
 
 // ──────────────────────────────────────────────
@@ -563,6 +565,83 @@ describe("validateDesign — platform parity", () => {
     });
     expect(result.valid).toBe(true);
     expect(result.warnings.some((w) => w.includes("'Title'") && w.includes("'required'"))).toBe(true);
+  });
+});
+
+// SS06168: create_module built a "Service Job" module whose custom activity was named "Assign";
+// Studio reserves that name and showed the module as "Configuration incomplete".
+describe("validateDesign — Studio's reserved names", () => {
+  const serviceJob = (activityName: string, extra: Record<string, any> = {}) => ({
+    name: "Service Job",
+    information: [
+      { name: "Job Title", type: "Text" },
+      { name: "Technician", type: "Text", ...(extra.field || {}) },
+    ],
+    states: [
+      { name: "New", color: "#5A6070", initial: true },
+      { name: "Assigned", color: "#2968A8" },
+    ],
+    activities: [{ name: activityName, actor: "human", fields: ["Technician"], ...(extra.activity || {}) }],
+    flows: [{ from: "New", to: "Assigned", activity: activityName }],
+  });
+
+  it.each(["Assign", "assign", " Assign ", "Change Status", "Update", "Sync", "Manage"])(
+    "refuses a new activity named '%s'",
+    (name) => {
+      const result = validateDesign(serviceJob(name));
+      expect(result.valid).toBe(false);
+      const error = result.errors.find((e) => e.startsWith(`Activity '${name}' uses a reserved name`));
+      expect(error).toBeDefined();
+      expect(error).toContain("Assign Technician");
+    },
+  );
+
+  it.each(["Assign Technician", "Reassign", "Approve", "Change Status Now"])(
+    "accepts '%s', which only contains a reserved word",
+    (name) => {
+      expect(validateDesign(serviceJob(name)).valid).toBe(true);
+    },
+  );
+
+  it.each(["ID", "Created By", "assign to", "Last Change By"])("refuses a new field named '%s'", (name) => {
+    const result = validateDesign({
+      ...serviceJob("Dispatch"),
+      information: [{ name: "Job Title", type: "Text" }, { name, type: "Text" }],
+      activities: [{ name: "Dispatch", actor: "human" }],
+    });
+    expect(result.errors.some((e) => e.startsWith(`Information field '${name}' uses a reserved name`))).toBe(true);
+  });
+
+  it("refuses a reserved activity in a record list (no states) too, as the platform does", () => {
+    const result = validateDesign({
+      name: "Service Jobs",
+      information: [{ name: "Job Title", type: "Text" }],
+      activities: [{ name: "Assign" }],
+    });
+    expect(result.errors.some((e) => e.startsWith("Activity 'Assign' uses a reserved name"))).toBe(true);
+  });
+
+  it("leaves an existing activity or field (carrying its id) alone on update", () => {
+    const existing = serviceJob("Assign", {
+      activity: { id: "actAssign" },
+      field: { id: "fTech" },
+    });
+    existing.information[0] = { name: "Created By", type: "Text", id: "fCreatedBy" } as any;
+    const result = validateDesign(existing, "update");
+    expect(result.errors.filter((e) => e.includes("reserved name"))).toEqual([]);
+  });
+
+  it("refuses a NEW reserved activity on update", () => {
+    const result = validateDesign(serviceJob("Assign"), "update");
+    expect(result.errors.some((e) => e.startsWith("Activity 'Assign' uses a reserved name"))).toBe(true);
+  });
+
+  it("uses Studio's lists", () => {
+    expect(RESERVED_ACTIVITY_NAMES).toEqual([
+      "create", "edit", "update", "view", "delete", "change status",
+      "duplicate", "comment", "assign", "sync", "manage",
+    ]);
+    expect(RESERVED_INFORMATION_NAMES).toEqual(["id", "assign to", "created by", "last change by"]);
   });
 });
 

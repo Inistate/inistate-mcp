@@ -31,7 +31,7 @@
         },
         "name": {
           "type": "string",
-          "description": "Display name. Used as the key in all MCP input/output payloads (e.g. 'Leave Type', not 'xKfLmNpQ')."
+          "description": "Display name. Used as the key in all MCP input/output payloads (e.g. 'Leave Type', not 'xKfLmNpQ'). Must not be a reserved word: id, assign to, created by and last change by (whole name, any case) are built into every module, so create_module/update_module refuse a new field named one of them."
         },
         "type": { "$ref": "#/definitions/FieldType" },
         "connection": {
@@ -125,7 +125,7 @@
         },
         "name": {
           "type": "string",
-          "description": "Activity display name. MCP resolves to internal activity ID."
+          "description": "Activity display name. MCP resolves to internal activity ID. Must not be a reserved word: create, edit, update, view, delete, change status, duplicate, comment, assign, sync and manage (whole name, any case) are built-in activities, so create_module/update_module refuse a new activity named one of them - name the step instead (e.g. 'Assign Technician')."
         },
         "fields": {
           "type": "array",

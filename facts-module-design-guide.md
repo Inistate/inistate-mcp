@@ -443,6 +443,11 @@ Add ai_hint to fields that need interpretation guidance for AI agents
 (e.g., how to calculate a value, when to set a boolean, what format to
 use).
 
+Never name a field id, assign to, created by or last change by (whole
+name, any case): every module already has them, Studio rejects the
+design, and create_module refuses it. Use e.g. Reference No or Requested
+By instead.
+
 ## 5.3 States
 
 Each state requires name and color. Set initial: true on exactly one
@@ -453,7 +458,11 @@ ai_hint explaining when an entry should be in this state.
 
 Each activity defines a custom action. Include:
 
--   **name** --- Display name of the activity
+-   **name** --- Display name of the activity. Never create, edit,
+    update, view, delete, change status, duplicate, comment, assign,
+    sync or manage (whole name, any case): those are built-in
+    activities, Studio rejects the design and create_module refuses it.
+    Name the step instead, e.g. Assign Technician, Dispatch, Approve.
 
 -   **fields** --- Array of field references with required/readOnly
     constraints

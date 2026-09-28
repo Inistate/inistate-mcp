@@ -123,6 +123,21 @@ export const SCHEMA_CONFIGURE = buildSchemaView(
 
 export const VALID_FIELD_TYPES: string[] = SCHEMA.definitions.FieldType.enum;
 
+// SS06168 — Studio's reserved words (webApp src/components/commons/designValidator.js
+// activityReservedKeywords / informationReservedKeywords). Studio refuses a custom activity or
+// information field with one of these names and shows the module as "Configuration incomplete";
+// the platform validator (InistateSchema.SchemaValidator) refuses them too. Matched as Studio
+// matches: the whole name, trimmed, any case.
+export const RESERVED_ACTIVITY_NAMES: string[] = [
+  "create", "edit", "update", "view", "delete", "change status",
+  "duplicate", "comment", "assign", "sync", "manage",
+];
+export const RESERVED_INFORMATION_NAMES: string[] = ["id", "assign to", "created by", "last change by"];
+
+function isReservedName(name: unknown, reserved: string[]): boolean {
+  return typeof name === "string" && reserved.includes(name.trim().toLowerCase());
+}
+
 export const VALID_ACTOR_TYPES: string[] =
   SCHEMA.definitions.ActivityDefinition.properties.actor.enum;
 
@@ -652,6 +667,13 @@ export function validateDesign(
     if (!f.name) {
       errors.push(`Information field at index ${i} is missing a 'name'.`);
     }
+    // SS06168: only new fields — one carrying an id on update already exists (the platform
+    // treats the AI-blocked Date Range type the same way).
+    if (isReservedName(f.name, RESERVED_INFORMATION_NAMES) && (mode === "create" || !f.id)) {
+      errors.push(
+        `Information field '${f.name}' uses a reserved name: ${RESERVED_INFORMATION_NAMES.join(", ")} are built into every module, and Studio will not accept the design. Rename it to say what it holds (for example 'Requested By' rather than 'Created By', 'Reference No' rather than 'ID').`,
+      );
+    }
     if (!f.type) {
       errors.push(
         `Field '${f.name}' is missing a 'type'. Valid types: ${VALID_FIELD_TYPES.join(", ")}.`,
@@ -720,6 +742,16 @@ export function validateDesign(
           }
         }
       }
+    }
+  }
+
+  // SS06168: reserved activity names, workflow or not (the platform checks every activity). An
+  // existing activity (carrying an id on update) is left as it is.
+  for (const a of activities) {
+    if (a && isReservedName(a.name, RESERVED_ACTIVITY_NAMES) && (mode === "create" || !a.id)) {
+      errors.push(
+        `Activity '${a.name}' uses a reserved name: ${RESERVED_ACTIVITY_NAMES.join(", ")} are built-in activities, and Studio will not accept the design. Rename it to say what the step does (for example 'Assign Technician' rather than 'Assign'), and use the new name in its flows.`,
+      );
     }
   }
 
