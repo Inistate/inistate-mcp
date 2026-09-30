@@ -5,6 +5,7 @@ import { z } from "zod";
 import { Backend } from "./backend.js";
 import { capabilityMessage } from "./capability.js";
 import {
+  activityLabels,
   clearFlagged,
   describeShapeErrors,
   evaluateActivity,
@@ -375,6 +376,24 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       return null;
     }
   };
+
+  // SS06181: the names an activity's form gives the fields it relabels (get_form's
+  // `label`), for input keyed the way the user sees the form. Fail-open: null.
+  const fetchActivityLabels = async (
+    moduleName: string,
+    activity: string,
+    entryId?: string | number,
+  ) => {
+    try {
+      return activityLabels(await backend.getForm({ module: moduleName, activity, entryId }));
+    } catch {
+      return null;
+    }
+  };
+  const labelKeyNote = (r: { from: string; to: string; via?: "label" }) =>
+    r.via === "label"
+      ? `Input key '${r.from}' is this activity's label for field '${r.to}' — mapped to '${r.to}'.`
+      : `Input key '${r.from}' matched field '${r.to}' — use exact field names.`;
 
   /**
    * update_module matches section items by id and the platform rejects an id
@@ -912,7 +931,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "Get Activity Form",
       description:
-        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask.",
+        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask. A field may carry `label`: the name THIS activity's form shows for it (the designer relabelled it) — when the user names a field by that label, it means this field; key `input` by the field name (the label is accepted too).",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         activity: z
@@ -1063,7 +1082,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
         let inputKeyNotes: string[] = [];
         const fieldTypes = input ? await getModuleFieldTypes(moduleName, fetchSchema) : null;
         if (input && fieldTypes) {
-          const keys = resolveInputKeys(fieldTypes, input);
+          // Only a key that is no field name can be a relabelled field's label — fetch
+          // the activity's form just then.
+          const labels = Object.keys(input).some((k) => !fieldTypes.has(k))
+            ? await fetchActivityLabels(moduleName, activity, entryId)
+            : null;
+          const keys = resolveInputKeys(fieldTypes, input, labels);
           if (keys.unknown.length > 0) {
             const stateHint = keys.unknown.some((k) => /^(state|status)$/i.test(k))
               ? " To set the workflow state, use the top-level `state` parameter (requires user confirmation), not an input field."
@@ -1081,9 +1105,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
             );
             return err({ structured });
           }
-          inputKeyNotes = keys.remapped.map(
-            (r) => `Input key '${r.from}' matched field '${r.to}' — use exact field names.`,
-          );
+          inputKeyNotes = keys.remapped.map(labelKeyNote);
         }
         // Input-shape pre-flight: User/Module fields must be { id, value };
         // Location fields must be { lat, lng, placeName }.
@@ -1363,17 +1385,20 @@ Load resource inistate://schema before modifying to know valid field types, colo
         // Unknown keys block the batch: the platform silently drops them,
         // which is data loss with no signal. Near-miss keys are remapped.
         const fieldTypes = await getModuleFieldTypes(moduleName, fetchSchema);
+        const labels =
+          fieldTypes &&
+          items.some((it) => it.input && Object.keys(it.input).some((k) => !fieldTypes.has(k)))
+            ? await fetchActivityLabels(moduleName, activity)
+            : null;
         const keyFailures: Array<{ idx: number; unknown: string[] }> = [];
         const remapNotes = new Set<string>();
         const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           if (!it.input) continue;
-          const keys = resolveInputKeys(fieldTypes, it.input as Record<string, unknown>);
+          const keys = resolveInputKeys(fieldTypes, it.input as Record<string, unknown>, labels);
           if (keys.unknown.length > 0) keyFailures.push({ idx: i, unknown: keys.unknown });
-          for (const r of keys.remapped) {
-            remapNotes.add(`Input key '${r.from}' matched field '${r.to}' — use exact field names.`);
-          }
+          for (const r of keys.remapped) remapNotes.add(labelKeyNote(r));
           const errs = validateInputShapesWith(fieldTypes, it.input as Record<string, unknown>);
           if (errs.length > 0) shapeFailures.push({ idx: i, fields: errs });
         }

@@ -781,23 +781,52 @@ function fieldKey(name: string): string {
 }
 
 export interface InputKeyResolution {
-  /** Near-miss keys (casing/spacing/underscores) rewritten in place to the exact field name. */
-  remapped: Array<{ from: string; to: string }>;
+  /**
+   * Keys rewritten in place to the exact field name: near-misses (casing/spacing/
+   * underscores), and — `via: "label"` — the name an activity's form shows for a
+   * field it relabels.
+   */
+  remapped: Array<{ from: string; to: string; via?: "label" }>;
   /** Keys matching no field at all — the platform silently drops these, losing the data. */
   unknown: string[];
 }
 
 /**
+ * The labels an activity's form gives the fields it relabels (SS06181), from a
+ * get_form response: `form: [{ "<field>": { type, label? } }]` → label key
+ * (case/space/underscore-insensitive) → field name. A label two fields share
+ * maps to null, so it is never used. Null when the response carries no form.
+ */
+export function activityLabels(formResponse: unknown): Map<string, string | null> | null {
+  const form = (formResponse as { form?: unknown } | null | undefined)?.form;
+  if (!Array.isArray(form)) return null;
+  const labels = new Map<string, string | null>();
+  for (const item of form) {
+    if (!item || typeof item !== "object") continue;
+    for (const [name, def] of Object.entries(item as Record<string, unknown>)) {
+      const label = (def as { label?: unknown } | null)?.label;
+      if (typeof label !== "string" || !label.trim()) continue;
+      const k = fieldKey(label);
+      labels.set(k, labels.has(k) && labels.get(k) !== name ? null : name);
+    }
+  }
+  return labels;
+}
+
+/**
  * Match input keys against the module's field names, in place. Exact names
- * pass; a key that differs only in case/spacing/underscores is rewritten to
- * the exact field name; anything else is reported so the caller can reject
- * it — the platform discards unmatched keys without any signal, which turns
- * a key typo into silent data loss. Fail-open on a null map (schema
- * unavailable): the server makes the final call.
+ * pass; a key that is the activity form's label for a field (`labels`, see
+ * activityLabels) or differs from a field name only in case/spacing/
+ * underscores is rewritten to the exact field name; anything else is reported
+ * so the caller can reject it — the platform discards unmatched keys without
+ * any signal, which turns a key typo into silent data loss. A key that is a
+ * label for one field and a near-miss of another is ambiguous and reported.
+ * Fail-open on a null map (schema unavailable): the server makes the final call.
  */
 export function resolveInputKeys(
   types: Map<string, string> | null,
   input: Record<string, unknown> | undefined | null,
+  labels?: Map<string, string | null> | null,
 ): InputKeyResolution {
   const result: InputKeyResolution = { remapped: [], unknown: [] };
   if (!input || !types) return result;
@@ -809,11 +838,14 @@ export function resolveInputKeys(
   }
   for (const key of Object.keys(input)) {
     if (types.has(key)) continue;
-    const match = byKey.get(fieldKey(key));
+    const labelled = labels?.get(fieldKey(key));
+    const nearMiss = byKey.get(fieldKey(key));
+    const viaLabel = !!labelled && types.has(labelled) && (!nearMiss || nearMiss === labelled);
+    const match = viaLabel ? labelled : labelled && nearMiss ? null : nearMiss;
     if (match && !Object.prototype.hasOwnProperty.call(input, match)) {
       input[match] = input[key];
       delete input[key];
-      result.remapped.push({ from: key, to: match });
+      result.remapped.push(viaLabel ? { from: key, to: match, via: "label" } : { from: key, to: match });
     } else {
       result.unknown.push(key);
     }

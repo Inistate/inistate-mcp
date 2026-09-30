@@ -494,11 +494,15 @@
           "description": "Form fields. Each item is an object keyed by field display name, containing field definition properties.",
           "items": {
             "type": "object",
-            "description": "Single field: { \"Field Name\": { type, required?, readOnly?, options?, module?, fields? } }",
+            "description": "Single field: { \"Field Name\": { type, label?, required?, readOnly?, options?, module?, fields? } }",
             "additionalProperties": {
               "type": "object",
               "properties": {
                 "type": { "$ref": "#/definitions/FieldType" },
+                "label": {
+                  "type": "string",
+                  "description": "The name this activity's form shows for the field, present only when the form relabels it (the designer's per-form label). The key stays the field's own name; submit_activity accepts either."
+                },
                 "required": { "type": "boolean" },
                 "readOnly": { "type": "boolean" },
                 "options": {

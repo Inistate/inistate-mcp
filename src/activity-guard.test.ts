@@ -9,6 +9,7 @@ import {
   getPriorFlag,
   recordFlagged,
   resolveInputKeys,
+  activityLabels,
   validateInputShapes,
   validateInputShapesWith,
   type RefShapeError,
@@ -674,6 +675,71 @@ describe("resolveInputKeys — unknown-key guard", () => {
   it("fails open on a null type map or empty input", () => {
     expect(resolveInputKeys(null, { Anything: 1 })).toEqual({ remapped: [], unknown: [] });
     expect(resolveInputKeys(types, undefined)).toEqual({ remapped: [], unknown: [] });
+  });
+});
+
+describe("activityLabels + resolveInputKeys — an activity's relabelled fields (SS06181)", () => {
+  const types = new Map([
+    ["info", "Text"],
+    ["detail", "Text"],
+    ["Due Date", "Date"],
+  ]);
+  // App02 ws 1947 "mcp cannot read label name": "Update detail" shows field info as "Text".
+  const form = { form: [{ info: { type: "Text", label: "Text" } }, { detail: { type: "Text" } }] };
+
+  it("reads label -> field from a get_form response", () => {
+    const labels = activityLabels(form)!;
+    expect([...labels.entries()]).toEqual([["text", "info"]]);
+    expect(activityLabels({})).toBeNull();
+    expect(activityLabels(null)).toBeNull();
+    expect(activityLabels({ form: [{ a: { type: "Text", label: "  " } }, { b: { label: false } }] })!.size).toBe(0);
+  });
+
+  it("never uses a label two fields share", () => {
+    const labels = activityLabels({ form: [{ a: { label: "Name" } }, { b: { label: "name" } }] })!;
+    expect(labels.get("name")).toBeNull();
+    const input: Record<string, unknown> = { Name: "x" };
+    expect(resolveInputKeys(new Map([["a", "Text"], ["b", "Text"]]), input, labels).unknown).toEqual(["Name"]);
+  });
+
+  it("maps a label key to the field it relabels, case-insensitively", () => {
+    const input: Record<string, unknown> = { Text: "hello", detail: "d" };
+    const res = resolveInputKeys(types, input, activityLabels(form));
+    expect(res.remapped).toEqual([{ from: "Text", to: "info", via: "label" }]);
+    expect(res.unknown).toEqual([]);
+    expect(input).toEqual({ info: "hello", detail: "d" });
+
+    const lower: Record<string, unknown> = { text: "hi" };
+    expect(resolveInputKeys(types, lower, activityLabels(form)).remapped).toEqual([{ from: "text", to: "info", via: "label" }]);
+  });
+
+  it("keeps an exact field name even when another field is labelled with it", () => {
+    // the form relabels info as "detail" while a real field is named detail
+    const labels = activityLabels({ form: [{ info: { label: "detail" } }, { detail: {} }] });
+    const input: Record<string, unknown> = { detail: "d" };
+    const res = resolveInputKeys(types, input, labels);
+    expect(res.remapped).toEqual([]);
+    expect(input).toEqual({ detail: "d" });
+  });
+
+  it("reports a key that is a label for one field and a near-miss of another", () => {
+    const labels = activityLabels({ form: [{ info: { label: "Due-Date" } }] });
+    const res = resolveInputKeys(types, { "due date": "x" }, labels);
+    expect(res.remapped).toEqual([]);
+    expect(res.unknown).toEqual(["due date"]);
+  });
+
+  it("does not overwrite the field when the input already carries it", () => {
+    const input: Record<string, unknown> = { info: "keep", Text: "dupe" };
+    const res = resolveInputKeys(types, input, activityLabels(form));
+    expect(res.unknown).toEqual(["Text"]);
+    expect(input.info).toBe("keep");
+  });
+
+  it("behaves as before without labels", () => {
+    const input: Record<string, unknown> = { Text: "x" };
+    expect(resolveInputKeys(types, input).unknown).toEqual(["Text"]);
+    expect(resolveInputKeys(types, { Text: "x" }, null).unknown).toEqual(["Text"]);
   });
 });
 

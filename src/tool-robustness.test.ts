@@ -65,6 +65,7 @@ let lastSubmitPayload: Record<string, unknown> | null = null;
 let lastBulkPayload: Record<string, unknown> | null = null;
 let lastCreatePayload: Record<string, unknown> | null = null;
 let lastUpdatePayload: Record<string, unknown> | null = null;
+const getFormCalls: Array<Record<string, unknown>> = [];
 
 class FakeBackend implements Backend {
   readonly kind = "cloud" as const;
@@ -166,7 +167,15 @@ class FakeBackend implements Backend {
   }
 
   async getEntry(): Promise<unknown> { return {}; }
-  async getForm(): Promise<unknown> { return {}; }
+  // SS06181: this form relabels Title as "Headline" (the designer's per-form label).
+  async getForm(params: Record<string, unknown>): Promise<unknown> {
+    getFormCalls.push({ module: params.module, activity: params.activity });
+    return {
+      module: "Projects",
+      activity: params.activity,
+      form: [{ Title: { type: "Text", label: "Headline" } }, { "Due Date": { type: "Date" } }],
+    };
+  }
 
   async submitActivity(payload: Record<string, unknown>): Promise<unknown> {
     lastSubmitPayload = payload;
@@ -389,6 +398,47 @@ describe("list_entries empty-result hints", () => {
 
 describe("submit_activity input key guard", () => {
   const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
+
+  // SS06181: the user sees the activity's label, not the field name.
+  it("accepts the activity form's label for a field it relabels, and says so", async () => {
+    getFormCalls.length = 0;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Headline: "x" }, ai },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.input).toEqual({ Title: "x" });
+    expect(getFormCalls).toEqual([{ module: "Projects", activity: "create" }]);
+    const res = parse(result);
+    expect(res.input_key_notes.join(" ")).toContain("'Headline' is this activity's label for field 'Title'");
+  });
+
+  it("does not fetch the form when every key is an exact field name", async () => {
+    getFormCalls.length = 0;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x" }, ai },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(getFormCalls).toEqual([]);
+  });
+
+  it("accepts the label in bulk, fetching the form once per batch", async () => {
+    getFormCalls.length = 0;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        ai,
+        items: [{ input: { Headline: "a" } }, { input: { headline: "b" } }, { input: { Title: "c" } }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const items = lastBulkPayload!.items as Array<{ input: Record<string, unknown> }>;
+    expect(items.map((it) => it.input)).toEqual([{ Title: "a" }, { Title: "b" }, { Title: "c" }]);
+    expect(getFormCalls.length).toBe(1);
+  });
 
   it("rejects input keys that match no field instead of dropping them silently", async () => {
     const result = await client.callTool({
