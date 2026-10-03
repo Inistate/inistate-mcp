@@ -57,7 +57,34 @@ class LinkedTransport {
 const WORKSPACES = [
   { id: 1138, name: "Inistate" },
   { id: 2234, name: "Test" },
+  { id: 4100, name: "Ledger" },
 ];
+
+// The /api/mcp/workspace/{id} mirror: modules pre-filtered, each with its full canvas states.
+const LEDGER_WORKSPACE = {
+  id: 4100,
+  name: "Ledger",
+  company: { name: "Acme", logo: null, phone: null },
+  modules: [
+    {
+      id: 520,
+      emoji: "🧾",
+      name: "Invoices",
+      states: [
+        { id: "s1", name: "Draft", color: "#cccccc", initial: true },
+        { id: "s2", name: "Posted", color: "#2a7b50", ai_hint: "Counted as a sale." },
+        {
+          id: "s3",
+          name: "Cancelled",
+          color: "#b33a3a",
+          ai_hint: "Voided - not a sale.",
+          ai_instruction: "Never report a Cancelled invoice as revenue.",
+        },
+      ],
+    },
+    { id: 521, emoji: "👥", name: "Customers", states: [] },
+  ],
+};
 
 const setWorkspaceCalls: string[] = [];
 const listWorkspaceSearches: Array<string | undefined> = [];
@@ -66,6 +93,7 @@ let lastBulkPayload: Record<string, unknown> | null = null;
 let lastCreatePayload: Record<string, unknown> | null = null;
 let lastUpdatePayload: Record<string, unknown> | null = null;
 const getFormCalls: Array<Record<string, unknown>> = [];
+let lastListParams: Record<string, unknown> | null = null;
 
 class FakeBackend implements Backend {
   readonly kind = "cloud" as const;
@@ -92,6 +120,7 @@ class FakeBackend implements Backend {
   }
 
   async getWorkspace(workspaceId: string): Promise<unknown> {
+    if (workspaceId === String(LEDGER_WORKSPACE.id)) return LEDGER_WORKSPACE;
     const ws = WORKSPACES.find((w) => String(w.id) === workspaceId);
     if (!ws) throw new Error("404 workspace not found");
     return { id: ws.id, name: ws.name, vectors: [{ name: "Projects", emoji: "📋", published: true }] };
@@ -155,6 +184,7 @@ class FakeBackend implements Backend {
   }
 
   async listEntries(params: { module: string }): Promise<unknown> {
+    lastListParams = params;
     const totalItems = params.module === "ProjectsWithData" ? 1 : 0;
     return {
       module: params.module,
@@ -259,6 +289,67 @@ describe("set_workspace robustness", () => {
     expect(res.error).toBe("workspace_not_found");
     expect(res.available).toEqual(WORKSPACES);
     expect(setWorkspaceCalls.length).toBe(before);
+  });
+
+  it("keeps each module's states with what the designer wrote for an AI, and nothing else", async () => {
+    const res = parse(await client.callTool({
+      name: "set_workspace",
+      arguments: { workspaceId: 4100 },
+    }));
+    expect(res.modules).toEqual([
+      {
+        name: "Invoices",
+        emoji: "🧾",
+        states: [
+          { name: "Draft" },
+          { name: "Posted", ai_hint: "Counted as a sale." },
+          {
+            name: "Cancelled",
+            ai_hint: "Voided - not a sale.",
+            ai_instruction: "Never report a Cancelled invoice as revenue.",
+          },
+        ],
+      },
+      { name: "Customers", emoji: "👥" },
+    ]);
+  });
+});
+
+// The platform's list (MCPController.PostList) puts entryId, documentId and state
+// in every item; the other system fields come only with the full row or when
+// named. The tool used to promise every system field regardless, so a model
+// passing `fields` trusted rows that had no state and totalled cancelled
+// invoices as sales.
+describe("list_entries — state in every item", () => {
+  it("describes the system fields the way the platform returns them", async () => {
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "list_entries")!;
+    const fieldsParam = (tool.inputSchema.properties as Record<string, { description?: string }>).fields;
+
+    expect(tool.description).not.toMatch(/System fields \(id, state, audit metadata, etc\.\) are always returned/);
+    expect(tool.description).toContain("Every item carries entryId, documentId and state whatever `fields` holds");
+    expect(tool.description).toContain("when `fields` is given only if it names them");
+    expect(fieldsParam.description).toContain("entryId, documentId and state are always returned");
+    expect(fieldsParam.description).not.toContain("System fields are always returned");
+  });
+
+  it("names state in a projection, so a server that predates state-in-every-item returns it too", async () => {
+    await client.callTool({
+      name: "list_entries",
+      arguments: { module: "Projects", fields: ["Title", "Due Date"] },
+    });
+    expect(lastListParams?.fields).toEqual(["Title", "Due Date", "state"]);
+  });
+
+  it("leaves a projection that names state, or no projection, as given", async () => {
+    await client.callTool({
+      name: "list_entries",
+      arguments: { module: "Projects", fields: ["Title", "State"] },
+    });
+    expect(lastListParams?.fields).toEqual(["Title", "State"]);
+
+    await client.callTool({ name: "list_entries", arguments: { module: "Projects" } });
+    expect(lastListParams?.fields).toBeUndefined();
   });
 });
 

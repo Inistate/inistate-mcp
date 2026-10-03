@@ -12,6 +12,11 @@ import { requestContext } from "./context.js";
  *     parameter) require `confirmed: true`.
  *  3. Activities whose `actor` is `human` are never executable by an AI agent.
  *  4. Activities whose `actor` is `hybrid` require `confirmed: true`.
+ *
+ * Rules 3 and 4 cover custom activities and the standard create/edit, whose
+ * actor a module can set (creating an ERP invoice is hybrid). The actor comes
+ * from the extended schema's activityDetails, which every reader can fetch;
+ * the canvas is the fallback for servers that list names only.
  */
 
 interface ActivityDef {
@@ -24,10 +29,13 @@ interface FieldInfo {
   type: string;
 }
 
-// The extended schema tier returns activities as plain strings (names only) —
-// the canvas is the source of actor data. Tolerate both shapes.
+// The extended schema tier lists activities as plain names, and beside them
+// activityDetails: one { name, actor, ai_hint?, … } per name, carrying the
+// actor the platform resolves for it. Servers before activityDetails send the
+// names only; the canvas is the source of actor data then. Tolerate both.
 interface ExtendedSchema {
   activities?: Array<ActivityDef | string>;
+  activityDetails?: ActivityDef[];
   information?: FieldInfo[];
   states?: Array<string | { name?: string }>;
   flows?: Record<string, { activities?: Record<string, string> }>;
@@ -41,11 +49,11 @@ const REF_FIELD_TYPES = new Set(["User", "Users", "Module", "Modules"]);
 
 const LOCATION_FIELD_TYPE = "Location";
 
-// Standard activities are inherent platform operations and have no actor in the
-// module schema. They bypass the actor check (but state-change checks still run).
-// The platform uses both names for the direct state change — availableActivities
-// lists "changeState" while forms and history say "changeStatus".
-const STANDARD_ACTIVITIES = new Set([
+// Standard activities are inherent platform operations. Most bypass the actor
+// check (state-change checks still run). The platform uses both names for the
+// direct state change — availableActivities lists "changeState" while forms
+// and history say "changeStatus".
+const STANDARD_ACTIVITIES = [
   "create",
   "edit",
   "delete",
@@ -55,7 +63,25 @@ const STANDARD_ACTIVITIES = new Set([
   "view",
   "changeStatus",
   "changeState",
-]);
+];
+
+// create and edit default to actor 'ai', so any other actor the schema reports
+// for them is one the module set on purpose — honoured like a custom activity's.
+const ACTOR_CHECKED_STANDARDS = new Set(["create", "edit"]);
+
+/** The standard activity a name stands for — the platform matches these ids case-insensitively. */
+function standardActivity(activity: string): string | null {
+  const lower = activity.toLowerCase();
+  return STANDARD_ACTIVITIES.find((s) => s.toLowerCase() === lower) ?? null;
+}
+
+/**
+ * An activity name as the platform resolves one: case-insensitive, spaces
+ * ignored. "post" runs Post, so it must meet Post's actor.
+ */
+function activityKey(name: string): string {
+  return name.toLowerCase().replace(/ /g, "");
+}
 
 interface SchemaCacheEntry {
   schema: ExtendedSchema;
@@ -160,23 +186,42 @@ async function getCanvasSchema(
   return canvas;
 }
 
+/** The first entry naming `activity` (as the platform resolves names) that carries an actor. */
+function findWithActor(
+  list: Array<ActivityDef | string> | undefined,
+  activity: string,
+): ActivityDef | null {
+  const key = activityKey(activity);
+  for (const a of list ?? []) {
+    if (a && typeof a === "object" && typeof a.name === "string" && activityKey(a.name) === key) {
+      return a.actor ? a : null;
+    }
+  }
+  return null;
+}
+
+/** The activity's actor as the extended schema reports it; null when it names none. */
+async function getReportedActivityDef(
+  moduleName: string,
+  activity: string,
+  fetchSchema: SchemaFetcher,
+): Promise<ActivityDef | null> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
+  return findWithActor(schema?.activityDetails, activity) ?? findWithActor(schema?.activities, activity);
+}
+
 async function getActivityDef(
   moduleName: string,
   activity: string,
   fetchSchema: SchemaFetcher = defaultSchemaFetcher,
   fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
 ): Promise<ActivityDef | null> {
-  const schema = await getExtendedSchema(moduleName, fetchSchema);
-  for (const a of schema?.activities ?? []) {
-    if (a && typeof a === "object" && a.name === activity) {
-      if (a.actor) return a;
-      break; // listed without actor info — consult the canvas
-    }
-  }
+  const reported = await getReportedActivityDef(moduleName, activity, fetchSchema);
+  if (reported) return reported;
+  // A server that lists names only — the canvas carries the actor (designers
+  // can read it; anyone else gets null, and the API decides).
   const canvas = await getCanvasSchema(moduleName, fetchCanvas);
-  return canvas?.activities?.find(
-    (a) => a && typeof a === "object" && a.name === activity,
-  ) ?? null;
+  return findWithActor(canvas?.activities, activity);
 }
 
 interface FlaggedRecord {
@@ -361,9 +406,11 @@ export async function evaluateActivity(
     }
   }
 
+  const standard = standardActivity(activity);
+
   // Rule 2a — `changeStatus` (alias `changeState`) is the explicit
   // state-change override.
-  if ((activity === "changeStatus" || activity === "changeState") && !confirmed) {
+  if ((standard === "changeStatus" || standard === "changeState") && !confirmed) {
     return {
       ok: false,
       structured: {
@@ -393,18 +440,25 @@ export async function evaluateActivity(
     };
   }
 
-  // Rules 3 & 4 apply to custom (workflow-defined) activities only.
-  if (STANDARD_ACTIVITIES.has(activity)) return { ok: true };
-
-  const def = await getActivityDef(moduleName, activity, fetchSchema, fetchCanvas);
-  if (!def) return { ok: true }; // unknown activity — let the API decide.
+  // Rules 3 & 4 apply to custom (workflow-defined) activities, and to standard
+  // create/edit through the actor the schema reports for them (only a server
+  // with activityDetails reports one; the canvas has no standard actors).
+  let def: ActivityDef | null;
+  if (standard) {
+    if (!ACTOR_CHECKED_STANDARDS.has(standard)) return { ok: true };
+    def = await getReportedActivityDef(moduleName, standard, fetchSchema);
+  } else {
+    def = await getActivityDef(moduleName, activity, fetchSchema, fetchCanvas);
+  }
+  if (!def) return { ok: true }; // unknown activity or no actor — let the API decide.
 
   const actor = (def.actor || "").toLowerCase();
 
   if (actor === "human") {
     // Remember which states this activity would have reached, so a follow-up
-    // changeState/state-override to the same state is caught (Rule 2c).
-    const targetStates = await activityTargetStates(moduleName, activity, fetchSchema);
+    // changeState/state-override to the same state is caught (Rule 2c). The
+    // flows map is keyed by the activity's own name, not the caller's spelling.
+    const targetStates = await activityTargetStates(moduleName, def.name, fetchSchema);
     if (targetStates.length > 0) {
       for (const target of targets) {
         if (target === undefined || target === null) continue;

@@ -564,11 +564,37 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     ? "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows — one tool turn instead of N. A per-item `ai` wholly replaces the top-level default (no partial merge). Items run sequentially fail-soft on the server: one failure does not abort the rest; per-item outcomes (success, entryId, flagged, validation details) return in `results` — use `clientRef` to correlate. Max 100 items; chunk beyond that. Guardrails match submit_activity at batch level: actor='human' rejects the whole batch; actor='hybrid', activity='changeStatus', or any state override (top-level or per-item) requires `confirmed: true`."
     : "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows. A per-item `ai` wholly replaces the top-level default. Items run sequentially fail-soft: one failure does not abort the rest; per-item outcomes return in `results` — use `clientRef` to correlate. Max 100 items per request. The local runtime applies no confidence/actor gating.";
   /**
+   * A module's states as an agent needs them on arrival: each name plus what
+   * the designer wrote for an AI about it (ai_hint, ai_instruction) — that a
+   * Cancelled entry is no sale, say, which a read that goes straight to
+   * list_entries would otherwise never learn. Ids and colors are dropped.
+   */
+  const slimStates = (raw: unknown): Array<Record<string, string>> | undefined => {
+    if (!Array.isArray(raw)) return undefined;
+    const states: Array<Record<string, string>> = [];
+    for (const s of raw) {
+      if (typeof s === "string") {
+        states.push({ name: s });
+        continue;
+      }
+      if (!s || typeof s !== "object" || typeof (s as Record<string, unknown>).name !== "string") continue;
+      const state = s as Record<string, unknown>;
+      const slim: Record<string, string> = { name: state.name as string };
+      for (const key of ["ai_hint", "ai_instruction"]) {
+        const text = state[key];
+        if (typeof text === "string" && text.trim()) slim[key] = text;
+      }
+      states.push(slim);
+    }
+    return states.length > 0 ? states : undefined;
+  };
+
+  /**
    * Slim a raw workspace payload to what an agent needs: identity + the module
-   * list (the platform's `vectors`). The raw object is ~24KB of UI state
-   * (menus, widgets, theme, users) — returning it cost ~6.8k tokens per
-   * session and still required a follow-up list_modules call. Pass through
-   * unknown shapes untouched so injected backends keep working.
+   * list (the platform's `vectors`) with each module's states. The raw object
+   * is ~24KB of UI state (menus, widgets, theme, users) — returning it cost
+   * ~6.8k tokens per session and still required a follow-up list_modules call.
+   * Pass through unknown shapes untouched so injected backends keep working.
    */
   const slimWorkspace = (workspaceId: string | number, data: unknown): unknown => {
     if (!data || typeof data !== "object") return data;
@@ -584,7 +610,10 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
         ? (ws.modules as Array<Record<string, unknown>>)
         : null;
     if (!source) return data;
-    const modules = source.map((v) => ({ name: v.name, emoji: v.emoji }));
+    const modules = source.map((v) => {
+      const states = slimStates(v.states);
+      return states ? { name: v.name, emoji: v.emoji, states } : { name: v.name, emoji: v.emoji };
+    });
     return {
       workspaceId: ws.id ?? workspaceId,
       name: ws.name,
@@ -743,7 +772,7 @@ Workflow sequences after workspace is set:
     {
       title: "Get Module Schema",
       description:
-        "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.\n\nBoth tiers include your accessible `listings`: each carries its designed filter in the SAME shape as list_entries' `filters` (applied automatically when that listing is queried — pick the listing whose conditions already match the question and do NOT re-add them as `filters`), plus partialFilter (an inexpressible formula/script condition also applies), profileOnly (rows limited to the current user's own entries) and scripted markers. Pass a listing's `name` as list_entries' `listing`.",
+        "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.\n\nWhat the module's designer wrote for an AI rides beside the name lists: `stateDetails` (both tiers) gives each state's ai_hint/ai_instruction — e.g. which states no longer count — and `activityDetails` (extended) gives each activity's `actor` (ai: you may submit it; hybrid: only after the user approves the planned submission; human: never — a person performs it), ai_hint/ai_instruction, confidence_threshold and `from` (the states it can be performed in). A top-level `ai_instruction` is the module's standing instruction — follow it.\n\nBoth tiers include your accessible `listings`: each carries its designed filter in the SAME shape as list_entries' `filters` (applied automatically when that listing is queried — pick the listing whose conditions already match the question and do NOT re-add them as `filters`), plus partialFilter (an inexpressible formula/script condition also applies), profileOnly (rows limited to the current user's own entries) and scripted markers. Pass a listing's `name` as list_entries' `listing`.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         tier: z
@@ -805,7 +834,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "List Entries",
       description:
-        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nAccess: non-admin users cannot query the unfiltered default 'Everything' view on modules that have listings — pass `listing` with one of their accessible listings (an access-denied response names them).\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. System fields (id, state, audit metadata, etc.) are always returned regardless.",
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nAccess: non-admin users cannot query the unfiltered default 'Everything' view on modules that have listings — pass `listing` with one of their accessible listings (an access-denied response names them).\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. Every item carries entryId, documentId and state whatever `fields` holds; the other system fields (date, createdBy, createdDate, updatedBy, updatedDate, assignees, due) come with the full row, but when `fields` is given only if it names them.\n\nCheck each item's `state` before totalling, counting or ranking entries: a Cancelled or Draft entry usually must not count. get_module_schema's stateDetails says what each state means.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         listing: z
@@ -825,7 +854,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .array(z.string())
           .optional()
           .describe(
-            "Field display names (or raw field names) to include in each entry's `data`. Strongly preferred over returning everything when the module has many or large fields — prunes both DB I/O and response tokens. Omit only when you actually need the full row. System fields are always returned.",
+            "Field display names (or raw field names) to include in each entry's `data`. Strongly preferred over returning everything when the module has many or large fields — prunes both DB I/O and response tokens. Omit only when you actually need the full row. entryId, documentId and state are always returned; name any other system field (date, createdBy, createdDate, updatedBy, updatedDate, assignees, due) here to get it.",
           ),
         workspaceId: wsParam,
       },
@@ -834,6 +863,16 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, listing, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
+        // A platform build that predates state-in-every-item drops `state` from a
+        // projected row unless it is named — and a row without its state passes a
+        // cancelled entry off as a live one. Name it, so the description holds on
+        // every server. (If every other name is a typo, the rows then come back with
+        // empty data rather than the server's full-row fallback; the fields hint
+        // below names the typos either way.)
+        const projection =
+          fields && fields.length > 0 && !fields.some((f) => f.toLowerCase() === "state")
+            ? [...fields, "state"]
+            : fields;
         const data = await backend.listEntries({
           module: moduleName,
           listing,
@@ -844,7 +883,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           sortDirection,
           currentPage,
           pageSize,
-          fields,
+          fields: projection,
         });
         // A typo'd state, sortBy, or fields entry matches nothing — an empty
         // page reads as "no data", a wrong sortBy silently returns unsorted
@@ -931,7 +970,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "Get Activity Form",
       description:
-        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask. A field may carry `label`: the name THIS activity's form shows for it (the designer relabelled it) — when the user names a field by that label, it means this field; key `input` by the field name (the label is accepted too).",
+        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask. A field may carry `label`: the name THIS activity's form shows for it (the designer relabelled it) — when the user names a field by that label, it means this field; key `input` by the field name (the label is accepted too). The response's `actor` says who may perform the activity: ai — submit it; hybrid — show the user what you plan to submit and get their explicit approval, then submit with confirmed: true; human — do not submit, a person performs it in Inistate. The response's ai_hint/ai_instruction are the designer's guidance for performing the activity; an `ai_hint` on a field or Table/List column says how to fill it.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         activity: z

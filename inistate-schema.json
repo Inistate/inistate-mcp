@@ -431,7 +431,7 @@
         },
         "state": {
           "type": "string",
-          "description": "Current state display name."
+          "description": "Current state display name. Every list_entries item carries it, whatever `fields` projects - check it before totalling entries (a Cancelled one rarely counts)."
         },
         "date": {
           "type": ["string", "null"],
@@ -494,7 +494,7 @@
           "description": "Form fields. Each item is an object keyed by field display name, containing field definition properties.",
           "items": {
             "type": "object",
-            "description": "Single field: { \"Field Name\": { type, label?, required?, readOnly?, options?, module?, fields? } }",
+            "description": "Single field: { \"Field Name\": { type, label?, required?, readOnly?, options?, module?, ai_hint?, fields? } }",
             "additionalProperties": {
               "type": "object",
               "properties": {
@@ -514,9 +514,13 @@
                   "type": "string",
                   "description": "Referenced module name for Module/User field types."
                 },
+                "ai_hint": {
+                  "type": "string",
+                  "description": "The designer's hint for filling this field (e.g. 'units, not boxes'). Present only when set."
+                },
                 "fields": {
                   "type": "array",
-                  "description": "Sub-fields for Table/List types. Same keyed-by-name structure.",
+                  "description": "Sub-fields for Table/List types. Same keyed-by-name structure, each column with its own ai_hint when set.",
                   "items": { "type": "object", "additionalProperties": true }
                 }
               }
@@ -543,6 +547,19 @@
           "minimum": 0,
           "maximum": 1,
           "description": "The activity's confidence threshold for AI-driven state transitions. Present only when the activity has a threshold configured (> 0). AI agents should compare their confidence against this value before submitting."
+        },
+        "actor": {
+          "type": "string",
+          "enum": ["ai", "hybrid", "human"],
+          "description": "Who may perform this activity. ai: submit it. hybrid: show the user the planned submission, get explicit approval, then submit with confirmed: true. human: do not submit - a person performs it in Inistate."
+        },
+        "ai_hint": {
+          "type": "string",
+          "description": "The designer's hint about this activity. Present only when set."
+        },
+        "ai_instruction": {
+          "type": "string",
+          "description": "The designer's instruction for an AI performing this activity - follow it. Present only when set."
         },
         "availableActivities": {
           "$ref": "#/definitions/AvailableActivities",

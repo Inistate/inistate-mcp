@@ -160,6 +160,131 @@ describe("evaluateActivity — actor resolution via canvas fallback", () => {
     });
     expect(result.ok).toBe(true);
   });
+
+  it("leaves standard create alone when the server reports no actor for it", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "create",
+      confidence: 0.9,
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+// The extended tier lists activities as names with activityDetails beside them,
+// carrying the actor the platform resolves for each — standard create/edit
+// included. Every reader can fetch it, so actors no longer hinge on the canvas,
+// which only designers may read (this caller's canvas request is refused).
+describe("evaluateActivity — actors reported in activityDetails", () => {
+  const DETAILED_TIER = {
+    activities: ["create", "edit", "Post", "Cancel", "Add Note"],
+    activityDetails: [
+      { name: "create", actor: "hybrid", ai_hint: "Creates the invoice in the ERP." },
+      { name: "edit", actor: "ai" },
+      { name: "Post", actor: "hybrid" },
+      { name: "Cancel", actor: "human" },
+      { name: "Add Note", actor: "ai" },
+    ],
+    flows: { Posted: { activities: { Cancel: "Cancelled" } } },
+  };
+  let canvasCalls = 0;
+
+  beforeEach(() => {
+    canvasCalls = 0;
+    vi.spyOn(api, "get").mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/configure/")) {
+        canvasCalls++;
+        throw new Error("403 Forbidden");
+      }
+      return DETAILED_TIER;
+    });
+  });
+
+  it("refuses a hybrid standard create without confirmed", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "create", confidence: 0.95 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.structured.error).toBe("hybrid_requires_confirmation");
+      expect(result.structured.actor).toBe("hybrid");
+    }
+  });
+
+  it("allows the hybrid create once the user has confirmed", async () => {
+    const result = await evaluateActivity({
+      module: "Invoices",
+      activity: "create",
+      confidence: 0.95,
+      confirmed: true,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("reads 'Create' as the standard create, as the platform does", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "Create", confidence: 0.95 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.structured.error).toBe("hybrid_requires_confirmation");
+  });
+
+  it("leaves edit at its default actor ungated", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "edit", entryId: 7, confidence: 0.9 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("keeps the other standard activities outside the actor check", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "delete", entryId: 7, confidence: 0.9 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("enforces custom actors without reading the canvas", async () => {
+    const hybrid = await evaluateActivity({ module: "Invoices", activity: "Post", entryId: 7, confidence: 0.9 });
+    const human = await evaluateActivity({
+      module: "Invoices",
+      activity: "Cancel",
+      entryId: 7,
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(hybrid.ok).toBe(false);
+    if (!hybrid.ok) expect(hybrid.structured.error).toBe("hybrid_requires_confirmation");
+    expect(human.ok).toBe(false);
+    if (!human.ok) expect(human.structured.error).toBe("human_actor_blocked");
+    expect(canvasCalls).toBe(0);
+  });
+
+  it("matches activity names the way the platform does: any casing, spaces ignored", async () => {
+    const post = await evaluateActivity({ module: "Invoices", activity: "post", entryId: 7, confidence: 0.9 });
+    const cancel = await evaluateActivity({
+      module: "Invoices",
+      activity: "CANCEL",
+      entryId: 7,
+      confidence: 0.9,
+      confirmed: true,
+    });
+    const note = await evaluateActivity({ module: "Invoices", activity: "addnote", entryId: 7, confidence: 0.9 });
+    expect(post.ok).toBe(false);
+    expect(cancel.ok).toBe(false);
+    expect(note.ok).toBe(true);
+  });
+
+  it("records the human block under the activity's own name, whatever the caller's spelling", async () => {
+    await evaluateActivity({ module: "Invoices", activity: "cancel", entryId: 7, confidence: 0.9 });
+    const bypass = await evaluateActivity({
+      module: "Invoices",
+      activity: "changeState",
+      entryId: 7,
+      state: "Cancelled",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(bypass.ok).toBe(false);
+    if (!bypass.ok) expect(bypass.structured.error).toBe("human_actor_bypass_blocked");
+  });
+
+  it("requires confirmation for the state change in any casing", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "changestatus", entryId: 7, confidence: 0.9 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.structured.error).toBe("state_change_requires_confirmation");
+  });
 });
 
 describe("evaluateActivity — target-state pre-flight", () => {

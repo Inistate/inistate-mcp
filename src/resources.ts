@@ -93,7 +93,9 @@ field telling you exactly what to do.
 3. **State change** — \`activity: "changeStatus"\` and any \`state\` override require \`confirmed: true\`. Do not initiate state changes on your own.
 4. **Confidence inflation** — after a \`flagged: true\` response, resubmitting the same \`(module, entryId, activity)\` with higher confidence is rejected. Surface the flag to the user; only retry with \`confirmed: true\` if they explicitly authorize.
 
-Standard activities (\`create\`, \`edit\`, \`delete\`, \`comment\`, \`duplicate\`, \`manage\`, \`view\`) skip the actor check but still trigger the state-change and confidence-inflation rules where applicable.
+Standard activities (\`delete\`, \`comment\`, \`duplicate\`, \`manage\`, \`view\`) skip the actor check but still trigger the state-change and confidence-inflation rules where applicable. \`create\` and \`edit\` meet rules 1 and 2 too when the module makes them hybrid or human (creating an invoice in an ERP, say).
+
+An activity's actor is the \`actor\` get_form returns, or its entry in get_module_schema (tier=extended) \`activityDetails\`.
 `,
         },
       ],
