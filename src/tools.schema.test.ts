@@ -106,6 +106,15 @@ describe("runtime tool schemas", () => {
     });
   });
 
+  // The one type assertion in this file: published without a JSON type, `input` was sent by
+  // models as a JSON-encoded string, which the server then refused and the agent had to retry.
+  it("submit_activity publishes input as an object and documents Table rows", () => {
+    const tool = tools.find((t) => t.name === "submit_activity")!;
+    const input = (tool.inputSchema as { properties: Record<string, { type?: string; description?: string }> }).properties.input;
+    expect(input.type).toBe("object");
+    expect(input.description).toContain("Table: an array of row objects");
+  });
+
   it("get_entry_history", () => {
     expect(shape(tools, "get_entry_history")).toEqual({
       props: ["entryId", "module", "page", "workspaceId"],

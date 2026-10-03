@@ -591,7 +591,7 @@
         "input": {
           "type": "object",
           "additionalProperties": true,
-          "description": "Field values keyed by display name. For File/Image fields, use FileFieldInput objects ({ name, path }). For Module fields, use ModuleFieldValue objects ({ value, id }). For User fields, use UserFieldValue objects ({ value, id, username }). Plural variants (Files/Images/Modules/Users) use arrays of these objects."
+          "description": "Field values keyed by display name, sent as an object (never a JSON-encoded string). For File/Image fields, use FileFieldInput objects ({ name, path }). For Module fields, use ModuleFieldValue objects ({ value, id }). For User fields, use UserFieldValue objects ({ value, id, username }). Plural variants (Files/Images/Modules/Users) use arrays of these objects. Table fields take an array of row objects keyed by sub-field name, e.g. [{ \"Item Code\": \"A-1\", \"Qty\": 2 }]. Number, Currency and Integer values are JSON numbers, never strings, including inside Table rows."
         },
         "state": {
           "type": "string",

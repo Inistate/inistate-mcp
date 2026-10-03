@@ -1130,6 +1130,25 @@ describe("reference id sanity", () => {
     expect(lastSubmitPayload).toBeNull();
   });
 
+  it("submit_activity names a JSON-encoded string input so the agent can resend the object", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: JSON.stringify({ Title: "x" }) as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    const res = parse(result);
+    expect(result.isError).toBe(true);
+    expect(res).not.toHaveProperty("code");
+    expect(res.error).toBe("invalid_input_shape");
+    expect(res.message).toContain("JSON-encoded string");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
   it("submit_activity still treats null input as simply absent", async () => {
     lastSubmitPayload = null;
     const result = await client.callTool({

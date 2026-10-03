@@ -133,6 +133,24 @@ const arrayish = (inner: z.ZodTypeAny) => z.preprocess(v => {
     .filter(x => x != null && typeof x === "object" && !Array.isArray(x));
 }, inner);
 
+// submit_activity.input is published as an object schema, but a non-object must still reach the
+// handler's invalid_input_shape refusal rather than fail as a Zod -32602. The preprocess wraps it
+// under a key no form field can have and the handler unwraps it. Runtime-only, like arrayish.
+const NON_OBJECT_INPUT = "\u0000nonObjectInput";
+const isNonObjectInput = (v: unknown): boolean =>
+  v !== undefined && (typeof v !== "object" || Array.isArray(v));
+const unwrapNonObjectInput = (v: Record<string, unknown> | undefined): unknown =>
+  v && Object.keys(v).length === 1 && NON_OBJECT_INPUT in v ? v[NON_OBJECT_INPUT] : v;
+const isJsonObjectString = (v: unknown): boolean => {
+  if (typeof v !== "string") return false;
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+};
+
 const repairItem = (raw: unknown): unknown => {
   if (typeof raw === "string") return raw.trim() ? { name: raw.trim() } : null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
@@ -1018,9 +1036,15 @@ Load resource inistate://schema before modifying to know valid field types, colo
         // Anything else that is not an object reaches the handler and is REFUSED there. It used to
         // be coerced to undefined, which meant a string or array of field values was dropped and the
         // activity submitted with nothing - on create, an empty entry, answered with success.
+        // The schema is advertised as an object: typed as unknown it carried no JSON type at all, and
+        // models then sent the whole input as a JSON-encoded string (Claude Haiku 4.5 did so in most
+        // runs). A non-object is wrapped so it still reaches the handler's refusal, not a Zod -32602.
         input: z
-          .preprocess(v => (v === null ? undefined : v), z.unknown().optional())
-          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. Location: {lat,lng,placeName} — lat/lng unquoted numbers, placeName the place's display name; never a combined \"lat,lng\" string. YesNo: true or false, never \"yes\". Text/MultilineText/Email: one string — join lines with \\n, never an array. User/Module/Location shapes and YesNo/text value types are validated pre-flight — bare ids, bare strings, wrong value types, or objects missing any required key will be rejected."),
+          .preprocess(
+            v => (v === null ? undefined : isNonObjectInput(v) ? { [NON_OBJECT_INPUT]: v } : v),
+            z.record(z.unknown()).optional(),
+          )
+          .describe("Field values keyed by display name, as an object (never a JSON-encoded string). File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. Location: {lat,lng,placeName} — lat/lng unquoted numbers, placeName the place's display name; never a combined \"lat,lng\" string. Table: an array of row objects keyed by sub-field name, e.g. [{\"Item Code\": \"A-1\", \"Qty\": 2}]. Number/Currency/Integer: JSON numbers, never strings, at the top level and inside Table rows. YesNo: true or false, never \"yes\". Text/MultilineText/Email: one string — join lines with \\n, never an array. User/Module/Location shapes and YesNo/text value types are validated pre-flight — bare ids, bare strings, wrong value types, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
         comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
@@ -1042,7 +1066,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       activity,
       entryId,
       entryIds,
-      input: rawInput,
+      input: wrappedInput,
       state,
       comment,
       assignees,
@@ -1060,10 +1084,13 @@ Load resource inistate://schema before modifying to know valid field types, colo
         // Field values must arrive as an object keyed by field name. Anything else - a string, a
         // number, an array - is refused rather than dropped: submitting the activity without it
         // would create an empty entry and report success, which is the worst possible answer.
+        const rawInput = unwrapNonObjectInput(wrappedInput);
         if (rawInput != null && (typeof rawInput !== "object" || Array.isArray(rawInput))) {
           const structured = {
             error: "invalid_input_shape",
-            message: `\`input\` must be an object keyed by field display name, but a ${Array.isArray(rawInput) ? "array" : typeof rawInput} was sent. Nothing was submitted.`,
+            message: isJsonObjectString(rawInput)
+              ? "`input` was sent as a JSON-encoded string. Send the object itself, { \"Field Name\": value, … }, not a string containing it. Nothing was submitted."
+              : `\`input\` must be an object keyed by field display name, but a ${Array.isArray(rawInput) ? "array" : typeof rawInput} was sent. Nothing was submitted.`,
             activity,
             agent_action:
               "Call get_form for this module and activity, then pass `input` as { \"Field Name\": value, … }. A list of values belongs in submit_activities.items, one object per entry.",
@@ -1261,7 +1288,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
               input: z
                 .record(z.unknown())
                 .optional()
-                .describe("Field values keyed by display name. Same shape as submit_activity.input."),
+                .describe("Field values keyed by display name. Same shape as submit_activity.input: Table values are arrays of row objects, numbers are JSON numbers."),
               state: z.string().optional().describe("Per-item target state name"),
               comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
               assignees: z.array(z.string()).optional(),
