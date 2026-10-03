@@ -83,6 +83,14 @@ const LEDGER_WORKSPACE = {
       ],
     },
     { id: 521, emoji: "👥", name: "Customers", states: [] },
+    {
+      id: 522,
+      emoji: "💵",
+      name: "Customer Deposits",
+      description: "  Money a customer pays before an order ships.  ",
+      links: ["Customers", "", 7, "Payment Methods"],
+      states: [],
+    },
   ],
 };
 
@@ -311,7 +319,25 @@ describe("set_workspace robustness", () => {
         ],
       },
       { name: "Customers", emoji: "👥" },
+      {
+        name: "Customer Deposits",
+        emoji: "💵",
+        description: "Money a customer pays before an order ships.",
+        links: ["Customers", "Payment Methods"],
+      },
     ]);
+  });
+
+  // Look-alike modules (AR vs AP deposits, goods vs purchase returns) are told apart by what
+  // they link to. The hint says so only when the API sent anything to tell them apart by.
+  it("passes each module's description and links through, and says what they are for", async () => {
+    const res = parse(await client.callTool({
+      name: "set_workspace",
+      arguments: { workspaceId: 4100 },
+    }));
+    const deposits = res.modules.find((m: { name: string }) => m.name === "Customer Deposits");
+    expect(deposits.links).toEqual(["Customers", "Payment Methods"]);
+    expect(res.hint).toContain("description and links say which is which");
   });
 });
 

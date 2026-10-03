@@ -608,6 +608,24 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
   };
 
   /**
+   * What tells look-alike modules apart before any form is opened: the designer's one-line
+   * description, and the modules this one links to (an AR deposit links to Debtor, an AP deposit
+   * to Creditor). From bare names, Claude Haiku 4.5 filed the wrong look-alike in 4 of 27 benchmark
+   * runs; with links listed, in 1. Passed through when the API sends them, absent otherwise.
+   */
+  const aboutModule = (v: Record<string, unknown>): Record<string, unknown> => {
+    const about: Record<string, unknown> = {};
+    if (typeof v.description === "string" && v.description.trim()) {
+      about.description = v.description.trim().slice(0, 200);
+    }
+    if (Array.isArray(v.links)) {
+      const links = v.links.filter((l): l is string => typeof l === "string" && l.trim() !== "");
+      if (links.length > 0) about.links = links.slice(0, 12);
+    }
+    return about;
+  };
+
+  /**
    * Slim a raw workspace payload to what an agent needs: identity + the module
    * list (the platform's `vectors`) with each module's states. The raw object
    * is ~24KB of UI state (menus, widgets, theme, users) — returning it cost
@@ -630,13 +648,16 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     if (!source) return data;
     const modules = source.map((v) => {
       const states = slimStates(v.states);
-      return states ? { name: v.name, emoji: v.emoji, states } : { name: v.name, emoji: v.emoji };
+      return { name: v.name, emoji: v.emoji, ...aboutModule(v), ...(states ? { states } : {}) };
     });
+    const described = modules.some((m) => "description" in m || "links" in m);
     return {
       workspaceId: ws.id ?? workspaceId,
       name: ws.name,
       modules,
-      hint: "Modules are listed above — no list_modules call needed.",
+      hint: described
+        ? "Modules are listed above — no list_modules call needed. Where names look alike, a module's description and links say which is which."
+        : "Modules are listed above — no list_modules call needed.",
     };
   };
 
