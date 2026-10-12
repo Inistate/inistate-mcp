@@ -132,36 +132,66 @@ async function handleResponse(res: Response): Promise<unknown> {
     throw Object.assign(new Error(String(error.message)), { structured: error });
   }
   if (!text) return null;
-  const data = JSON.parse(text);
+  return fitListPage(JSON.parse(text));
+}
 
-  // §14.8 — truncate large list responses to avoid blowing up agent context.
-  // Size-aware: keep as many items as fit the byte budget (a fixed item count
-  // either overshoots for wide rows or wastes refetches for narrow ones).
-  const TRUNCATE_BUDGET = 30_000;
-  if (
-    text.length > TRUNCATE_BUDGET &&
-    data &&
-    typeof data === "object" &&
-    Array.isArray(data.list) &&
-    data.list.length > 1
-  ) {
-    const items: unknown[] = data.list;
-    const overhead = text.length - JSON.stringify(items).length;
-    const budget = Math.max(TRUNCATE_BUDGET - overhead, 2_000);
-    let size = 2;
-    let keep = 0;
-    for (const item of items) {
-      const itemLen = JSON.stringify(item).length + 1;
-      if (keep > 0 && size + itemLen > budget) break;
-      size += itemLen;
-      keep++;
-    }
-    if (keep < items.length) {
-      data.list = items.slice(0, keep);
-      data._truncated = true;
-      data._truncated_message = `Response truncated to ${keep} of ${items.length} items on this page (~30KB cap; ${data.totalItems ?? "unknown"} total). Narrow the payload with the fields parameter (biggest saving) or filters, and paginate with currentPage/pageSize.`;
-    }
+/** What a tool result may weigh, as the compact JSON the tools send (tools.ts `ok`). */
+export const TRUNCATE_BUDGET = 30_000;
+
+/**
+ * §14.8 — truncate large list responses to avoid blowing up agent context.
+ * Size-aware: keep as many items as fit the byte budget (a fixed item count
+ * either overshoots for wide rows or wastes refetches for narrow ones).
+ *
+ * Measured on the compact JSON the tool sends, never on the platform's body:
+ * that one is indented, and its whitespace used to be charged to the budget as
+ * "overhead", so a page of wide rows fell to the floor and returned 4 rows of
+ * 154 (SS06283).
+ *
+ * A cut page must not read as a complete one. The platform works `hasMore` out
+ * from the page number alone, so it says false for a page that held everything;
+ * here it becomes true, and `_next` names the call that reads on without a gap:
+ * the same listing with a page size that fits, on the page that starts at or
+ * just before the first row left out. (Asking for the next page with the SAME
+ * page size would skip every row that was cut.)
+ */
+export function fitListPage<T>(data: T, budget: number = TRUNCATE_BUDGET): T {
+  const page = data as unknown as Record<string, unknown> | null;
+  if (!page || typeof page !== "object" || !Array.isArray(page.list) || page.list.length <= 1) return data;
+
+  const items: unknown[] = page.list;
+  if (JSON.stringify(page).length <= budget) return data;
+
+  // Everything but the rows: the wrapper the rows travel in.
+  const overhead = JSON.stringify({ ...page, list: [] }).length;
+  const room = Math.max(budget - overhead, 2_000);
+  let size = 0;
+  let keep = 0;
+  for (const item of items) {
+    const itemLen = JSON.stringify(item).length + 1;
+    if (keep > 0 && size + itemLen > room) break;
+    size += itemLen;
+    keep++;
   }
+  if (keep >= items.length) return data;
+
+  page.list = items.slice(0, keep);
+  page.hasMore = true;
+  page._truncated = true;
+  page._returned = keep;
+
+  const pageNumber = Number(page.page ?? page.currentPage);
+  const pageSize = Number(page.pageSize);
+  let readOn = "call again with a smaller pageSize from currentPage 0";
+  if (Number.isInteger(pageNumber) && pageNumber >= 0 && Number.isInteger(pageSize) && pageSize > 0) {
+    const next = { pageSize: keep, currentPage: Math.floor((pageNumber * pageSize + keep) / keep) };
+    page._next = next;
+    readOn = `call again with pageSize ${next.pageSize} and currentPage ${next.currentPage}`;
+  }
+  page._truncated_message =
+    `Only ${keep} of the ${items.length} rows on this page are here (~30KB cap; ${page.totalItems ?? "unknown"} total), so hasMore is true. `
+    + `To read on without skipping rows, ${readOn} (the same pageSize on the next page would skip the rows left out). `
+    + "Or make the rows smaller with the fields parameter (biggest saving), or fewer with filters.";
 
   return data;
 }
