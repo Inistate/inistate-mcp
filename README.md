@@ -156,65 +156,75 @@ npm run watch          # Watch mode for TypeScript compilation
 npm run inspector      # Test with MCP Inspector
 ```
 
-### MCP Setup
-1. Setup
+### Branches
+
+- `main` is the development branch. Feature and fix work lands here.
+- `production` is the publishing branch. It only receives release merges.
+
+### Packaging & Versioning
+
+Every change that should ship needs a changeset:
+
+```bash
+# After coding, on a feature branch merged into main
+npx changeset
+
+# Choose the bump (patch / minor / major) and describe the change
+```
+
+### Releasing
+
+Releases run from `main`. A release is a `v*` tag on `production`; pushing the tag
+runs the **Publish** GitHub Actions workflow (`.github/workflows/publish.yml`), which
+publishes to npm and the MCP registry.
+
+```bash
+npm run release              # full release
+npm run release -- --no-push # do everything locally, push nothing
+```
+
+This does:
+
+1. Checks you are on an up-to-date `main` with a pending changeset
+2. Runs tests and the build
+3. Bumps the version, updates the changelog and syncs `server.json`
+4. Commits `Release vX.Y.Z` on `main`, merges `main` into `production` and tags `vX.Y.Z`
+5. Pushes `main`, `production` and the tag
+
+The workflow fails if the tag, `package.json` and `server.json` versions disagree, or if
+the tagged commit is not on `production`. It skips the npm publish when that version is
+already on npm.
+
+Setup the workflow relies on (one time):
+
+- npm: add a **Trusted Publisher** for this package (GitHub Actions, repo `Inistate/inistate-mcp`, workflow `publish.yml`)
+- MCP registry: the workflow logs in with GitHub OIDC, so no personal login is needed
+
+#### Publishing manually (fallback)
+
+Only if the workflow is unavailable. Install `mcp-publisher`:
+
 ```bash
 curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher && sudo mv mcp-publisher /usr/local/bin/
 ```
 
-or
-
 ```powershell
 $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq "Arm64") { "arm64" } else { "amd64" }; Invoke-WebRequest -Uri "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_windows_$arch.tar.gz" -OutFile "mcp-publisher.tar.gz"; tar xf mcp-publisher.tar.gz mcp-publisher.exe; rm mcp-publisher.tar.gz
-
 ```
 
-2. Verify
-```
-mcp-publisher --help
-```
+Then, from the released commit:
 
-3. Authenticate
-```
-mcp-publisher login github
-```
-
-4. Publish: see below
-
-### Packaging & Versioning
 ```bash
-# Example adding new feature
-git checkout -b feat/add-user-tool
-
-
-# After coding
-npx changeset
-
-# Choose:
-# 
-# minor
-# Added new user search tool
-
-# Release — see it first, then do it
-npm run release:dry   # runs every check, publishes nothing
-npm run release
-
-# `npm run release` does, in this order:
-#   refuse to start from a dirty working tree, or with no changesets to release
-#   npm ci (exactly the lockfile) -> build -> test
-#   changeset version: bump + changelog + sync server.json, then check the two agree
-#   git commit + tag v<version>
-#   npm publish                      <- the first irreversible step
-#   confirm npm really serves that version
-#   mcp-publisher validate / login / publish
-#   git push --follow-tags
-#
-# The npm-before-registry order is the point, not a preference: server.json names an npm package AND
-# version, so a registry entry published first tells every client to install something that 404s.
-# The registry step refuses to run until `npm view` confirms the version is live.
-#
-# npm run release:npm   publishes to npm and stops (no registry)
+npm publish
+mcp-publisher validate
+mcp-publisher login github   # needs a public Inistate org membership
+mcp-publisher publish
 ```
+
+## Deployment
+
+Deployment is done by hand; there is no CI deploy. After a release, update the server
+(see PM2 below): pull `production`, `npm ci`, `npm run build`, then `npm run pm2:restart`.
 
 ## PM2 (Ubuntu/AWS)
 
