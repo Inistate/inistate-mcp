@@ -83,3 +83,28 @@ jobs:
       - run: ./mcp-publisher validate
       - run: ./mcp-publisher login github-oidc
       - run: ./mcp-publisher publish
+
+  github-release:
+    needs: mcp-registry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the GitHub Release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, skipping"
+            exit 0
+          fi
+          awk -v v="$VERSION" '$0=="## "v{f=1;next} /^## /{f=0} f' CHANGELOG.md | sed '/./,$!d' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --latest
