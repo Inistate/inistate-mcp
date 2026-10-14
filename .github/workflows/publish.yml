@@ -63,6 +63,23 @@ jobs:
         run: |
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
 
+      # The registry checks that the npm version exists, and npm can take a while to serve a version
+      # it has just accepted. Wait for it instead of failing the job.
+      - name: Wait for the version on npm
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "https://registry.npmjs.org/$NAME/$VERSION"; then
+              echo "$NAME@$VERSION is on npm"
+              exit 0
+            fi
+            echo "attempt $i: $NAME@$VERSION not on npm yet, waiting 10s"
+            sleep 10
+          done
+          echo "$NAME@$VERSION did not appear on npm within 5 minutes"
+          exit 1
+
       - run: ./mcp-publisher validate
       - run: ./mcp-publisher login github-oidc
       - run: ./mcp-publisher publish
