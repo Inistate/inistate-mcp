@@ -3,13 +3,16 @@ import * as api from "./api.js";
 import {
   __resetGuardCaches,
   clearFlagged,
+  describeShapeErrors,
   evaluateActivity,
   getModuleFieldTypes,
   getPriorFlag,
   recordFlagged,
   resolveInputKeys,
+  activityLabels,
   validateInputShapes,
   validateInputShapesWith,
+  type RefShapeError,
 } from "./activity-guard.js";
 
 const SCHEMA = {
@@ -156,6 +159,131 @@ describe("evaluateActivity — actor resolution via canvas fallback", () => {
       confidence: 0.9,
     });
     expect(result.ok).toBe(true);
+  });
+
+  it("leaves standard create alone when the server reports no actor for it", async () => {
+    const result = await evaluateActivity({
+      module: "Leave",
+      activity: "create",
+      confidence: 0.9,
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+// The extended tier lists activities as names with activityDetails beside them,
+// carrying the actor the platform resolves for each — standard create/edit
+// included. Every reader can fetch it, so actors no longer hinge on the canvas,
+// which only designers may read (this caller's canvas request is refused).
+describe("evaluateActivity — actors reported in activityDetails", () => {
+  const DETAILED_TIER = {
+    activities: ["create", "edit", "Post", "Cancel", "Add Note"],
+    activityDetails: [
+      { name: "create", actor: "hybrid", ai_hint: "Creates the invoice in the ERP." },
+      { name: "edit", actor: "ai" },
+      { name: "Post", actor: "hybrid" },
+      { name: "Cancel", actor: "human" },
+      { name: "Add Note", actor: "ai" },
+    ],
+    flows: { Posted: { activities: { Cancel: "Cancelled" } } },
+  };
+  let canvasCalls = 0;
+
+  beforeEach(() => {
+    canvasCalls = 0;
+    vi.spyOn(api, "get").mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/configure/")) {
+        canvasCalls++;
+        throw new Error("403 Forbidden");
+      }
+      return DETAILED_TIER;
+    });
+  });
+
+  it("refuses a hybrid standard create without confirmed", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "create", confidence: 0.95 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.structured.error).toBe("hybrid_requires_confirmation");
+      expect(result.structured.actor).toBe("hybrid");
+    }
+  });
+
+  it("allows the hybrid create once the user has confirmed", async () => {
+    const result = await evaluateActivity({
+      module: "Invoices",
+      activity: "create",
+      confidence: 0.95,
+      confirmed: true,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("reads 'Create' as the standard create, as the platform does", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "Create", confidence: 0.95 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.structured.error).toBe("hybrid_requires_confirmation");
+  });
+
+  it("leaves edit at its default actor ungated", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "edit", entryId: 7, confidence: 0.9 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("keeps the other standard activities outside the actor check", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "delete", entryId: 7, confidence: 0.9 });
+    expect(result.ok).toBe(true);
+  });
+
+  it("enforces custom actors without reading the canvas", async () => {
+    const hybrid = await evaluateActivity({ module: "Invoices", activity: "Post", entryId: 7, confidence: 0.9 });
+    const human = await evaluateActivity({
+      module: "Invoices",
+      activity: "Cancel",
+      entryId: 7,
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(hybrid.ok).toBe(false);
+    if (!hybrid.ok) expect(hybrid.structured.error).toBe("hybrid_requires_confirmation");
+    expect(human.ok).toBe(false);
+    if (!human.ok) expect(human.structured.error).toBe("human_actor_blocked");
+    expect(canvasCalls).toBe(0);
+  });
+
+  it("matches activity names the way the platform does: any casing, spaces ignored", async () => {
+    const post = await evaluateActivity({ module: "Invoices", activity: "post", entryId: 7, confidence: 0.9 });
+    const cancel = await evaluateActivity({
+      module: "Invoices",
+      activity: "CANCEL",
+      entryId: 7,
+      confidence: 0.9,
+      confirmed: true,
+    });
+    const note = await evaluateActivity({ module: "Invoices", activity: "addnote", entryId: 7, confidence: 0.9 });
+    expect(post.ok).toBe(false);
+    expect(cancel.ok).toBe(false);
+    expect(note.ok).toBe(true);
+  });
+
+  it("records the human block under the activity's own name, whatever the caller's spelling", async () => {
+    await evaluateActivity({ module: "Invoices", activity: "cancel", entryId: 7, confidence: 0.9 });
+    const bypass = await evaluateActivity({
+      module: "Invoices",
+      activity: "changeState",
+      entryId: 7,
+      state: "Cancelled",
+      confidence: 0.9,
+      confirmed: true,
+    });
+    expect(bypass.ok).toBe(false);
+    if (!bypass.ok) expect(bypass.structured.error).toBe("human_actor_bypass_blocked");
+  });
+
+  it("requires confirmation for the state change in any casing", async () => {
+    const result = await evaluateActivity({ module: "Invoices", activity: "changestatus", entryId: 7, confidence: 0.9 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.structured.error).toBe("state_change_requires_confirmation");
   });
 });
 
@@ -675,6 +803,71 @@ describe("resolveInputKeys — unknown-key guard", () => {
   });
 });
 
+describe("activityLabels + resolveInputKeys — an activity's relabelled fields (SS06181)", () => {
+  const types = new Map([
+    ["info", "Text"],
+    ["detail", "Text"],
+    ["Due Date", "Date"],
+  ]);
+  // App02 ws 1947 "mcp cannot read label name": "Update detail" shows field info as "Text".
+  const form = { form: [{ info: { type: "Text", label: "Text" } }, { detail: { type: "Text" } }] };
+
+  it("reads label -> field from a get_form response", () => {
+    const labels = activityLabels(form)!;
+    expect([...labels.entries()]).toEqual([["text", "info"]]);
+    expect(activityLabels({})).toBeNull();
+    expect(activityLabels(null)).toBeNull();
+    expect(activityLabels({ form: [{ a: { type: "Text", label: "  " } }, { b: { label: false } }] })!.size).toBe(0);
+  });
+
+  it("never uses a label two fields share", () => {
+    const labels = activityLabels({ form: [{ a: { label: "Name" } }, { b: { label: "name" } }] })!;
+    expect(labels.get("name")).toBeNull();
+    const input: Record<string, unknown> = { Name: "x" };
+    expect(resolveInputKeys(new Map([["a", "Text"], ["b", "Text"]]), input, labels).unknown).toEqual(["Name"]);
+  });
+
+  it("maps a label key to the field it relabels, case-insensitively", () => {
+    const input: Record<string, unknown> = { Text: "hello", detail: "d" };
+    const res = resolveInputKeys(types, input, activityLabels(form));
+    expect(res.remapped).toEqual([{ from: "Text", to: "info", via: "label" }]);
+    expect(res.unknown).toEqual([]);
+    expect(input).toEqual({ info: "hello", detail: "d" });
+
+    const lower: Record<string, unknown> = { text: "hi" };
+    expect(resolveInputKeys(types, lower, activityLabels(form)).remapped).toEqual([{ from: "text", to: "info", via: "label" }]);
+  });
+
+  it("keeps an exact field name even when another field is labelled with it", () => {
+    // the form relabels info as "detail" while a real field is named detail
+    const labels = activityLabels({ form: [{ info: { label: "detail" } }, { detail: {} }] });
+    const input: Record<string, unknown> = { detail: "d" };
+    const res = resolveInputKeys(types, input, labels);
+    expect(res.remapped).toEqual([]);
+    expect(input).toEqual({ detail: "d" });
+  });
+
+  it("reports a key that is a label for one field and a near-miss of another", () => {
+    const labels = activityLabels({ form: [{ info: { label: "Due-Date" } }] });
+    const res = resolveInputKeys(types, { "due date": "x" }, labels);
+    expect(res.remapped).toEqual([]);
+    expect(res.unknown).toEqual(["due date"]);
+  });
+
+  it("does not overwrite the field when the input already carries it", () => {
+    const input: Record<string, unknown> = { info: "keep", Text: "dupe" };
+    const res = resolveInputKeys(types, input, activityLabels(form));
+    expect(res.unknown).toEqual(["Text"]);
+    expect(input.info).toBe("keep");
+  });
+
+  it("behaves as before without labels", () => {
+    const input: Record<string, unknown> = { Text: "x" };
+    expect(resolveInputKeys(types, input).unknown).toEqual(["Text"]);
+    expect(resolveInputKeys(types, { Text: "x" }, null).unknown).toEqual(["Text"]);
+  });
+});
+
 describe("getPriorFlag (used by submit_activities per-item check)", () => {
   it("returns the recorded confidence for a flagged entry", () => {
     recordFlagged("Leave", 42, "AutoTriage", 0.45);
@@ -690,5 +883,251 @@ describe("getPriorFlag (used by submit_activities per-item check)", () => {
     recordFlagged("Leave", 42, "AutoTriage", 0.45);
     clearFlagged("Leave", 42, "AutoTriage");
     expect(getPriorFlag("Leave", 42, "AutoTriage")).toBeUndefined();
+  });
+});
+
+describe("validateInputShapes — Location pre-flight (SS06091)", () => {
+  const SCHEMA_WITH_LOCATION = {
+    activities: [],
+    information: [
+      { name: "Title", type: "Text" },
+      { name: "Location", type: "Location" },
+      { name: "Assignee", type: "User" },
+    ],
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_LOCATION);
+  });
+
+  const loc = (v: unknown) => validateInputShapes("Ticket", { Location: v });
+
+  it("accepts the canonical { lat, lng, placeName } object", async () => {
+    expect(
+      await loc({ lat: 1.5329204, lng: 103.7995367, placeName: "Taman Universiti" }),
+    ).toEqual([]);
+  });
+
+  it("accepts the read-path { value: {...} } envelope so a round-trip passes", async () => {
+    expect(
+      await loc({ value: { lat: 1.53, lng: 103.79, placeName: "Skudai" } }),
+    ).toEqual([]);
+  });
+
+  it("accepts coordinates without a place name", async () => {
+    expect(await loc({ lat: 1.53, lng: 103.79 })).toEqual([]);
+  });
+
+  it("accepts a place name without coordinates", async () => {
+    expect(await loc({ placeName: "Kuala Lumpur" })).toEqual([]);
+  });
+
+  it("accepts negative and zero coordinates", async () => {
+    expect(await loc({ lat: 0, lng: -103.79, placeName: "Null Island-ish" })).toEqual([]);
+  });
+
+  // The exact payload from SS06091: the model mirrored the read envelope but
+  // flattened the object into one "lat,lng" string.
+  it("rejects the reported { value: 'lat,lng' } string payload", async () => {
+    const errs = await loc({ value: "1.5329204,103.7995367" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Location");
+    expect(errs[0].type).toBe("Location");
+    expect(errs[0].message).toMatch(/lat/);
+    expect(errs[0].message).toMatch(/placeName/);
+  });
+
+  it("rejects a bare 'lat,lng' string", async () => {
+    const errs = await loc("1.5329204,103.7995367");
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/must be an object/);
+  });
+
+  it("rejects quoted (string) coordinates", async () => {
+    const errs = await loc({ lat: "1.53", lng: "103.79", placeName: "Skudai" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/must be a number/);
+  });
+
+  it("rejects lat without lng", async () => {
+    const errs = await loc({ lat: 1.53, placeName: "Skudai" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/together/);
+  });
+
+  it("rejects out-of-range coordinates (swapped lat/lng)", async () => {
+    const errs = await loc({ lat: 103.79, lng: 1.53, placeName: "Swapped" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/out of range/);
+  });
+
+  it("rejects an array", async () => {
+    expect((await loc([1.53, 103.79])).length).toBe(1);
+  });
+
+  it("rejects an object carrying no location at all", async () => {
+    const errs = await loc({ placeName: "   " });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/no location/);
+  });
+
+  it("rejects a non-string placeName", async () => {
+    const errs = await loc({ lat: 1.53, lng: 103.79, placeName: 12345 });
+    expect(errs.length).toBe(1);
+    expect(errs[0].message).toMatch(/placeName/);
+  });
+
+  it("allows null and an empty envelope to clear the field", async () => {
+    expect(await loc(null)).toEqual([]);
+    expect(await loc({ value: null })).toEqual([]);
+  });
+
+  it("tolerates extra keys alongside a valid location", async () => {
+    expect(
+      await loc({ lat: 1.53, lng: 103.79, placeName: "Skudai", address: "extra" }),
+    ).toEqual([]);
+  });
+
+  it("reports Location and reference failures together", async () => {
+    const errs = await validateInputShapes("Ticket", {
+      Location: "1.53,103.79",
+      Assignee: 42,
+    });
+    expect(errs.length).toBe(2);
+    expect(errs.map((e) => e.type).sort()).toEqual(["Location", "User"]);
+  });
+});
+
+describe("validateInputShapes — YesNo / text value types (SS06108, SS06110)", () => {
+  const SCHEMA_WITH_SCALARS = {
+    activities: [],
+    information: [
+      { name: "Name", type: "Text" },
+      { name: "Attended", type: "YesNo" },
+      { name: "Inistate Application", type: "MultilineText" },
+      { name: "Contact", type: "Email" },
+      { name: "Headcount", type: "Integer" },
+      { name: "Assignee", type: "User" },
+    ],
+  };
+
+  beforeEach(() => {
+    __resetGuardCaches();
+    vi.spyOn(api, "get").mockImplementation(async () => SCHEMA_WITH_SCALARS);
+  });
+
+  const check = (input: Record<string, unknown>) => validateInputShapes("Growth", input);
+
+  // SS06110: MCP00007 on App02 was created with Attended: "yes".
+  it("rejects the reported YesNo string \"yes\"", async () => {
+    const errs = await check({ Name: "Charlie", Attended: "yes" });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Attended");
+    expect(errs[0].type).toBe("YesNo");
+    expect(errs[0].received).toBe("yes");
+    expect(errs[0].message).toMatch(/must be a boolean/);
+  });
+
+  it("rejects other stand-ins for a boolean", async () => {
+    for (const v of ["true", "no", 1, 0, ["yes"], { value: true }]) {
+      const errs = await check({ Attended: v });
+      expect(errs.length, `Attended: ${JSON.stringify(v)}`).toBe(1);
+    }
+  });
+
+  it("accepts true and false", async () => {
+    expect(await check({ Attended: true })).toEqual([]);
+    expect(await check({ Attended: false })).toEqual([]);
+  });
+
+  // SS06108: GTM00002 on App02 was created with both MultilineText fields as arrays.
+  it("rejects the reported MultilineText array and says how to keep the lines", async () => {
+    const errs = await check({
+      "Inistate Application": [
+        "Create concise onboarding and re-engagement emails ...",
+        "Use behavior-triggered nudges rather than generic newsletters where possible.",
+      ],
+    });
+    expect(errs.length).toBe(1);
+    expect(errs[0].field).toBe("Inistate Application");
+    expect(errs[0].type).toBe("MultilineText");
+    expect(errs[0].message).toMatch(/must be a string — got an array/);
+    expect(errs[0].message).toContain("\\n");
+  });
+
+  it("holds Text and Email to the same rule", async () => {
+    expect((await check({ Name: { first: "Charlie" } })).length).toBe(1);
+    expect((await check({ Name: 42 })).length).toBe(1);
+    expect((await check({ Contact: ["a@b.com"] })).length).toBe(1);
+    expect((await check({ Contact: true })).length).toBe(1);
+  });
+
+  it("accepts strings, including multi-line text", async () => {
+    expect(
+      await check({
+        Name: "Charlie",
+        "Inistate Application": "line one\nline two",
+        Contact: "charlie@example.com",
+      }),
+    ).toEqual([]);
+  });
+
+  it("lets null and an empty string through — the platform skips both", async () => {
+    expect(await check({ Attended: null, Name: null, Contact: "" })).toEqual([]);
+    expect(await check({ Attended: "" })).toEqual([]);
+  });
+
+  it("leaves field types outside this check alone", async () => {
+    expect(await check({ Headcount: "12" })).toEqual([]);
+  });
+
+  it("reports value-type and reference failures together", async () => {
+    const errs = await check({ Attended: "yes", Assignee: 42 });
+    expect(errs.map((e) => e.type).sort()).toEqual(["User", "YesNo"]);
+  });
+});
+
+describe("describeShapeErrors — envelope wording", () => {
+  const mk = (type: string): RefShapeError => ({
+    field: "F",
+    type,
+    message: "m",
+    received: null,
+  });
+
+  it("names the value-type correction when only YesNo/text values failed", () => {
+    const d = describeShapeErrors([mk("YesNo"), mk("MultilineText")]);
+    expect(d.error).toBe("invalid_field_value_type");
+    expect(d.message).toMatch(/boolean/);
+    expect(d.message).toMatch(/single string/);
+    expect(d.message).not.toMatch(/User\/Module/);
+  });
+
+  it("covers value types alongside shape failures", () => {
+    const d = describeShapeErrors([mk("Text"), mk("Location"), mk("User")]);
+    expect(d.error).toBe("invalid_field_shape");
+    expect(d.message).toMatch(/YesNo/);
+    expect(d.message).toMatch(/Location/);
+    expect(d.message).toMatch(/User\/Module/);
+  });
+
+  it("names the Location correction when only Location failed", () => {
+    const d = describeShapeErrors([mk("Location")]);
+    expect(d.error).toBe("invalid_location_field_shape");
+    expect(d.message).toMatch(/lat, lng, placeName/);
+  });
+
+  it("keeps the reference wording when only references failed", () => {
+    const d = describeShapeErrors([mk("User")]);
+    expect(d.error).toBe("invalid_reference_field_shape");
+    expect(d.message).toMatch(/User\/Module/);
+  });
+
+  it("covers both when mixed", () => {
+    const d = describeShapeErrors([mk("Location"), mk("Module")]);
+    expect(d.error).toBe("invalid_field_shape");
+    expect(d.message).toMatch(/Location/);
+    expect(d.message).toMatch(/User\/Module/);
   });
 });

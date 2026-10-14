@@ -57,13 +57,51 @@ class LinkedTransport {
 const WORKSPACES = [
   { id: 1138, name: "Inistate" },
   { id: 2234, name: "Test" },
+  { id: 4100, name: "Ledger" },
 ];
 
+// The /api/mcp/workspace/{id} mirror: modules pre-filtered, each with its full canvas states.
+const LEDGER_WORKSPACE = {
+  id: 4100,
+  name: "Ledger",
+  company: { name: "Acme", logo: null, phone: null },
+  modules: [
+    {
+      id: 520,
+      emoji: "🧾",
+      name: "Invoices",
+      states: [
+        { id: "s1", name: "Draft", color: "#cccccc", initial: true },
+        { id: "s2", name: "Posted", color: "#2a7b50", ai_hint: "Counted as a sale." },
+        {
+          id: "s3",
+          name: "Cancelled",
+          color: "#b33a3a",
+          ai_hint: "Voided - not a sale.",
+          ai_instruction: "Never report a Cancelled invoice as revenue.",
+        },
+      ],
+    },
+    { id: 521, emoji: "👥", name: "Customers", states: [] },
+    {
+      id: 522,
+      emoji: "💵",
+      name: "Customer Deposits",
+      description: "  Money a customer pays before an order ships.  ",
+      links: ["Customers", "", 7, "Payment Methods"],
+      states: [],
+    },
+  ],
+};
+
 const setWorkspaceCalls: string[] = [];
+const listWorkspaceSearches: Array<string | undefined> = [];
 let lastSubmitPayload: Record<string, unknown> | null = null;
 let lastBulkPayload: Record<string, unknown> | null = null;
 let lastCreatePayload: Record<string, unknown> | null = null;
 let lastUpdatePayload: Record<string, unknown> | null = null;
+const getFormCalls: Array<Record<string, unknown>> = [];
+let lastListParams: Record<string, unknown> | null = null;
 
 class FakeBackend implements Backend {
   readonly kind = "cloud" as const;
@@ -84,11 +122,13 @@ class FakeBackend implements Backend {
     setWorkspaceCalls.push(wsid);
   }
 
-  async listWorkspaces(): Promise<unknown> {
+  async listWorkspaces(search?: string): Promise<unknown> {
+    listWorkspaceSearches.push(search);
     return WORKSPACES;
   }
 
   async getWorkspace(workspaceId: string): Promise<unknown> {
+    if (workspaceId === String(LEDGER_WORKSPACE.id)) return LEDGER_WORKSPACE;
     const ws = WORKSPACES.find((w) => String(w.id) === workspaceId);
     if (!ws) throw new Error("404 workspace not found");
     return { id: ws.id, name: ws.name, vectors: [{ name: "Projects", emoji: "📋", published: true }] };
@@ -105,6 +145,8 @@ class FakeBackend implements Backend {
         { name: "Title", type: "Text" },
         { name: "Due Date", type: "Date" },
         { name: "Owner", type: "User", module: "Users" },
+        { name: "Billable", type: "YesNo" },
+        { name: "Notes", type: "MultilineText" },
       ],
       states: ["Draft", "Active", "Closed"],
     };
@@ -150,6 +192,7 @@ class FakeBackend implements Backend {
   }
 
   async listEntries(params: { module: string }): Promise<unknown> {
+    lastListParams = params;
     const totalItems = params.module === "ProjectsWithData" ? 1 : 0;
     return {
       module: params.module,
@@ -162,7 +205,15 @@ class FakeBackend implements Backend {
   }
 
   async getEntry(): Promise<unknown> { return {}; }
-  async getForm(): Promise<unknown> { return {}; }
+  // SS06181: this form relabels Title as "Headline" (the designer's per-form label).
+  async getForm(params: Record<string, unknown>): Promise<unknown> {
+    getFormCalls.push({ module: params.module, activity: params.activity });
+    return {
+      module: "Projects",
+      activity: params.activity,
+      form: [{ Title: { type: "Text", label: "Headline" } }, { "Due Date": { type: "Date" } }],
+    };
+  }
 
   async submitActivity(payload: Record<string, unknown>): Promise<unknown> {
     lastSubmitPayload = payload;
@@ -223,6 +274,18 @@ describe("set_workspace robustness", () => {
     expect(setWorkspaceCalls.at(-1)).toBe("1138");
   });
 
+  it("resolves a name through the searched list, not the caller's own memberships", async () => {
+    // An Administrator's unsearched list is only their memberships; a search reaches every
+    // workspace. The name must therefore go to the backend as the search term.
+    const before = listWorkspaceSearches.length;
+    parse(await client.callTool({
+      name: "set_workspace",
+      arguments: { workspaceId: "Test" },
+    }));
+    expect(listWorkspaceSearches.slice(before)).toEqual(["Test"]);
+    expect(setWorkspaceCalls.at(-1)).toBe("2234");
+  });
+
   it("returns workspace_not_found without mutating the active workspace", async () => {
     const before = setWorkspaceCalls.length;
     const result = await client.callTool({
@@ -234,6 +297,85 @@ describe("set_workspace robustness", () => {
     expect(res.error).toBe("workspace_not_found");
     expect(res.available).toEqual(WORKSPACES);
     expect(setWorkspaceCalls.length).toBe(before);
+  });
+
+  it("keeps each module's states with what the designer wrote for an AI, and nothing else", async () => {
+    const res = parse(await client.callTool({
+      name: "set_workspace",
+      arguments: { workspaceId: 4100 },
+    }));
+    expect(res.modules).toEqual([
+      {
+        name: "Invoices",
+        emoji: "🧾",
+        states: [
+          { name: "Draft" },
+          { name: "Posted", ai_hint: "Counted as a sale." },
+          {
+            name: "Cancelled",
+            ai_hint: "Voided - not a sale.",
+            ai_instruction: "Never report a Cancelled invoice as revenue.",
+          },
+        ],
+      },
+      { name: "Customers", emoji: "👥" },
+      {
+        name: "Customer Deposits",
+        emoji: "💵",
+        description: "Money a customer pays before an order ships.",
+        links: ["Customers", "Payment Methods"],
+      },
+    ]);
+  });
+
+  // Look-alike modules (AR vs AP deposits, goods vs purchase returns) are told apart by what
+  // they link to. The hint says so only when the API sent anything to tell them apart by.
+  it("passes each module's description and links through, and says what they are for", async () => {
+    const res = parse(await client.callTool({
+      name: "set_workspace",
+      arguments: { workspaceId: 4100 },
+    }));
+    const deposits = res.modules.find((m: { name: string }) => m.name === "Customer Deposits");
+    expect(deposits.links).toEqual(["Customers", "Payment Methods"]);
+    expect(res.hint).toContain("description and links say which is which");
+  });
+});
+
+// The platform's list (MCPController.PostList) puts entryId, documentId and state
+// in every item; the other system fields come only with the full row or when
+// named. The tool used to promise every system field regardless, so a model
+// passing `fields` trusted rows that had no state and totalled cancelled
+// invoices as sales.
+describe("list_entries — state in every item", () => {
+  it("describes the system fields the way the platform returns them", async () => {
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "list_entries")!;
+    const fieldsParam = (tool.inputSchema.properties as Record<string, { description?: string }>).fields;
+
+    expect(tool.description).not.toMatch(/System fields \(id, state, audit metadata, etc\.\) are always returned/);
+    expect(tool.description).toContain("Every item carries entryId, documentId and state whatever `fields` holds");
+    expect(tool.description).toContain("when `fields` is given only if it names them");
+    expect(fieldsParam.description).toContain("entryId, documentId and state are always returned");
+    expect(fieldsParam.description).not.toContain("System fields are always returned");
+  });
+
+  it("names state in a projection, so a server that predates state-in-every-item returns it too", async () => {
+    await client.callTool({
+      name: "list_entries",
+      arguments: { module: "Projects", fields: ["Title", "Due Date"] },
+    });
+    expect(lastListParams?.fields).toEqual(["Title", "Due Date", "state"]);
+  });
+
+  it("leaves a projection that names state, or no projection, as given", async () => {
+    await client.callTool({
+      name: "list_entries",
+      arguments: { module: "Projects", fields: ["Title", "State"] },
+    });
+    expect(lastListParams?.fields).toEqual(["Title", "State"]);
+
+    await client.callTool({ name: "list_entries", arguments: { module: "Projects" } });
+    expect(lastListParams?.fields).toBeUndefined();
   });
 });
 
@@ -373,6 +515,47 @@ describe("list_entries empty-result hints", () => {
 
 describe("submit_activity input key guard", () => {
   const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
+
+  // SS06181: the user sees the activity's label, not the field name.
+  it("accepts the activity form's label for a field it relabels, and says so", async () => {
+    getFormCalls.length = 0;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Headline: "x" }, ai },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.input).toEqual({ Title: "x" });
+    expect(getFormCalls).toEqual([{ module: "Projects", activity: "create" }]);
+    const res = parse(result);
+    expect(res.input_key_notes.join(" ")).toContain("'Headline' is this activity's label for field 'Title'");
+  });
+
+  it("does not fetch the form when every key is an exact field name", async () => {
+    getFormCalls.length = 0;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x" }, ai },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(getFormCalls).toEqual([]);
+  });
+
+  it("accepts the label in bulk, fetching the form once per batch", async () => {
+    getFormCalls.length = 0;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        ai,
+        items: [{ input: { Headline: "a" } }, { input: { headline: "b" } }, { input: { Title: "c" } }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const items = lastBulkPayload!.items as Array<{ input: Record<string, unknown> }>;
+    expect(items.map((it) => it.input)).toEqual([{ Title: "a" }, { Title: "b" }, { Title: "c" }]);
+    expect(getFormCalls.length).toBe(1);
+  });
 
   it("rejects input keys that match no field instead of dropping them silently", async () => {
     const result = await client.callTool({
@@ -845,6 +1028,63 @@ describe("update_module unknown-id stripping", () => {
   });
 });
 
+describe("value-type pre-flight (SS06108, SS06110)", () => {
+  const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
+
+  it("submit_activity blocks a YesNo sent as \"yes\" before it reaches the platform", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x", Billable: "yes" }, ai },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("invalid_field_value_type");
+    expect(res.fields[0].field).toBe("Billable");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity blocks a MultilineText sent as an array", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x", Notes: ["a", "b"] }, ai },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("invalid_field_value_type");
+    expect(res.agent_action).toContain("\\n");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity passes a boolean and a multi-line string through unchanged", async () => {
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: { module: "Projects", activity: "create", input: { Title: "x", Billable: true, Notes: "a\nb" }, ai },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.input).toEqual({ Title: "x", Billable: true, Notes: "a\nb" });
+  });
+
+  it("submit_activities blocks the batch and names the failing item", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        ai,
+        items: [{ input: { Title: "a", Notes: "fine" } }, { input: { Title: "b", Notes: ["x", "y"] } }],
+      },
+    });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("invalid_field_value_type");
+    expect(res.items.map((i: { idx: number }) => i.idx)).toEqual([1]);
+    expect(lastBulkPayload).toBeNull();
+  });
+});
+
 describe("reference id sanity", () => {
   const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
 
@@ -877,7 +1117,8 @@ describe("reference id sanity", () => {
     expect(result.isError).toBeFalsy();
   });
 
-  it("submit_activity coerces array/null input to undefined instead of -32602", async () => {
+  it("submit_activity refuses a non-object input instead of creating an empty entry", async () => {
+    lastSubmitPayload = null;
     const result = await client.callTool({
       name: "submit_activity",
       arguments: {
@@ -887,8 +1128,156 @@ describe("reference id sanity", () => {
         ai,
       },
     });
-    // array input must not throw a Zod -32602; call proceeds (input treated as absent)
+
+    // The original intent stands: a bad shape must not surface as a Zod -32602, which tells an
+    // agent nothing it can act on. But it used to be COERCED to undefined, and the create went
+    // through with no fields at all — an empty entry, answered with success. It is now refused.
     const res = parse(result);
     expect(res).not.toHaveProperty("code");
+    expect(result.isError).toBe(true);
+    expect(res.error).toBe("invalid_input_shape");
+    expect(res.agent_action).toContain("get_form");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity refuses a string input the same way", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: "Title: x" as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(parse(result).error).toBe("invalid_input_shape");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity names a JSON-encoded string input so the agent can resend the object", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: JSON.stringify({ Title: "x" }) as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    const res = parse(result);
+    expect(result.isError).toBe(true);
+    expect(res).not.toHaveProperty("code");
+    expect(res.error).toBe("invalid_input_shape");
+    expect(res.message).toContain("JSON-encoded string");
+    expect(lastSubmitPayload).toBeNull();
+  });
+
+  it("submit_activity still treats null input as simply absent", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: null as unknown as Record<string, unknown>,
+        ai,
+      },
+    });
+    // An activity that takes no fields is a real thing, and several clients send null for it.
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.input).toBeUndefined();
+  });
+});
+
+describe("silent write-path losses", () => {
+  const ai = { reasoning: "test", model: "test-model", confidence: 0.9 };
+
+  it("submit_activities refuses a batch with a malformed item instead of dropping it", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        items: [
+          { input: { Title: "one" } },
+          "not an item" as unknown as Record<string, unknown>,
+          { input: { Title: "three" } },
+        ],
+        ai,
+      },
+    });
+
+    // Dropping it meant a batch of three submitted two and answered success — the caller had no
+    // way to learn which one never happened. Better to fail the call and name the index.
+    expect(result.isError).toBe(true);
+    expect(lastBulkPayload).toBeNull();
+  });
+
+  it("submit_activities still accepts a well-formed batch and the {items:[…]} wrapper", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        items: { items: [{ input: { Title: "one" } }, { input: { Title: "two" } }] } as never,
+        ai,
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    expect((lastBulkPayload!.items as unknown[]).length).toBe(2);
+  });
+
+  it("update_module refuses an empty section rather than deleting everything in it", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, information: [] },
+    });
+
+    // An empty array is truthy, and a section that is passed replaces that section entirely, so
+    // this used to delete every field on the module and report a successful update.
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("empty_section");
+    expect(res.sections).toEqual(["information"]);
+    expect(lastUpdatePayload).toBeNull();
+  });
+
+  it("update_module names every empty section at once", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, information: [], states: [], activities: [] },
+    });
+    expect(parse(result).sections).toEqual(["information", "states", "activities"]);
+    expect(lastUpdatePayload).toBeNull();
+  });
+
+  it("update_module still allows clearing flows, which can be meant", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, flows: [] },
+    });
+    // A module with no transitions is a real design; the destructive-by-accident cases are the
+    // other three.
+    expect(result.isError).toBeFalsy();
+    expect(lastUpdatePayload!.flows).toEqual([]);
+  });
+
+  it("update_module leaves an omitted section untouched", async () => {
+    lastUpdatePayload = null;
+    const result = await client.callTool({
+      name: "update_module",
+      arguments: { id: 1, name: "Renamed" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastUpdatePayload).not.toHaveProperty("information");
+    expect(lastUpdatePayload!.name).toBe("Renamed");
   });
 });

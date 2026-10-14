@@ -106,6 +106,15 @@ describe("runtime tool schemas", () => {
     });
   });
 
+  // The one type assertion in this file: published without a JSON type, `input` was sent by
+  // models as a JSON-encoded string, which the server then refused and the agent had to retry.
+  it("submit_activity publishes input as an object and documents Table rows", () => {
+    const tool = tools.find((t) => t.name === "submit_activity")!;
+    const input = (tool.inputSchema as { properties: Record<string, { type?: string; description?: string }> }).properties.input;
+    expect(input.type).toBe("object");
+    expect(input.description).toContain("Table: an array of row objects");
+  });
+
   it("get_entry_history", () => {
     expect(shape(tools, "get_entry_history")).toEqual({
       props: ["entryId", "module", "page", "workspaceId"],
@@ -195,15 +204,30 @@ describe("configure tool schemas", () => {
 
   it("create_module", () => {
     expect(shape(tools, "create_module")).toEqual({
-      props: ["activities", "description", "flows", "icon", "information", "name", "states", "workspaceId"],
+      props: ["activities", "card", "description", "flows", "icon", "information", "name", "states", "workspaceId"],
       required: ["name"],
     });
   });
 
   it("update_module", () => {
     expect(shape(tools, "update_module")).toEqual({
-      props: ["activities", "description", "flows", "icon", "id", "information", "name", "states", "workspaceId"],
+      props: ["activities", "card", "description", "flows", "icon", "id", "information", "name", "states", "workspaceId"],
       required: ["id"],
     });
+  });
+
+  // SS06151: a Module/User field names the connected field it shows (the designer's "Display
+  // Information"). zod strips keys a shape does not declare, so without this the value never
+  // reached /api/configure.
+  it.each(["create_module", "update_module"])("%s information items accept display", (name) => {
+    const tool = tools.find((t) => t.name === name)!;
+    const info = (tool.inputSchema as any).properties.information;
+    const findItems = (node: any): any =>
+      !node || typeof node !== "object" ? null
+        : node.items?.properties ? node.items
+        : [node.anyOf, node.oneOf, node.allOf].flat().filter(Boolean).map(findItems).find(Boolean) ?? null;
+    const items = findItems(info);
+    expect(items, JSON.stringify(info).slice(0, 300)).toBeTruthy();
+    expect(Object.keys(items.properties)).toContain("display");
   });
 });

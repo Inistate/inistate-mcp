@@ -9,10 +9,13 @@ import type {
   OAuthTokenRevocationRequest,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidGrantError, TemporarilyUnavailableError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
 const CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const PAT_VERIFY_TTL_MS = 5 * 60 * 1000; // whoami re-check cadence for connection tokens
+// A minted ist_ token leaves the local issued-token map after this long; from then on
+// verifyAccessToken introspects it via /v1/whoami (which also sees revocation).
+const ISSUED_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Scope vocabulary of the Inistate Connections API (ApiScopes.cs). Advertised as
@@ -47,6 +50,26 @@ export class ConnectionMintDeniedError extends Error {
     super(message);
     this.name = "ConnectionMintDeniedError";
     this.code = code;
+  }
+}
+
+/**
+ * The mint could not be completed and the backend did NOT say the feature is off:
+ * a 5xx, an unexpected status, an unusable body, or no answer at all.
+ *
+ * SS06119: this used to fall back to a login-JWT session. That is the one credential
+ * the seat gate cannot price - McpSeatAuthorizeAttribute observes and never denies,
+ * ruled 2026-09-05 so that sessions which already existed keep working - so any hiccup
+ * on the mint handed a brand-new connector exactly the ungated session the gate exists
+ * to refuse. The exchange now fails and the connector retries. The fallback survives
+ * only for the explicit "Connections is off" answer (404), which is what it was for.
+ */
+export class ConnectionMintUnavailableError extends Error {
+  readonly status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "ConnectionMintUnavailableError";
+    this.status = status;
   }
 }
 
@@ -128,6 +151,48 @@ interface PendingAuth {
   clientId: string;
   params: AuthorizationParams;
   createdAt: number;
+  /** Ties the flow to the browser that started it; see browserSecretCookieName (SS05808). */
+  browserSecret: string;
+}
+
+/**
+ * SS05808: the login page POSTs the user's JWT back to /authorize/callback with only the
+ * nonce to name the flow, and the nonce travels in the login URL - a referrer leak, an IdP
+ * log, or any script on the login page can read it, and whoever holds it could complete
+ * the victim's flow with their OWN JWT, so the victim's MCP client would then act inside
+ * the attacker's workspace. The flow is therefore also bound to the browser that started
+ * it: /authorize sets an HttpOnly cookie the callback must present. app.* and mcp.* share
+ * one registrable domain, so a Lax cookie rides the login page's top-level form POST.
+ */
+export function browserSecretCookieName(nonce: string): string {
+  return `mcp_auth_${nonce}`;
+}
+
+/** The value of one cookie out of a raw Cookie header, or undefined. */
+export function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return part.slice(eq + 1).trim();
+    }
+  }
+  return undefined;
+}
+
+/** Cookie attributes for the browser-binding cookie: only the callback path ever needs it. */
+export function browserSecretCookieOptions(secure: boolean) {
+  return {
+    httpOnly: true,
+    secure,
+    sameSite: "lax" as const,
+    path: "/authorize",
+    maxAge: CODE_TTL_MS,
+  };
 }
 
 interface IssuedToken {
@@ -191,11 +256,25 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     res: Response,
   ): Promise<void> {
     const nonce = randomUUID();
+    const browserSecret = randomUUID();
     this.pendingAuth.set(nonce, {
       clientId: client.client_id,
       params,
       createdAt: Date.now(),
+      browserSecret,
     });
+
+    // Bind the flow to this browser (SS05808). The SDK hands us the express response;
+    // a bare redirect-only response (tests, embedded use) simply gets no cookie.
+    const setCookie = (res as unknown as { cookie?: (name: string, value: string, options: object) => void }).cookie;
+    if (typeof setCookie === "function") {
+      setCookie.call(
+        res,
+        browserSecretCookieName(nonce),
+        browserSecret,
+        browserSecretCookieOptions(this.mcpUrl.startsWith("https:")),
+      );
+    }
 
     // Redirect to the app's login page with MCP callback params.
     // The path is configurable via INISTATE_APP_LOGIN_PATH; defaults to "/#/login"
@@ -230,12 +309,18 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     nonce: string,
     jwt: string,
     refreshToken?: string,
+    browserSecret?: string,
   ): { redirectUrl: string } {
     const pending = this.pendingAuth.get(nonce);
     if (!pending) throw new Error("Invalid or expired authorization nonce");
     if (Date.now() - pending.createdAt > CODE_TTL_MS) {
       this.pendingAuth.delete(nonce);
       throw new Error("Authorization session expired");
+    }
+    // SS05808: only the browser that started the flow may finish it. The pending flow is
+    // kept, so the legitimate browser can still complete after a stray or forged callback.
+    if (!browserSecret || browserSecret !== pending.browserSecret) {
+      throw new Error("Authorization session does not belong to this browser");
     }
     this.pendingAuth.delete(nonce);
 
@@ -300,6 +385,14 @@ export class InistateOAuthProvider implements OAuthServerProvider {
         // backend's message — never downgrade to a JWT session.
         throw new InvalidGrantError(error.message);
       }
+      if (error instanceof ConnectionMintUnavailableError) {
+        // Availability failure while Connections is on (SS06119): still never a
+        // JWT session - that would bypass the seat gate. The client shows the
+        // error and the user connects again once the backend answers.
+        throw new TemporarilyUnavailableError(
+          "Inistate could not create the connection right now. Please try connecting again.",
+        );
+      }
       throw error;
     }
     if (minted) {
@@ -344,17 +437,26 @@ export class InistateOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * Mint (or rotate) the Inistate connection token backing this MCP session.
+   * Mint the Inistate connection token backing this MCP session.
    *
-   * One connection per client app: an active connection with the same name is
-   * updated to the new grant and rotated (rotation is the only way to get a
-   * fresh plaintext token), so repeat authorizations don't pile up rows on the
-   * Connections page. The backend keeps the previous token alive for the
-   * configured overlap window, so an existing session on another device fades
-   * out rather than breaking mid-call.
+   * One connection per authorization. Connections used to be reused by name
+   * (`"<client> (MCP)"`) and rotated, which made two instances of the same
+   * client — n8n prod and staging, ChatGPT on two devices — rotate each
+   * other's token: the older one died once the overlap window closed
+   * (docs/integration-oauth-dcr-proposal.md, I-1). Repeat authorizations now
+   * add a row on the Connections page, where the user revokes stale ones;
+   * the exchange never touches an existing connection.
    *
-   * Returns null when the Connections feature is unavailable (flag off, older
-   * backend, network failure) — the caller falls back to the JWT flow.
+   * Reach: the consent step that picks workspaces does not exist yet, so the
+   * grant is narrowed only where that is unambiguous — a user with exactly
+   * one accessible workspace gets that workspace. Everyone else keeps
+   * all-workspace reach (the pre-fix default) rather than a connector that
+   * can see nothing until the user widens it on the Connections page.
+   *
+   * Returns null only when the backend says Connections is off (404: flag off or
+   * a backend that predates the feature) — the caller falls back to the JWT flow.
+   * Every other failure throws ConnectionMintUnavailableError: a JWT session is
+   * never the answer to a mint that merely failed (SS06119).
    */
   private async mintConnectionToken(
     jwt: string,
@@ -371,103 +473,107 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       .replace(/[\u0000-\u001F\u007F]/g, " ")
       .trim()
       .slice(0, 60) || "MCP client";
-    const name = `${clientLabel} (MCP)`;
+    // Per-authorization discriminator: tells two sessions of one client apart
+    // on the Connections page, and stops a second authorization from finding
+    // (and rotating) the first.
+    const sessionTag = randomUUID().replace(/-/g, "").slice(0, 6);
+    const name = `${clientLabel} (MCP) · ${sessionTag}`;
+    const reach = await this.defaultReach(headers.Authorization);
     const body = {
       name,
       description: `OAuth connector session for ${clientLabel}`,
       scopes,
-      allWorkspaces: true,
-      workspaceIds: [] as number[],
+      allWorkspaces: reach.allWorkspaces,
+      workspaceIds: reach.workspaceIds,
       expiresAt: null as string | null,
     };
 
+    let createRes: Awaited<ReturnType<typeof fetch>>;
     try {
-      const listRes = await fetch(`${this.baseUrl}/api/connections`, {
-        headers: { Authorization: headers.Authorization, Accept: headers.Accept },
-      });
-      if (listRes.status === 404) {
-        // not_enabled — feature flag off on this environment
-        console.log("Connections API disabled on backend; falling back to JWT session");
-        return null;
-      }
-      if (listRes.ok) {
-        const mine = (await listRes.json()) as Array<Record<string, unknown>> | unknown;
-        const existing = Array.isArray(mine)
-          ? mine.find((c) => c && c.name === name && c.status === "active")
-          : undefined;
-        const existingId = existing ? String((existing as Record<string, unknown>).id ?? "") : "";
-        if (existingId) {
-          const reused = await this.updateAndRotate(existingId, body, headers);
-          if (reused) return { ...reused, scopes };
-          // fall through to create a fresh connection
-        }
-      }
-
-      const createRes = await fetch(`${this.baseUrl}/api/connections`, {
+      createRes = await fetch(`${this.baseUrl}/api/connections`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
       });
-      if (!createRes.ok) {
-        // 400/403 are policy answers (pricing gate, limit) — deny the exchange
-        // outright. Everything else is an availability problem — fall back.
-        await throwIfPolicyDenial(createRes);
-        console.error(`Connection create failed: HTTP ${createRes.status} ${await createRes.text()}`);
-        return null;
-      }
-      const created = (await createRes.json()) as {
-        token?: string;
-        connection?: { id?: string; expiresAt?: string };
-      };
-      if (!created?.token || !isConnectionToken(created.token)) return null;
-      return {
-        token: created.token,
-        scopes,
-        connectionId: created.connection?.id,
-        expiresAt: created.connection?.expiresAt ?? undefined,
-      };
     } catch (error) {
-      if (error instanceof ConnectionMintDeniedError) throw error;
-      console.error("Connection mint failed; falling back to JWT session:", error);
+      // No answer at all. Not "feature off" - the exchange fails (SS06119).
+      console.error("Connection mint unreachable; refusing the exchange:", error);
+      throw new ConnectionMintUnavailableError(
+        `Connection mint unreachable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (createRes.status === 404) {
+      // not_enabled — feature flag off on this environment (or a backend that
+      // predates Connections). The only answer that still means a JWT session.
+      console.log("Connections API disabled on backend; falling back to JWT session");
       return null;
     }
+    if (!createRes.ok) {
+      // 400/403 are policy answers (pricing gate, limit) — deny the exchange
+      // outright. Everything else is an availability problem — also fail, never
+      // fall back to an ungated JWT session (SS06119).
+      await throwIfPolicyDenial(createRes);
+      let detail = "";
+      try {
+        detail = await createRes.text();
+      } catch {
+        /* body unreadable; the status is the message */
+      }
+      console.error(`Connection create failed: HTTP ${createRes.status} ${detail}; refusing the exchange`);
+      throw new ConnectionMintUnavailableError(
+        `Connection mint failed: HTTP ${createRes.status}`,
+        createRes.status,
+      );
+    }
+    let created: { token?: string; connection?: { id?: string; expiresAt?: string } };
+    try {
+      created = (await createRes.json()) as typeof created;
+    } catch (error) {
+      console.error("Connection mint answered with an unreadable body; refusing the exchange:", error);
+      throw new ConnectionMintUnavailableError("Connection mint returned an unreadable body", createRes.status);
+    }
+    if (!created?.token || !isConnectionToken(created.token)) {
+      // A 2xx without a usable token is a broken backend, not a disabled feature.
+      console.error("Connection mint answered without a usable token; refusing the exchange");
+      throw new ConnectionMintUnavailableError("Connection mint returned no usable token", createRes.status);
+    }
+    return {
+      token: created.token,
+      scopes,
+      connectionId: created.connection?.id,
+      expiresAt: created.connection?.expiresAt ?? undefined,
+    };
   }
 
-  /** Re-grant (scopes may have changed) then rotate for a fresh plaintext token. */
-  private async updateAndRotate(
-    connectionId: string,
-    body: Record<string, unknown>,
-    headers: Record<string, string>,
-  ): Promise<{ token: string; connectionId: string; expiresAt?: string } | null> {
+  /**
+   * Workspace grant for a new OAuth connection: the single accessible
+   * workspace when there is exactly one, otherwise all of them. Any failure
+   * to read the list keeps the old default — reach must never silently
+   * shrink because a lookup hiccuped.
+   */
+  private async defaultReach(
+    authorization: string,
+  ): Promise<{ allWorkspaces: boolean; workspaceIds: number[] }> {
+    const all = { allWorkspaces: true, workspaceIds: [] as number[] };
     try {
-      const updateRes = await fetch(`${this.baseUrl}/api/connections/${connectionId}`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify(body),
+      const res = await fetch(`${this.baseUrl}/api/mcp/workspace`, {
+        headers: { Authorization: authorization, Accept: "application/json" },
       });
-      if (!updateRes.ok) return null;
-
-      const rotateRes = await fetch(`${this.baseUrl}/api/connections/${connectionId}/rotate`, {
-        method: "POST",
-        headers,
-      });
-      if (!rotateRes.ok) {
-        await throwIfPolicyDenial(rotateRes);
-        return null;
+      if (!res.ok) return all;
+      const list = (await res.json()) as unknown;
+      if (!Array.isArray(list)) return all;
+      const ids = list
+        .map((w) => Number((w as { id?: unknown })?.id))
+        .filter((id) => Number.isInteger(id) && id > 0);
+      if (ids.length === 1) return { allWorkspaces: false, workspaceIds: ids };
+      if (ids.length > 1) {
+        console.log(
+          `OAuth connection keeps all-workspace reach: ${ids.length} workspaces and no consent step picks one yet`,
+        );
       }
-      const rotated = (await rotateRes.json()) as {
-        token?: string;
-        connection?: { id?: string; expiresAt?: string };
-      };
-      if (!rotated?.token || !isConnectionToken(rotated.token)) return null;
-      return {
-        token: rotated.token,
-        connectionId,
-        expiresAt: rotated.connection?.expiresAt ?? undefined,
-      };
-    } catch (error) {
-      if (error instanceof ConnectionMintDeniedError) throw error;
-      return null;
+      return all;
+    } catch {
+      return all;
     }
   }
 
@@ -531,44 +637,44 @@ export class InistateOAuthProvider implements OAuthServerProvider {
       };
     }
 
-    // Connection tokens minted by another process (or before a restart):
-    // introspect via /v1/whoami — scope-free by design, only reflects the
-    // caller's own token — and cache briefly so revocation still bites.
-    if (isConnectionToken(token)) {
-      const cached = this.patVerify.get(token);
-      if (cached && Date.now() - cached.at < PAT_VERIFY_TTL_MS) return cached.info;
+    // Anything else - a connection token minted by another process or before a
+    // restart, or a login JWT handed straight to an MCP client - is introspected
+    // via /v1/whoami (scope-free by design, only reflects the caller's own
+    // token) and cached briefly so revocation still bites. Bearers used to be
+    // accepted unverified as "legacy" (SS05807): that made the OAuth layer
+    // decorative and let a forged JWT choose whose stored mode a request used.
+    return this.introspect(token);
+  }
 
-      const res = await fetch(`${this.baseUrl}/v1/whoami`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      });
-      if (!res.ok) {
-        this.patVerify.delete(token);
-        throw new Error("Connection token is unknown, revoked, or expired");
-      }
-      const data = (await res.json()) as {
-        userId?: string;
-        connection?: { id?: string; scopes?: string[] };
-      };
-      const info: AuthInfo = {
-        token,
-        clientId: String(data?.connection?.id ?? "connection"),
-        scopes: Array.isArray(data?.connection?.scopes) ? data.connection.scopes : [],
-        ...(data?.userId ? { extra: { userId: data.userId } } : {}),
-      };
-      this.patVerify.set(token, { info, at: Date.now() });
-      return info;
+  private async introspect(token: string): Promise<AuthInfo> {
+    const cached = this.patVerify.get(token);
+    if (cached && Date.now() - cached.at < PAT_VERIFY_TTL_MS) return cached.info;
+
+    const res = await fetch(`${this.baseUrl}/v1/whoami`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    });
+    if (!res.ok) {
+      this.patVerify.delete(token);
+      throw new Error(
+        isConnectionToken(token)
+          ? "Connection token is unknown, revoked, or expired"
+          : "Bearer token is invalid or expired",
+      );
     }
-
-    // For tokens not issued through OAuth (e.g. direct API key / legacy),
-    // accept them but mark with a generic clientId — the backend remains the
-    // enforcement point for these.
-    const expiresAt = decodeJwtExp(token);
-    return {
-      token,
-      clientId: "legacy",
-      scopes: [],
-      ...(expiresAt !== undefined ? { expiresAt } : {}),
+    const data = (await res.json()) as {
+      userId?: string;
+      connection?: { id?: string; scopes?: string[] };
     };
+    const expiresAt = decodeJwtExp(token); // undefined for ist_ tokens
+    const info: AuthInfo = {
+      token,
+      clientId: String(data?.connection?.id ?? (isConnectionToken(token) ? "connection" : "session")),
+      scopes: Array.isArray(data?.connection?.scopes) ? data.connection.scopes : [],
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      ...(data?.userId ? { extra: { userId: data.userId } } : {}),
+    };
+    this.patVerify.set(token, { info, at: Date.now() });
+    return info;
   }
 
   /* ---- Revocation ---- */
@@ -595,6 +701,16 @@ export class InistateOAuthProvider implements OAuthServerProvider {
     }
     for (const [key, val] of this.patVerify) {
       if (now - val.at > PAT_VERIFY_TTL_MS) this.patVerify.delete(key);
+    }
+    for (const [key, val] of this.tokens) {
+      // JWT sessions die with the JWT; minted ist_ tokens leave the map after
+      // a day and are introspected from then on. Without this the map only
+      // ever grew (docs/integration-oauth-dcr-proposal.md, O-0 leak).
+      const exp = decodeJwtExp(key);
+      const expired = exp !== undefined
+        ? exp * 1000 <= now
+        : now - val.createdAt > ISSUED_TOKEN_TTL_MS;
+      if (expired) this.tokens.delete(key);
     }
   }
 }

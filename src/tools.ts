@@ -5,7 +5,9 @@ import { z } from "zod";
 import { Backend } from "./backend.js";
 import { capabilityMessage } from "./capability.js";
 import {
+  activityLabels,
   clearFlagged,
+  describeShapeErrors,
   evaluateActivity,
   FLAGGED_ANNOTATION,
   getHumanBlockedStates,
@@ -18,6 +20,7 @@ import {
   seedSchemaCache,
   validateInputShapesWith,
   type CanvasFetcher,
+  type RefShapeError,
   type SchemaFetcher,
 } from "./activity-guard.js";
 import {
@@ -28,8 +31,8 @@ import {
   flowCompletenessError,
   normalizeFieldType,
   normalizeOptionList,
-  normalizeStateColor,
   resolveDesignRefs,
+  storableStateColor,
   unwrapItems,
   validateDesign,
 } from "./schema.js";
@@ -130,6 +133,24 @@ const arrayish = (inner: z.ZodTypeAny) => z.preprocess(v => {
     .filter(x => x != null && typeof x === "object" && !Array.isArray(x));
 }, inner);
 
+// submit_activity.input is published as an object schema, but a non-object must still reach the
+// handler's invalid_input_shape refusal rather than fail as a Zod -32602. The preprocess wraps it
+// under a key no form field can have and the handler unwraps it. Runtime-only, like arrayish.
+const NON_OBJECT_INPUT = "\u0000nonObjectInput";
+const isNonObjectInput = (v: unknown): boolean =>
+  v !== undefined && (typeof v !== "object" || Array.isArray(v));
+const unwrapNonObjectInput = (v: Record<string, unknown> | undefined): unknown =>
+  v && Object.keys(v).length === 1 && NON_OBJECT_INPUT in v ? v[NON_OBJECT_INPUT] : v;
+const isJsonObjectString = (v: unknown): boolean => {
+  if (typeof v !== "string") return false;
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+};
+
 const repairItem = (raw: unknown): unknown => {
   if (typeof raw === "string") return raw.trim() ? { name: raw.trim() } : null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
@@ -184,6 +205,7 @@ const fieldShape = z.preprocess(repairItem, z.object({
   name: z.string(),
   type: z.string().optional(),
   connection: z.string().optional().describe("Name of an existing module in this workspace to link to. Required for User/Users/Module/Modules types."),
+  display: z.string().optional().describe("User/Users/Module/Modules only: name of the connected module's field shown for a picked record. Omit to default (Full Name/Name for users, else the first Text field)."),
   options: z.array(z.string()).optional(),
   fields: z.array(subFieldShape).optional().describe("Sub-fields for Table type"),
   ai_hint: z.string().optional(),
@@ -225,6 +247,68 @@ const flowShape = z.preprocess(repairFlow, z.object({
   ai_hint: z.string().optional(),
 }));
 
+// ---------- Listing card (the `card` block on create_module / update_module) ----------
+// The listing card is part of the design, not a follow-up: the same call that writes
+// the fields says how an entry shows in the module's list. Names, never ids — the
+// platform maps them, validates the card and stamps it; a card that does not pass
+// never fails the create (the module gets the platform's default card and the
+// response's `cardStatus` says why). Every shape below is therefore loose on the
+// wire: repairs fold the common near-misses, the platform is the judge.
+const repairCardItem = (raw: unknown): unknown => {
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return null;
+    return s.toLowerCase() === "state" ? { type: "state" } : { type: "field", name: s };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const it: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  if (typeof it.name !== "string" || it.name === "") {
+    const alias = it.field ?? it.activity ?? it.widget ?? it.information ?? it.id ?? it.displayName ?? it.label;
+    if (typeof alias === "string" && alias !== "") it.name = alias;
+  }
+  if (typeof it.type !== "string" || it.type === "") {
+    if (typeof it.activity === "string") it.type = "activity";
+    else if (typeof it.widget === "string") it.type = "widget";
+    else if (typeof it.name === "string" && it.name.toLowerCase() === "state") it.type = "state";
+    else it.type = "field";
+  } else if (it.type === "information") {
+    it.type = "field";
+  }
+  for (const k of ["field", "activity", "widget", "information", "displayName", "label"]) delete it[k];
+  return it;
+};
+
+const cardItemShape = z.preprocess(repairCardItem, z.object({
+  type: z.string().describe("field | state | activity | widget"),
+  name: z.string().optional().describe("Field or activity name; 'defaultCard' for the widget; unused for state"),
+  size: z.string().optional().describe("S | M | L — Text, number and date fields only"),
+  style: z.string().optional().describe("l | n | b — Text, number and date fields only"),
+  ratio: z.string().optional().describe("Image/File fields only: 1:1 | 3:2 | 4:3 | 16:9"),
+  orientation: z.string().optional().describe("Image/File fields only: portrait | landscape"),
+  settings: z.record(z.any()).optional().describe("defaultCard widget switches (booleans): title, state, assignees, comment, createdBy, createdDate, due, documentId"),
+}));
+
+const cardRowShape = z.preprocess(
+  (v) => (Array.isArray(v) ? { items: v } : v),
+  z.object({ items: arrayish(z.array(cardItemShape)).describe("1–3 items") }),
+);
+
+const cardIconShape = z.preprocess(
+  (v) => (typeof v === "string" ? { field: v } : v),
+  z.object({
+    field: z.string().describe("An Image, Images, File, Files or Selection field, by name"),
+    size: z.string().optional().describe("XS | S | M | L (S for a Selection, M for an image)"),
+  }),
+);
+
+const cardShape = z.object({
+  type: z.string().describe("'grid' when the module has an Image/Images field (the image alone in row 1); otherwise 'detail' with an icon"),
+  action: z.string().optional().describe("'view' (the default when activities exist), 'edit', or an activity name"),
+  size: z.string().optional().describe("Grid only: S | M | L"),
+  icon: cardIconShape.optional().describe("Detail only"),
+  rows: arrayish(z.array(cardRowShape)).optional().describe("1–5 rows of 1–3 items: the state row first (or the defaultCard widget alone), the title field L/b, secondary fields S/M, activities in their own row"),
+});
+
 const moduleSectionsShape = {
   icon: z.string().optional().describe("Emoji identifier"),
   description: z.string().optional(),
@@ -232,6 +316,7 @@ const moduleSectionsShape = {
   states: arrayish(z.array(stateShape)).optional().describe("Workflow states. Omit for record list modules."),
   activities: arrayish(z.array(activityShape)).optional().describe("Custom activities. Omit for record list modules."),
   flows: arrayish(z.array(flowShape)).optional().describe("State transition rules: { from, to, activity } by name. Omit for record list modules."),
+  card: cardShape.optional().describe("The listing card designed with the schema — how each entry shows in the module's list (mobile and web). Fields and activities by NAME. See CardDefinition in inistate://schema/configure. A card that does not pass never fails the call: the module gets the platform's default card and the response's cardStatus says why."),
 };
 
 /**
@@ -257,7 +342,10 @@ function normalizeModuleSections(body: Record<string, unknown>): void {
   if (Array.isArray(body.states)) {
     body.states = (body.states as Array<Record<string, unknown>>).map((s) => ({
       ...s,
-      color: normalizeStateColor(s.color as string | undefined, (s.name as string) || "").color,
+      // Only a value the platform cannot store gets mapped; a parseable hex is kept exactly as the
+      // caller sent it. Snapping every off-palette hex here repainted whole workflows on an update
+      // that was meant to touch one activity - see storableStateColor.
+      color: storableStateColor(s.color as string | undefined, (s.name as string) || "").color,
     }));
   }
   if (Array.isArray(body.activities)) {
@@ -306,6 +394,24 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       return null;
     }
   };
+
+  // SS06181: the names an activity's form gives the fields it relabels (get_form's
+  // `label`), for input keyed the way the user sees the form. Fail-open: null.
+  const fetchActivityLabels = async (
+    moduleName: string,
+    activity: string,
+    entryId?: string | number,
+  ) => {
+    try {
+      return activityLabels(await backend.getForm({ module: moduleName, activity, entryId }));
+    } catch {
+      return null;
+    }
+  };
+  const labelKeyNote = (r: { from: string; to: string; via?: "label" }) =>
+    r.via === "label"
+      ? `Input key '${r.from}' is this activity's label for field '${r.to}' — mapped to '${r.to}'.`
+      : `Input key '${r.from}' matched field '${r.to}' — use exact field names.`;
 
   /**
    * update_module matches section items by id and the platform rejects an id
@@ -476,11 +582,55 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
     ? "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows — one tool turn instead of N. A per-item `ai` wholly replaces the top-level default (no partial merge). Items run sequentially fail-soft on the server: one failure does not abort the rest; per-item outcomes (success, entryId, flagged, validation details) return in `results` — use `clientRef` to correlate. Max 100 items; chunk beyond that. Guardrails match submit_activity at batch level: actor='human' rejects the whole batch; actor='hybrid', activity='changeStatus', or any state override (top-level or per-item) requires `confirmed: true`."
     : "Bulk variant of submit_activity: one module + one activity applied to many entries, each item with its own input. Use instead of N sequential submit_activity calls when creating/editing many rows. A per-item `ai` wholly replaces the top-level default. Items run sequentially fail-soft: one failure does not abort the rest; per-item outcomes return in `results` — use `clientRef` to correlate. Max 100 items per request. The local runtime applies no confidence/actor gating.";
   /**
+   * A module's states as an agent needs them on arrival: each name plus what
+   * the designer wrote for an AI about it (ai_hint, ai_instruction) — that a
+   * Cancelled entry is no sale, say, which a read that goes straight to
+   * list_entries would otherwise never learn. Ids and colors are dropped.
+   */
+  const slimStates = (raw: unknown): Array<Record<string, string>> | undefined => {
+    if (!Array.isArray(raw)) return undefined;
+    const states: Array<Record<string, string>> = [];
+    for (const s of raw) {
+      if (typeof s === "string") {
+        states.push({ name: s });
+        continue;
+      }
+      if (!s || typeof s !== "object" || typeof (s as Record<string, unknown>).name !== "string") continue;
+      const state = s as Record<string, unknown>;
+      const slim: Record<string, string> = { name: state.name as string };
+      for (const key of ["ai_hint", "ai_instruction"]) {
+        const text = state[key];
+        if (typeof text === "string" && text.trim()) slim[key] = text;
+      }
+      states.push(slim);
+    }
+    return states.length > 0 ? states : undefined;
+  };
+
+  /**
+   * What tells look-alike modules apart before any form is opened: the designer's one-line
+   * description, and the modules this one links to (an AR deposit links to Debtor, an AP deposit
+   * to Creditor). From bare names, Claude Haiku 4.5 filed the wrong look-alike in 4 of 27 benchmark
+   * runs; with links listed, in 1. Passed through when the API sends them, absent otherwise.
+   */
+  const aboutModule = (v: Record<string, unknown>): Record<string, unknown> => {
+    const about: Record<string, unknown> = {};
+    if (typeof v.description === "string" && v.description.trim()) {
+      about.description = v.description.trim().slice(0, 200);
+    }
+    if (Array.isArray(v.links)) {
+      const links = v.links.filter((l): l is string => typeof l === "string" && l.trim() !== "");
+      if (links.length > 0) about.links = links.slice(0, 12);
+    }
+    return about;
+  };
+
+  /**
    * Slim a raw workspace payload to what an agent needs: identity + the module
-   * list (the platform's `vectors`). The raw object is ~24KB of UI state
-   * (menus, widgets, theme, users) — returning it cost ~6.8k tokens per
-   * session and still required a follow-up list_modules call. Pass through
-   * unknown shapes untouched so injected backends keep working.
+   * list (the platform's `vectors`) with each module's states. The raw object
+   * is ~24KB of UI state (menus, widgets, theme, users) — returning it cost
+   * ~6.8k tokens per session and still required a follow-up list_modules call.
+   * Pass through unknown shapes untouched so injected backends keep working.
    */
   const slimWorkspace = (workspaceId: string | number, data: unknown): unknown => {
     if (!data || typeof data !== "object") return data;
@@ -496,12 +646,18 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
         ? (ws.modules as Array<Record<string, unknown>>)
         : null;
     if (!source) return data;
-    const modules = source.map((v) => ({ name: v.name, emoji: v.emoji }));
+    const modules = source.map((v) => {
+      const states = slimStates(v.states);
+      return { name: v.name, emoji: v.emoji, ...aboutModule(v), ...(states ? { states } : {}) };
+    });
+    const described = modules.some((m) => "description" in m || "links" in m);
     return {
       workspaceId: ws.id ?? workspaceId,
       name: ws.name,
       modules,
-      hint: "Modules are listed above — no list_modules call needed.",
+      hint: described
+        ? "Modules are listed above — no list_modules call needed. Where names look alike, a module's description and links say which is which."
+        : "Modules are listed above — no list_modules call needed.",
     };
   };
 
@@ -514,7 +670,7 @@ export function registerTools(server: McpServer, backend: Backend): { configureT
       title: "List Workspaces",
       description: gatedDesc(
         caps.workspaces,
-        "List workspaces the current user has access to. Typically the first call of a session. If exactly one workspace matches, it is selected automatically and its module list is returned — no set_workspace or list_modules needed; otherwise call set_workspace next.",
+        "List workspaces the current user has access to. Typically the first call of a session. If exactly one workspace matches, it is selected automatically and its module list is returned — no set_workspace or list_modules needed; otherwise call set_workspace next. Administrators: without `search` this lists your own memberships; pass `search` to find any workspace by name.",
       ),
       inputSchema: {
         search: z
@@ -588,14 +744,19 @@ Workflow sequences after workspace is set:
         try {
           data = await backend.getWorkspace(resolved);
         } catch {
-          // Id lookup failed — the agent may have sent a name. Resolve it.
-          const list = await backend.listWorkspaces().catch(() => null);
-          const all = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : [];
+          // Id lookup failed — the agent may have sent a name. Resolve it, searching by that
+          // name: for an Administrator the unsearched list is only their own memberships,
+          // while a search reaches every workspace. The unsearched list is still what
+          // `available` shows when nothing matches.
+          const searched = await backend.listWorkspaces(requested).catch(() => null);
+          const candidates = Array.isArray(searched) ? (searched as Array<Record<string, unknown>>) : [];
           const lower = requested.toLowerCase();
           const match =
-            all.find((w) => String(w?.id) === requested) ??
-            all.find((w) => typeof w?.name === "string" && (w.name as string).toLowerCase() === lower);
+            candidates.find((w) => String(w?.id) === requested) ??
+            candidates.find((w) => typeof w?.name === "string" && (w.name as string).toLowerCase() === lower);
           if (!match) {
+            const list = await backend.listWorkspaces().catch(() => null);
+            const all = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : candidates;
             return err({
               structured: {
                 error: "workspace_not_found",
@@ -650,7 +811,7 @@ Workflow sequences after workspace is set:
     {
       title: "Get Module Schema",
       description:
-        "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.\n\nBoth tiers include your accessible `listings`: each carries its designed filter in the SAME shape as list_entries' `filters` (applied automatically when that listing is queried — pick the listing whose conditions already match the question and do NOT re-add them as `filters`), plus partialFilter (an inexpressible formula/script condition also applies), profileOnly (rows limited to the current user's own entries) and scripted markers. Pass a listing's `name` as list_entries' `listing`.",
+        "Get the canvas schema for a module. Use tier=basic (default) for fields and states only. Use tier=extended to also include activities and flows. Use basic for query operations. Use extended when you need to understand available activities and state transitions.\n\nWhat the module's designer wrote for an AI rides beside the name lists: `stateDetails` (both tiers) gives each state's ai_hint/ai_instruction — e.g. which states no longer count — and `activityDetails` (extended) gives each activity's `actor` (ai: you may submit it; hybrid: only after the user approves the planned submission; human: never — a person performs it), ai_hint/ai_instruction, confidence_threshold and `from` (the states it can be performed in). A top-level `ai_instruction` is the module's standing instruction — follow it.\n\nBoth tiers include your accessible `listings`: each carries its designed filter in the SAME shape as list_entries' `filters` (applied automatically when that listing is queried — pick the listing whose conditions already match the question and do NOT re-add them as `filters`), plus partialFilter (an inexpressible formula/script condition also applies), profileOnly (rows limited to the current user's own entries) and scripted markers. Pass a listing's `name` as list_entries' `listing`.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         tier: z
@@ -712,7 +873,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "List Entries",
       description:
-        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nAccess: non-admin users cannot query the unfiltered default 'Everything' view on modules that have listings — pass `listing` with one of their accessible listings (an access-denied response names them).\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. System fields (id, state, audit metadata, etc.) are always returned regardless.",
+        "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nAccess: non-admin users cannot query the unfiltered default 'Everything' view on modules that have listings — pass `listing` with one of their accessible listings (an access-denied response names them).\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. Every item carries entryId, documentId and state whatever `fields` holds; the other system fields (date, createdBy, createdDate, updatedBy, updatedDate, assignees, due) come with the full row, but when `fields` is given only if it names them.\n\nCheck each item's `state` before totalling, counting or ranking entries: a Cancelled or Draft entry usually must not count. get_module_schema's stateDetails says what each state means.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         listing: z
@@ -732,7 +893,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           .array(z.string())
           .optional()
           .describe(
-            "Field display names (or raw field names) to include in each entry's `data`. Strongly preferred over returning everything when the module has many or large fields — prunes both DB I/O and response tokens. Omit only when you actually need the full row. System fields are always returned.",
+            "Field display names (or raw field names) to include in each entry's `data`. Strongly preferred over returning everything when the module has many or large fields — prunes both DB I/O and response tokens. Omit only when you actually need the full row. entryId, documentId and state are always returned; name any other system field (date, createdBy, createdDate, updatedBy, updatedDate, assignees, due) here to get it.",
           ),
         workspaceId: wsParam,
       },
@@ -741,6 +902,16 @@ Load resource inistate://schema before modifying to know valid field types, colo
     async ({ module: moduleName, listing, state, search, filters, sortBy, sortDirection, currentPage, pageSize, fields, workspaceId }) => {
       try {
         applyWorkspace(workspaceId);
+        // A platform build that predates state-in-every-item drops `state` from a
+        // projected row unless it is named — and a row without its state passes a
+        // cancelled entry off as a live one. Name it, so the description holds on
+        // every server. (If every other name is a typo, the rows then come back with
+        // empty data rather than the server's full-row fallback; the fields hint
+        // below names the typos either way.)
+        const projection =
+          fields && fields.length > 0 && !fields.some((f) => f.toLowerCase() === "state")
+            ? [...fields, "state"]
+            : fields;
         const data = await backend.listEntries({
           module: moduleName,
           listing,
@@ -751,7 +922,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
           sortDirection,
           currentPage,
           pageSize,
-          fields,
+          fields: projection,
         });
         // A typo'd state, sortBy, or fields entry matches nothing — an empty
         // page reads as "no data", a wrong sortBy silently returns unsorted
@@ -838,7 +1009,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
     {
       title: "Get Activity Form",
       description:
-        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask.",
+        "Get the form fields, current values, and options for a module activity. Call this before the FIRST submit_activity on each (module, activity) pair — the form schema is stable within a session, so reuse it for subsequent entries (per-entry current values come from get_entry/list_entries). User values with no matching field: omit them and note the omission. Never fabricate form data — when a value is uncertain, submit with a lower ai.confidence and state the assumption instead of blocking to ask. A field may carry `label`: the name THIS activity's form shows for it (the designer relabelled it) — when the user names a field by that label, it means this field; key `input` by the field name (the label is accepted too). The response's `actor` says who may perform the activity: ai — submit it; hybrid — show the user what you plan to submit and get their explicit approval, then submit with confirmed: true; human — do not submit, a person performs it in Inistate. The response's ai_hint/ai_instruction are the designer's guidance for performing the activity; an `ai_hint` on a field or Table/List column says how to fill it.",
       inputSchema: {
         module: z.string().describe("Module name from list_modules"),
         activity: z
@@ -882,11 +1053,21 @@ Load resource inistate://schema before modifying to know valid field types, colo
         activity: z.string().default("create"),
         entryId: z.union([z.string(), z.number()]).optional().describe("Omit for create"),
         entryIds: z.array(z.union([z.string(), z.number()])).optional().describe("For bulk ops"),
+        // `null` is the one non-object worth tolerating: several clients send it for "no fields".
+        // Anything else that is not an object reaches the handler and is REFUSED there. It used to
+        // be coerced to undefined, which meant a string or array of field values was dropped and the
+        // activity submitted with nothing - on create, an empty entry, answered with success.
+        // The schema is advertised as an object: typed as unknown it carried no JSON type at all, and
+        // models then sent the whole input as a JSON-encoded string (Claude Haiku 4.5 did so in most
+        // runs). A non-object is wrapped so it still reaches the handler's refusal, not a Zod -32602.
         input: z
-          .preprocess(v => (v != null && typeof v === "object" && !Array.isArray(v) ? v : undefined), z.record(z.unknown()).optional())
-          .describe("Field values keyed by display name. File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. User/Module shapes are validated pre-flight — bare ids, bare strings, or objects missing any required key will be rejected."),
+          .preprocess(
+            v => (v === null ? undefined : isNonObjectInput(v) ? { [NON_OBJECT_INPUT]: v } : v),
+            z.record(z.unknown()).optional(),
+          )
+          .describe("Field values keyed by display name, as an object (never a JSON-encoded string). File/Image: {name,path}. Module: {id,value} (both required). User: {id,value,username} (all three required). Plural variants (Users/Modules/Files/Images): arrays of those objects. Location: {lat,lng,placeName} — lat/lng unquoted numbers, placeName the place's display name; never a combined \"lat,lng\" string. Table: an array of row objects keyed by sub-field name, e.g. [{\"Item Code\": \"A-1\", \"Qty\": 2}]. Number/Currency/Integer: JSON numbers, never strings, at the top level and inside Table rows. YesNo: true or false, never \"yes\". Text/MultilineText/Email: one string — join lines with \\n, never an array. User/Module/Location shapes and YesNo/text value types are validated pre-flight — bare ids, bare strings, wrong value types, or objects missing any required key will be rejected."),
         state: z.string().optional().describe("Target state name"),
-        comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
+        comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
         assignees: z.array(z.string()).optional().describe("Usernames"),
         due: z.string().optional().describe("ISO 8601"),
         ai: submitAiParam,
@@ -906,7 +1087,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       activity,
       entryId,
       entryIds,
-      input,
+      input: wrappedInput,
       state,
       comment,
       assignees,
@@ -921,6 +1102,24 @@ Load resource inistate://schema before modifying to know valid field types, colo
       const expectedVersion = (extra as Record<string, unknown>).expectedVersion as number | undefined;
       try {
         applyWorkspace(workspaceId);
+        // Field values must arrive as an object keyed by field name. Anything else - a string, a
+        // number, an array - is refused rather than dropped: submitting the activity without it
+        // would create an empty entry and report success, which is the worst possible answer.
+        const rawInput = unwrapNonObjectInput(wrappedInput);
+        if (rawInput != null && (typeof rawInput !== "object" || Array.isArray(rawInput))) {
+          const structured = {
+            error: "invalid_input_shape",
+            message: isJsonObjectString(rawInput)
+              ? "`input` was sent as a JSON-encoded string. Send the object itself, { \"Field Name\": value, … }, not a string containing it. Nothing was submitted."
+              : `\`input\` must be an object keyed by field display name, but a ${Array.isArray(rawInput) ? "array" : typeof rawInput} was sent. Nothing was submitted.`,
+            activity,
+            agent_action:
+              "Call get_form for this module and activity, then pass `input` as { \"Field Name\": value, … }. A list of values belongs in submit_activities.items, one object per entry.",
+          };
+          log("submit_activity", `module=${moduleName} activity=${activity} → BLOCKED: invalid_input_shape (${Array.isArray(rawInput) ? "array" : typeof rawInput})`);
+          return err({ structured });
+        }
+        const input = rawInput as Record<string, unknown> | undefined;
         // An empty-string entryId reaches the platform as a 500 — treat it as
         // absent (create).
         if (typeof entryId === "string" && entryId.trim() === "") entryId = undefined;
@@ -970,7 +1169,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
         let inputKeyNotes: string[] = [];
         const fieldTypes = input ? await getModuleFieldTypes(moduleName, fetchSchema) : null;
         if (input && fieldTypes) {
-          const keys = resolveInputKeys(fieldTypes, input);
+          // Only a key that is no field name can be a relabelled field's label — fetch
+          // the activity's form just then.
+          const labels = Object.keys(input).some((k) => !fieldTypes.has(k))
+            ? await fetchActivityLabels(moduleName, activity, entryId)
+            : null;
+          const keys = resolveInputKeys(fieldTypes, input, labels);
           if (keys.unknown.length > 0) {
             const stateHint = keys.unknown.some((k) => /^(state|status)$/i.test(k))
               ? " To set the workflow state, use the top-level `state` parameter (requires user confirmation), not an input field."
@@ -988,27 +1192,23 @@ Load resource inistate://schema before modifying to know valid field types, colo
             );
             return err({ structured });
           }
-          inputKeyNotes = keys.remapped.map(
-            (r) => `Input key '${r.from}' matched field '${r.to}' — use exact field names.`,
-          );
+          inputKeyNotes = keys.remapped.map(labelKeyNote);
         }
-        // Reference-shape pre-flight: User/Module fields must be { id, value }.
+        // Input-shape pre-flight: User/Module fields must be { id, value };
+        // Location fields must be { lat, lng, placeName }.
         if (input) {
           const shapeErrors = validateInputShapesWith(fieldTypes, input);
           if (shapeErrors.length > 0) {
             const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
+            const described = describeShapeErrors(shapeErrors);
             const structured = {
-              error: "invalid_reference_field_shape",
-              message:
-                "One or more User/Module fields were submitted with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+              ...described,
               activity,
               fields: shapeErrors,
-              agent_action:
-                "Re-read the entry or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
             };
             log(
               "submit_activity",
-              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: invalid_reference_field_shape (${shapeErrors.length} field${shapeErrors.length === 1 ? "" : "s"})`,
+              `module=${moduleName} activity=${activity} entry=${target} → BLOCKED: ${described.error} (${shapeErrors.length} field${shapeErrors.length === 1 ? "" : "s"})`,
             );
             return err({ structured });
           }
@@ -1096,8 +1296,12 @@ Load resource inistate://schema before modifying to know valid field types, colo
         module: z.string(),
         activity: z.string().default("create"),
         ai: bulkAiParam,
+        // unwrapItems only unwraps { items: [...] }. It does NOT drop malformed entries any more:
+        // filtering them meant a batch of a hundred could submit eighty-eight and answer success,
+        // and the caller had no way to learn which twelve never happened. A bad item now fails the
+        // whole call, naming its index.
         items: z.preprocess(
-          v => { const a = unwrapItems(v); return Array.isArray(a) ? a.filter(x => x != null && typeof x === "object" && !Array.isArray(x)) : a; },
+          v => unwrapItems(v),
           z
           .array(
             z.object({
@@ -1105,9 +1309,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
               input: z
                 .record(z.unknown())
                 .optional()
-                .describe("Field values keyed by display name. Same shape as submit_activity.input."),
+                .describe("Field values keyed by display name. Same shape as submit_activity.input: Table values are arrays of row objects, numbers are JSON numbers."),
               state: z.string().optional().describe("Per-item target state name"),
-              comment: z.string().optional().describe("Optional. Add only when it carries information not already in the field values or reasoning. Keep short and precise."),
+              comment: z.string().optional().describe("Optional. Only when necessary to communicate with the user directly. Be concise; leave the detail in the fields."),
               assignees: z.array(z.string()).optional(),
               due: z.string().optional().describe("ISO 8601"),
               ai: bulkAiShape
@@ -1268,17 +1472,20 @@ Load resource inistate://schema before modifying to know valid field types, colo
         // Unknown keys block the batch: the platform silently drops them,
         // which is data loss with no signal. Near-miss keys are remapped.
         const fieldTypes = await getModuleFieldTypes(moduleName, fetchSchema);
+        const labels =
+          fieldTypes &&
+          items.some((it) => it.input && Object.keys(it.input).some((k) => !fieldTypes.has(k)))
+            ? await fetchActivityLabels(moduleName, activity)
+            : null;
         const keyFailures: Array<{ idx: number; unknown: string[] }> = [];
         const remapNotes = new Set<string>();
         const shapeFailures: Array<{ idx: number; fields: unknown[] }> = [];
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           if (!it.input) continue;
-          const keys = resolveInputKeys(fieldTypes, it.input as Record<string, unknown>);
+          const keys = resolveInputKeys(fieldTypes, it.input as Record<string, unknown>, labels);
           if (keys.unknown.length > 0) keyFailures.push({ idx: i, unknown: keys.unknown });
-          for (const r of keys.remapped) {
-            remapNotes.add(`Input key '${r.from}' matched field '${r.to}' — use exact field names.`);
-          }
+          for (const r of keys.remapped) remapNotes.add(labelKeyNote(r));
           const errs = validateInputShapesWith(fieldTypes, it.input as Record<string, unknown>);
           if (errs.length > 0) shapeFailures.push({ idx: i, fields: errs });
         }
@@ -1298,18 +1505,17 @@ Load resource inistate://schema before modifying to know valid field types, colo
           return err({ structured });
         }
         if (shapeFailures.length > 0) {
+          const described = describeShapeErrors(
+            shapeFailures.flatMap((f) => f.fields as RefShapeError[]),
+          );
           const structured = {
-            error: "invalid_reference_field_shape",
-            message:
-              "One or more items submit User/Module fields with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+            ...described,
             activity,
             items: shapeFailures,
-            agent_action:
-              "Re-read the entries or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
           };
           log(
             "submit_activities",
-            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: invalid_reference_field_shape (${shapeFailures.length} items)`,
+            `module=${moduleName} activity=${activity} count=${items.length} → BLOCKED: ${described.error} (${shapeFailures.length} items)`,
           );
           return err({ structured });
         }
@@ -1705,6 +1911,7 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       states,
       activities,
       flows,
+      card,
       workspaceId,
     }) => {
       try {
@@ -1716,6 +1923,10 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        // The listing card rides with the schema only where the backend honours it; a
+        // backend without the capability would silently drop it, so say so instead.
+        if (card && caps.card) body.card = card;
+        else if (card) log("create_module", `name=${name} → card ignored: this backend does not accept listing cards`);
         normalizeModuleSections(body);
         if (!Array.isArray(body.information) || (body.information as unknown[]).length === 0) {
           return err({
@@ -1786,10 +1997,32 @@ Load resources inistate://schema and inistate://design-guide before designing fo
       states,
       activities,
       flows,
+      card,
       workspaceId,
     }) => {
       try {
         applyWorkspace(workspaceId);
+        // A section that arrives EMPTY is refused. An empty array is truthy, and a section that is
+        // passed replaces that section's entire list, so `information: []` deleted every field on
+        // the module - silently, and reported as a successful update. No agent means that; it is
+        // what a filter matching nothing looks like. `flows: []` is the one that can be meant
+        // (a module with no transitions), so it is allowed through.
+        const emptied = (["information", "states", "activities"] as const).filter(
+          (section) => Array.isArray({ information, states, activities }[section])
+            && ({ information, states, activities }[section] as unknown[]).length === 0,
+        );
+        if (emptied.length > 0) {
+          const structured = {
+            error: "empty_section",
+            message: `Refusing to update: ${emptied.map((x) => `'${x}'`).join(", ")} arrived empty, and a section that is passed REPLACES that section entirely — this would have deleted every item in it. Nothing was updated.`,
+            sections: emptied,
+            agent_action:
+              "Omit a section you do not mean to change; it is left untouched. To edit one, call get_module_canvas and send that section back in full, with your change applied.",
+          };
+          log("update_module", `id=${id} → BLOCKED: empty_section (${emptied.join("|")})`);
+          return err({ structured });
+        }
+
         const body: Record<string, unknown> = { id };
         if (name) body.name = name;
         if (icon) body.icon = icon;
@@ -1798,6 +2031,10 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         if (states) body.states = states;
         if (activities) body.activities = activities;
         if (flows) body.flows = flows;
+        // A `card` replaces the module's card (the platform keeps a person's own card and
+        // says so in cardStatus); omit it to leave the card alone.
+        if (card && caps.card) body.card = card;
+        else if (card) log("update_module", `id=${id} → card ignored: this backend does not accept listing cards`);
         normalizeModuleSections(body);
         const idRepairs = await stripUnknownSectionIds(String(id), body);
         // Partial payloads skip validateDesign below, and flows are loose on

@@ -188,6 +188,8 @@ describe("CloudBackend capability contract", () => {
       governance: true,
       scaffold: false,
       modes: ["runtime", "configure", "frontend"],
+      // The hosted Platform maps, validates and stores the listing card sent with a schema.
+      card: true,
     });
   });
 });

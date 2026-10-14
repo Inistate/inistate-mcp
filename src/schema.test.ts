@@ -5,15 +5,20 @@ import {
   isValidActor,
   suggestColorForState,
   validateDesign,
+  validateCard,
   designWorkflow,
+  scaffoldCard,
   normalizeFieldType,
   normalizeStateColor,
+  storableStateColor,
   normalizeIndustry,
   parseStatesFromDescription,
   parseFieldsFromDescription,
   VALID_FIELD_TYPES,
   VALID_COLORS,
   VALID_ACTOR_TYPES,
+  RESERVED_ACTIVITY_NAMES,
+  RESERVED_INFORMATION_NAMES,
 } from "./schema.js";
 
 // ──────────────────────────────────────────────
@@ -206,7 +211,7 @@ describe("validateDesign", () => {
     expect(result.errors.some((e) => e.includes("Duplicate state name"))).toBe(true);
   });
 
-  it("normalizes off-palette state colors with a warning instead of erroring", () => {
+  it("keeps an off-palette state color and suggests the palette, on create", () => {
     const schema = {
       ...minimalWorkflow,
       states: [
@@ -216,7 +221,24 @@ describe("validateDesign", () => {
     };
     const result = validateDesign(schema);
     expect(result.valid).toBe(true);
-    expect(result.warnings.some((w) => w.includes("'Open'") && w.includes("normalized to '#C0392B'"))).toBe(true);
+    expect(
+      result.warnings.some((w) => w.includes("'Open'") && w.includes("kept as sent")),
+    ).toBe(true);
+  });
+
+  it("does not nag about existing colors on an update", () => {
+    const schema = {
+      ...minimalWorkflow,
+      states: [
+        { name: "Open", color: "#FF0000", initial: true },
+        { name: "Closed", color: "#1E6B45" },
+      ],
+    };
+    // These came from the platform: they are the customer's design, and one warning per state
+    // would bury the warnings that matter.
+    const result = validateDesign(schema, "update");
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("palette"))).toBe(false);
   });
 
   it("catches duplicate activity names", () => {
@@ -327,6 +349,62 @@ describe("validateDesign", () => {
     };
     const result = validateDesign(schema);
     expect(result.errors.some((e) => e.includes("confidence_threshold"))).toBe(true);
+  });
+
+  it("warns about listing-card slips and never fails the design for them", () => {
+    const schema = {
+      name: "Expense Claims",
+      information: [
+        { name: "Category", type: "Selection", options: ["Meals", "Transport"] },
+        { name: "Merchant", type: "Text" },
+        { name: "Amount", type: "Currency" },
+        { name: "Receipt", type: "Image" },
+      ],
+      states: [
+        { name: "Submitted", color: "#5A6070", initial: true },
+        { name: "Approved", color: "#1E6B45" },
+      ],
+      activities: [{ name: "Approve", actor: "human" }],
+      flows: [{ from: "Submitted", to: "Approved", activity: "Approve" }],
+      card: {
+        type: "detail",
+        action: "Archive",
+        rows: [
+          { items: [{ type: "field", name: "Category", size: "S", style: "n" }, { type: "field", name: "Receipt" }] },
+          { items: [{ type: "field", name: "Merchants" }, { type: "activity", name: "Approve" }] },
+          { items: [{ type: "activity", name: "Create" }] },
+          { items: [{ type: "widget", name: "defaultCard" }, { type: "state" }] },
+        ],
+      },
+    };
+    const result = validateDesign(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    const text = result.warnings.join("\n");
+    expect(text).toContain("'action' must be 'view', 'edit' or an activity name");
+    expect(text).toContain("'Category' is a selection field and takes no 'size'/'style'");
+    expect(text).toContain("image/file field 'Receipt' must be the only item");
+    expect(text).toContain("field 'Merchants' is not defined");
+    expect(text).toContain("mixes activities with fields");
+    expect(text).toContain("'Create' is a standard action");
+    expect(text).toContain("widget must be the only item");
+
+    // A well-formed card, including the string and alias shorthands the tool repairs, has nothing to say.
+    const clean = {
+      ...schema,
+      card: {
+        type: "detail",
+        action: "view",
+        icon: { field: "Category", size: "S" },
+        rows: [
+          { items: [{ type: "state" }] },
+          { items: [{ type: "field", name: "Merchant", size: "L", style: "b" }, { type: "field", name: "Amount", size: "S", style: "n" }] },
+          { items: [{ type: "activity", name: "Approve" }] },
+        ],
+      },
+    };
+    expect(validateCard(clean)).toEqual([]);
+    expect(validateCard({ ...schema, card: undefined })).toEqual([]);
   });
 
   it("warns about unreachable states", () => {
@@ -487,6 +565,83 @@ describe("validateDesign — platform parity", () => {
     });
     expect(result.valid).toBe(true);
     expect(result.warnings.some((w) => w.includes("'Title'") && w.includes("'required'"))).toBe(true);
+  });
+});
+
+// SS06168: create_module built a "Service Job" module whose custom activity was named "Assign";
+// Studio reserves that name and showed the module as "Configuration incomplete".
+describe("validateDesign — Studio's reserved names", () => {
+  const serviceJob = (activityName: string, extra: Record<string, any> = {}) => ({
+    name: "Service Job",
+    information: [
+      { name: "Job Title", type: "Text" },
+      { name: "Technician", type: "Text", ...(extra.field || {}) },
+    ],
+    states: [
+      { name: "New", color: "#5A6070", initial: true },
+      { name: "Assigned", color: "#2968A8" },
+    ],
+    activities: [{ name: activityName, actor: "human", fields: ["Technician"], ...(extra.activity || {}) }],
+    flows: [{ from: "New", to: "Assigned", activity: activityName }],
+  });
+
+  it.each(["Assign", "assign", " Assign ", "Change Status", "Update", "Sync", "Manage"])(
+    "refuses a new activity named '%s'",
+    (name) => {
+      const result = validateDesign(serviceJob(name));
+      expect(result.valid).toBe(false);
+      const error = result.errors.find((e) => e.startsWith(`Activity '${name}' uses a reserved name`));
+      expect(error).toBeDefined();
+      expect(error).toContain("Assign Technician");
+    },
+  );
+
+  it.each(["Assign Technician", "Reassign", "Approve", "Change Status Now"])(
+    "accepts '%s', which only contains a reserved word",
+    (name) => {
+      expect(validateDesign(serviceJob(name)).valid).toBe(true);
+    },
+  );
+
+  it.each(["ID", "Created By", "assign to", "Last Change By"])("refuses a new field named '%s'", (name) => {
+    const result = validateDesign({
+      ...serviceJob("Dispatch"),
+      information: [{ name: "Job Title", type: "Text" }, { name, type: "Text" }],
+      activities: [{ name: "Dispatch", actor: "human" }],
+    });
+    expect(result.errors.some((e) => e.startsWith(`Information field '${name}' uses a reserved name`))).toBe(true);
+  });
+
+  it("refuses a reserved activity in a record list (no states) too, as the platform does", () => {
+    const result = validateDesign({
+      name: "Service Jobs",
+      information: [{ name: "Job Title", type: "Text" }],
+      activities: [{ name: "Assign" }],
+    });
+    expect(result.errors.some((e) => e.startsWith("Activity 'Assign' uses a reserved name"))).toBe(true);
+  });
+
+  it("leaves an existing activity or field (carrying its id) alone on update", () => {
+    const existing = serviceJob("Assign", {
+      activity: { id: "actAssign" },
+      field: { id: "fTech" },
+    });
+    existing.information[0] = { name: "Created By", type: "Text", id: "fCreatedBy" } as any;
+    const result = validateDesign(existing, "update");
+    expect(result.errors.filter((e) => e.includes("reserved name"))).toEqual([]);
+  });
+
+  it("refuses a NEW reserved activity on update", () => {
+    const result = validateDesign(serviceJob("Assign"), "update");
+    expect(result.errors.some((e) => e.startsWith("Activity 'Assign' uses a reserved name"))).toBe(true);
+  });
+
+  it("uses Studio's lists", () => {
+    expect(RESERVED_ACTIVITY_NAMES).toEqual([
+      "create", "edit", "update", "view", "delete", "change status",
+      "duplicate", "comment", "assign", "sync", "manage",
+    ]);
+    expect(RESERVED_INFORMATION_NAMES).toEqual(["id", "assign to", "created by", "last change by"]);
   });
 });
 
@@ -729,9 +884,11 @@ describe("validateDesign — input normalization", () => {
     };
     const result = validateDesign(schema);
     expect(result.valid).toBe(false);
+    // Wrong key names (source/target) leave no activity, which is the one part a flow cannot do
+    // without. It is reported once, and never as a dangling state reference to 'undefined'.
     const missing = result.errors.filter((e) => e.includes("is missing"));
     expect(missing).toHaveLength(1);
-    expect(missing[0]).toContain("'from', 'to', 'activity'");
+    expect(missing[0]).toContain("is missing 'activity'");
     expect(result.errors.some((e) => e.includes("'undefined'"))).toBe(false);
   });
 
@@ -866,6 +1023,49 @@ describe("designWorkflow", () => {
     }
   });
 
+  it("scaffolds a listing card that references only the template's own fields", () => {
+    for (const result of [
+      designWorkflow("approval workflow"),
+      designWorkflow("support ticket system for customer issues"),
+      designWorkflow("a directory of vendors"),
+      designWorkflow("Track client projects. Fields: project name (text), client (text), budget (currency), photo (image)"),
+    ]) {
+      const card = result.template.card;
+      expect(card).toBeDefined();
+      expect(["detail", "grid"]).toContain(card.type);
+      expect(card.rows.length).toBeGreaterThan(0);
+      expect(card.rows.length).toBeLessThanOrEqual(5);
+      // The template's own validator finds nothing to say about the scaffold.
+      expect(validateCard(result.template)).toEqual([]);
+      const fieldNames = new Set(result.template.information.map((f: any) => f.name));
+      for (const row of card.rows) {
+        expect(row.items.length).toBeGreaterThan(0);
+        expect(row.items.length).toBeLessThanOrEqual(3);
+        for (const item of row.items) {
+          if (item.type === "field") expect(fieldNames.has(item.name)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("leads a ticket card with the defaultCard widget and a photo module with the image", () => {
+    const tickets = designWorkflow("support ticket system for customer issues").template.card;
+    expect(tickets.rows[0].items[0]).toEqual({ type: "widget", name: "defaultCard", settings: { createdBy: false } });
+    expect(tickets.action).toBe("view");
+
+    const photos = designWorkflow("Property listings. Fields: address (text), price (currency), photo (image)").template.card;
+    expect(photos.type).toBe("grid");
+    expect(photos.size).toBe("L");
+    expect(photos.icon).toBeUndefined();
+    expect(photos.rows[0].items[0]).toMatchObject({ type: "field", name: "Photo", ratio: "16:9" });
+
+    const vendors = designWorkflow("a directory of vendors").template.card;
+    expect(vendors.type).toBe("detail");
+    expect(vendors.action).toBe("edit");
+    expect(vendors.rows[0].items[0]).toMatchObject({ type: "field", name: "Name", size: "L", style: "b" });
+    expect(scaffoldCard("record_list", [], [], [])).toBeUndefined();
+  });
+
   it("uses states enumerated in the description over the pattern template", () => {
     const result = designWorkflow(
       "Track client projects. Lifecycle states: Proposed, Active, On Hold, Completed, Cancelled. Each project has an owner and budget.",
@@ -902,3 +1102,92 @@ describe("designWorkflow", () => {
   });
 });
 
+// The shapes a real, in-use module actually has. Every one of these was rejected until 2026-09-21,
+// so the platform's own Issue module - fourteen states, thirty-five flows, used daily - could not be
+// updated through this server at all. Read from ws 1138 on the day these were written.
+describe("a real module's canvas round-trips", () => {
+  const realish = {
+    name: "Issue",
+    information: [
+      { name: "Priority", type: "Selection", options: ["High", "Low"] },
+      { name: "Person In Charge", type: "User", connection: "Employee" },
+    ],
+    states: [
+      { name: "Open", color: "#4cbb17", initial: true },
+      { name: "In Progress", color: "#2a52be" },
+      { name: "Closed", color: "#000000" },
+    ],
+    activities: [
+      { name: "Done", fields: [{ name: "Priority" }] },
+      { name: "Assign Person", fields: [{ name: "Person In Charge" }] },
+      { name: "Reopen" },
+    ],
+    flows: [
+      // The activity runs without moving the record: no 'to' at all.
+      { from: "Open", activity: "Done" },
+      // From any state: the canvas writes an empty 'from' literally.
+      { from: "", to: "In Progress", activity: "Assign Person" },
+      // Both: runs anywhere, moves nothing.
+      { from: "", activity: "Done" },
+      { from: "Closed", to: "Open", activity: "Reopen" },
+    ],
+  };
+
+  it("accepts a flow with no 'to' — the activity does not move the record", () => {
+    const result = validateDesign(JSON.parse(JSON.stringify(realish)), "update");
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts a flow with an empty 'from' — it can run from any state", () => {
+    const schema = { ...realish, flows: [{ from: "", to: "In Progress", activity: "Assign Person" }] };
+    const result = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(result.errors).toEqual([]);
+  });
+
+  it("still rejects a flow with no activity", () => {
+    const schema = { ...realish, flows: [{ from: "Open", to: "Closed" }] };
+    const result = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(result.errors.some((e) => e.includes("is missing 'activity'"))).toBe(true);
+  });
+
+  it("still rejects a NAMED state that does not exist", () => {
+    const schema = { ...realish, flows: [{ from: "Open", to: "Atlantis", activity: "Done" }] };
+    const result = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(result.errors.some((e) => e.includes("'Atlantis'"))).toBe(true);
+  });
+
+  it("keeps every state colour exactly as the platform stores it", () => {
+    for (const state of realish.states) {
+      expect(storableStateColor(state.color, state.name).color).toBe(state.color);
+      expect(storableStateColor(state.color, state.name).changed).toBe(false);
+    }
+    // Black had been snapping to a green. Nobody asked for that.
+    expect(storableStateColor("#000000", "Closed").color).toBe("#000000");
+  });
+
+  it("still maps a colour the platform cannot store", () => {
+    expect(storableStateColor("gray", "Draft")).toEqual({ color: "#5A6070", changed: true });
+    expect(storableStateColor("not a colour at all", "Failed").changed).toBe(true);
+    expect(storableStateColor(undefined, "Open")).toEqual({ color: undefined, changed: false });
+  });
+
+  it("warns, rather than fails, on a field ref the canvas read did not return", () => {
+    // Layout elements - labels, dividers - are referenced by activities but are not information
+    // fields, and get_module_canvas does not return them.
+    const schema = {
+      ...realish,
+      activities: [{ name: "Done", fields: [{ name: "Jf4GHyw8Fie9" }] }],
+      flows: [{ from: "Open", activity: "Done" }],
+    };
+
+    const update = validateDesign(JSON.parse(JSON.stringify(schema)), "update");
+    expect(update.valid).toBe(true);
+    expect(update.warnings.some((w) => w.includes("Jf4GHyw8Fie9"))).toBe(true);
+
+    // On create the same ref is a mistake worth stopping: nothing was read, so nothing was stripped.
+    const create = validateDesign(JSON.parse(JSON.stringify(schema)), "create");
+    expect(create.valid).toBe(false);
+    expect(create.errors.some((e) => e.includes("Jf4GHyw8Fie9"))).toBe(true);
+  });
+});

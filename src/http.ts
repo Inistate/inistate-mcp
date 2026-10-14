@@ -16,6 +16,9 @@ import {
   decodeJwtSub,
   isConnectionToken,
   connectionModeKey,
+  browserSecretCookieName,
+  browserSecretCookieOptions,
+  readCookie,
   SUPPORTED_SCOPES,
 } from "./oauth-provider.js";
 import { getUserMode } from "./mode-store.js";
@@ -79,7 +82,17 @@ app.post("/authorize/callback", express.urlencoded({ extended: false }), (req, r
       return;
     }
 
-    const { redirectUrl } = oauthProvider.completeAuthorization(nonce, jwt, refreshToken || undefined);
+    // SS05808: the flow may only be completed by the browser that started it - the
+    // HttpOnly cookie /authorize set is the proof; the nonce alone is not.
+    const cookieName = browserSecretCookieName(String(nonce));
+    const browserSecret = readCookie(req.headers.cookie, cookieName);
+    const { redirectUrl } = oauthProvider.completeAuthorization(
+      String(nonce),
+      String(jwt),
+      refreshToken || undefined,
+      browserSecret,
+    );
+    res.clearCookie(cookieName, { path: browserSecretCookieOptions(ISSUER_URL.startsWith("https:")).path });
     res.redirect(302, redirectUrl);
   } catch (error) {
     console.error("Authorize callback error:", error);
@@ -124,10 +137,21 @@ app.post("/mcp", express.raw({ type: "*/*", limit: "4mb" }), async (req, res) =>
 
     const body = JSON.parse(req.body.toString());
 
+    // SS05807: verify the bearer before it decides anything. Tokens this process
+    // issued answer from memory; every other one is introspected against the
+    // backend (cached). A forged JWT used to pass the regex above and pick
+    // whose stored mode the request ran under via its unverified subject.
+    const bearer = authHeader.replace(/^Bearer\s+/i, "");
+    try {
+      await oauthProvider.verifyAccessToken(bearer);
+    } catch (err) {
+      sendUnauthorized(res, err instanceof Error ? err.message : "Invalid token");
+      return;
+    }
+
     // Extract per-request auth context from HTTP headers. Connection tokens
     // (ist_) are opaque — key per-user state off a hash of the token instead
     // of the JWT subject; stable for the session, reset on rotation.
-    const bearer = authHeader.replace(/^Bearer\s+/i, "");
     const userId =
       decodeJwtSub(bearer) ??
       (isConnectionToken(bearer) ? connectionModeKey(bearer) : undefined);

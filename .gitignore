@@ -10,3 +10,8 @@ bench/
 # CONFIDENTIAL — internal spec for the closed inistate-core product.
 # Must NOT be published in this open-source (MIT) repo. See the file's header.
 Inistate_Core_Specification.md
+# Ad-hoc eval and bench scripts dropped at the repo root. Every one written so far has carried a
+# live OpenRouter key, and two of them an Inistate login key as well, because that is the quickest
+# way to get a one-off run going. This repo is public and MIT: one `git add -A` would publish them.
+# Same reason bench/ is ignored above. Committed tooling lives in scripts/, which stays tracked.
+/*.mjs

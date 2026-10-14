@@ -1,0 +1,42 @@
+name: CI
+
+# The repository had no CI at all: 335 tests, and nothing ran them unless somebody remembered to.
+# This is deliberately build-and-test only. Publishing stays a manual, deliberate act — see the
+# release scripts in package.json and the "Releasing" section of the README.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `npm ci` rather than `npm i`: it installs exactly the lockfile and fails if the two have
+      # drifted, which is the whole point of running this on a machine that is not somebody's laptop.
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm test
+
+      # A release consumes the changeset files, so an unreleased change should always carry one.
+      # A warning, not a failure: plenty of pull requests (CI config, README, a test) change nothing
+      # a user of the package would notice.
+      - name: Note whether this change carries a changeset
+        if: github.event_name == 'pull_request'
+        run: |
+          count=$(ls .changeset/*.md 2>/dev/null | grep -v README | wc -l)
+          echo "pending changesets: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::No changeset in .changeset/. If this change affects users of the package, run 'npm run changeset'."
+          fi

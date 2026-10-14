@@ -12,6 +12,11 @@ import { requestContext } from "./context.js";
  *     parameter) require `confirmed: true`.
  *  3. Activities whose `actor` is `human` are never executable by an AI agent.
  *  4. Activities whose `actor` is `hybrid` require `confirmed: true`.
+ *
+ * Rules 3 and 4 cover custom activities and the standard create/edit, whose
+ * actor a module can set (creating an ERP invoice is hybrid). The actor comes
+ * from the extended schema's activityDetails, which every reader can fetch;
+ * the canvas is the fallback for servers that list names only.
  */
 
 interface ActivityDef {
@@ -24,10 +29,13 @@ interface FieldInfo {
   type: string;
 }
 
-// The extended schema tier returns activities as plain strings (names only) —
-// the canvas is the source of actor data. Tolerate both shapes.
+// The extended schema tier lists activities as plain names, and beside them
+// activityDetails: one { name, actor, ai_hint?, … } per name, carrying the
+// actor the platform resolves for it. Servers before activityDetails send the
+// names only; the canvas is the source of actor data then. Tolerate both.
 interface ExtendedSchema {
   activities?: Array<ActivityDef | string>;
+  activityDetails?: ActivityDef[];
   information?: FieldInfo[];
   states?: Array<string | { name?: string }>;
   flows?: Record<string, { activities?: Record<string, string> }>;
@@ -39,11 +47,13 @@ interface CanvasSchema {
 
 const REF_FIELD_TYPES = new Set(["User", "Users", "Module", "Modules"]);
 
-// Standard activities are inherent platform operations and have no actor in the
-// module schema. They bypass the actor check (but state-change checks still run).
-// The platform uses both names for the direct state change — availableActivities
-// lists "changeState" while forms and history say "changeStatus".
-const STANDARD_ACTIVITIES = new Set([
+const LOCATION_FIELD_TYPE = "Location";
+
+// Standard activities are inherent platform operations. Most bypass the actor
+// check (state-change checks still run). The platform uses both names for the
+// direct state change — availableActivities lists "changeState" while forms
+// and history say "changeStatus".
+const STANDARD_ACTIVITIES = [
   "create",
   "edit",
   "delete",
@@ -53,7 +63,25 @@ const STANDARD_ACTIVITIES = new Set([
   "view",
   "changeStatus",
   "changeState",
-]);
+];
+
+// create and edit default to actor 'ai', so any other actor the schema reports
+// for them is one the module set on purpose — honoured like a custom activity's.
+const ACTOR_CHECKED_STANDARDS = new Set(["create", "edit"]);
+
+/** The standard activity a name stands for — the platform matches these ids case-insensitively. */
+function standardActivity(activity: string): string | null {
+  const lower = activity.toLowerCase();
+  return STANDARD_ACTIVITIES.find((s) => s.toLowerCase() === lower) ?? null;
+}
+
+/**
+ * An activity name as the platform resolves one: case-insensitive, spaces
+ * ignored. "post" runs Post, so it must meet Post's actor.
+ */
+function activityKey(name: string): string {
+  return name.toLowerCase().replace(/ /g, "");
+}
 
 interface SchemaCacheEntry {
   schema: ExtendedSchema;
@@ -158,23 +186,42 @@ async function getCanvasSchema(
   return canvas;
 }
 
+/** The first entry naming `activity` (as the platform resolves names) that carries an actor. */
+function findWithActor(
+  list: Array<ActivityDef | string> | undefined,
+  activity: string,
+): ActivityDef | null {
+  const key = activityKey(activity);
+  for (const a of list ?? []) {
+    if (a && typeof a === "object" && typeof a.name === "string" && activityKey(a.name) === key) {
+      return a.actor ? a : null;
+    }
+  }
+  return null;
+}
+
+/** The activity's actor as the extended schema reports it; null when it names none. */
+async function getReportedActivityDef(
+  moduleName: string,
+  activity: string,
+  fetchSchema: SchemaFetcher,
+): Promise<ActivityDef | null> {
+  const schema = await getExtendedSchema(moduleName, fetchSchema);
+  return findWithActor(schema?.activityDetails, activity) ?? findWithActor(schema?.activities, activity);
+}
+
 async function getActivityDef(
   moduleName: string,
   activity: string,
   fetchSchema: SchemaFetcher = defaultSchemaFetcher,
   fetchCanvas: CanvasFetcher = defaultCanvasFetcher,
 ): Promise<ActivityDef | null> {
-  const schema = await getExtendedSchema(moduleName, fetchSchema);
-  for (const a of schema?.activities ?? []) {
-    if (a && typeof a === "object" && a.name === activity) {
-      if (a.actor) return a;
-      break; // listed without actor info — consult the canvas
-    }
-  }
+  const reported = await getReportedActivityDef(moduleName, activity, fetchSchema);
+  if (reported) return reported;
+  // A server that lists names only — the canvas carries the actor (designers
+  // can read it; anyone else gets null, and the API decides).
   const canvas = await getCanvasSchema(moduleName, fetchCanvas);
-  return canvas?.activities?.find(
-    (a) => a && typeof a === "object" && a.name === activity,
-  ) ?? null;
+  return findWithActor(canvas?.activities, activity);
 }
 
 interface FlaggedRecord {
@@ -359,9 +406,11 @@ export async function evaluateActivity(
     }
   }
 
+  const standard = standardActivity(activity);
+
   // Rule 2a — `changeStatus` (alias `changeState`) is the explicit
   // state-change override.
-  if ((activity === "changeStatus" || activity === "changeState") && !confirmed) {
+  if ((standard === "changeStatus" || standard === "changeState") && !confirmed) {
     return {
       ok: false,
       structured: {
@@ -391,18 +440,25 @@ export async function evaluateActivity(
     };
   }
 
-  // Rules 3 & 4 apply to custom (workflow-defined) activities only.
-  if (STANDARD_ACTIVITIES.has(activity)) return { ok: true };
-
-  const def = await getActivityDef(moduleName, activity, fetchSchema, fetchCanvas);
-  if (!def) return { ok: true }; // unknown activity — let the API decide.
+  // Rules 3 & 4 apply to custom (workflow-defined) activities, and to standard
+  // create/edit through the actor the schema reports for them (only a server
+  // with activityDetails reports one; the canvas has no standard actors).
+  let def: ActivityDef | null;
+  if (standard) {
+    if (!ACTOR_CHECKED_STANDARDS.has(standard)) return { ok: true };
+    def = await getReportedActivityDef(moduleName, standard, fetchSchema);
+  } else {
+    def = await getActivityDef(moduleName, activity, fetchSchema, fetchCanvas);
+  }
+  if (!def) return { ok: true }; // unknown activity or no actor — let the API decide.
 
   const actor = (def.actor || "").toLowerCase();
 
   if (actor === "human") {
     // Remember which states this activity would have reached, so a follow-up
-    // changeState/state-override to the same state is caught (Rule 2c).
-    const targetStates = await activityTargetStates(moduleName, activity, fetchSchema);
+    // changeState/state-override to the same state is caught (Rule 2c). The
+    // flows map is keyed by the activity's own name, not the caller's spelling.
+    const targetStates = await activityTargetStates(moduleName, def.name, fetchSchema);
     if (targetStates.length > 0) {
       for (const target of targets) {
         if (target === undefined || target === null) continue;
@@ -513,6 +569,170 @@ function checkSingleRef(
   };
 }
 
+// ---------- Location-shape pre-flight ----------
+//
+// A Location field stores `{ lat, lng, placeName }` (canvas type 9). The
+// platform persists whatever it is handed, so a wrong shape is not an error —
+// it is silent corruption: `placeName` filters, spreadsheet export and
+// notification templates all read those keys back and find nothing.
+//
+// The read paths surface Location wrapped as `{ value: X }` (get_entry /
+// list_entries / get_form defaults) and the submit path unwraps that same
+// envelope, so agents mirroring a read back into a submit send the envelope —
+// accepted here. What agents get wrong is the payload inside it: a single
+// "lat,lng" string instead of the object (SS06091).
+
+const LOCATION_SHAPE_HINT =
+  '{ lat: <number>, lng: <number>, placeName: "<place display name>" } ' +
+  '(e.g. { lat: 1.5329204, lng: 103.7995367, placeName: "Taman Universiti, Skudai" })';
+
+const LOCATION_KEYS = ["lat", "lng", "placeName"];
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+/** Short description of what arrived, for the correction hint. */
+function describeReceived(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "string") return `the string ${JSON.stringify(v)}`;
+  if (typeof v === "number") return `the number ${v}`;
+  if (typeof v === "boolean") return `the boolean ${v}`;
+  return `a ${typeof v}`;
+}
+
+function checkLocationValue(
+  field: string,
+  value: unknown,
+): RefShapeError | null {
+  // null/undefined clears the field — allowed, same as references.
+  if (value === null || value === undefined) return null;
+
+  // Unwrap the read-path `{ value: X }` envelope so a read → submit
+  // round-trip passes. Only when it carries no location key itself, so a
+  // genuine payload is never mistaken for an envelope.
+  let target: unknown = value;
+  let locator = field;
+  if (
+    isPlainObject(value) &&
+    "value" in value &&
+    !LOCATION_KEYS.some((k) => k in value)
+  ) {
+    target = value.value;
+    locator = `${field}.value`;
+    if (target === null || target === undefined) return null;
+  }
+
+  const reject = (message: string): RefShapeError => ({
+    field,
+    type: LOCATION_FIELD_TYPE,
+    received: value,
+    message,
+  });
+
+  if (!isPlainObject(target)) {
+    return reject(
+      `Location field '${locator}' must be an object shaped ${LOCATION_SHAPE_HINT} — got ${describeReceived(target)}. ` +
+        `A combined "lat,lng" string is not a Location: split it into numeric 'lat' and 'lng' keys and set 'placeName' to the place's display name.`,
+    );
+  }
+
+  const { lat, lng, placeName } = target;
+  const hasLat = lat !== undefined && lat !== null;
+  const hasLng = lng !== undefined && lng !== null;
+  const hasPlaceName = placeName !== undefined && placeName !== null;
+
+  // Numeric coordinates only — the platform filters and exports read these as
+  // numbers, so "1.53" stored as a string reads back unusable.
+  for (const [key, val, present] of [
+    ["lat", lat, hasLat],
+    ["lng", lng, hasLng],
+  ] as Array<[string, unknown, boolean]>) {
+    if (present && !isFiniteNumber(val)) {
+      return reject(
+        `Location field '${locator}' has '${key}' as ${describeReceived(val)}; it must be a number (unquoted), as in ${LOCATION_SHAPE_HINT}.`,
+      );
+    }
+  }
+  if (hasLat !== hasLng) {
+    return reject(
+      `Location field '${locator}' has only '${hasLat ? "lat" : "lng"}' — latitude and longitude must be given together, as in ${LOCATION_SHAPE_HINT}.`,
+    );
+  }
+  if (hasLat && ((lat as number) < -90 || (lat as number) > 90)) {
+    return reject(
+      `Location field '${locator}' has 'lat' ${lat} out of range — latitude must be between -90 and 90. Check that 'lat' and 'lng' are not swapped.`,
+    );
+  }
+  if (hasLng && ((lng as number) < -180 || (lng as number) > 180)) {
+    return reject(
+      `Location field '${locator}' has 'lng' ${lng} out of range — longitude must be between -180 and 180. Check that 'lat' and 'lng' are not swapped.`,
+    );
+  }
+  if (hasPlaceName && typeof placeName !== "string") {
+    return reject(
+      `Location field '${locator}' has 'placeName' as ${describeReceived(placeName)}; it must be a string, as in ${LOCATION_SHAPE_HINT}.`,
+    );
+  }
+
+  // Matches the platform's own validity rule (FTSLocation.vue): a location is
+  // meaningful with a place name, or with a coordinate pair, or both.
+  const placeNameOk = typeof placeName === "string" && placeName.trim().length > 0;
+  if (!placeNameOk && !(hasLat && hasLng)) {
+    return reject(
+      `Location field '${locator}' carries no location — supply 'lat' and 'lng', or a non-empty 'placeName', as in ${LOCATION_SHAPE_HINT}.`,
+    );
+  }
+  return null;
+}
+
+// ---------- Value-type pre-flight (YesNo / text fields) ----------
+//
+// The platform stores whatever it is handed here too: a YesNo given the string
+// "yes" or a MultilineText given an array is persisted verbatim (SS06110,
+// SS06108). Nothing surfaces it at write time — the web view prints the value —
+// but YesNo filters stop matching and the mobile edit form grey-screens on the
+// entry. These values round-trip bare (no read envelope), and null or "" clears
+// (the platform skips both), so only a present value of the wrong JSON type is
+// rejected.
+
+const YESNO_FIELD_TYPE = "YesNo";
+const TEXT_FIELD_TYPES = new Set(["Text", "MultilineText", "Email"]);
+
+function checkValueType(
+  field: string,
+  type: string,
+  value: unknown,
+): RefShapeError | null {
+  if (value === null || value === undefined || value === "") return null;
+
+  if (type === YESNO_FIELD_TYPE) {
+    if (typeof value === "boolean") return null;
+    return {
+      field,
+      type,
+      received: value,
+      message: `YesNo field '${field}' must be a boolean, true or false — got ${describeReceived(value)}.`,
+    };
+  }
+
+  if (typeof value === "string") return null;
+  const joinHint = Array.isArray(value)
+    ? " To keep several lines, join them into one string with \\n between them."
+    : "";
+  return {
+    field,
+    type,
+    received: value,
+    message: `${type} field '${field}' must be a string — got ${describeReceived(value)}.${joinHint}`,
+  };
+}
+
 function checkRefValue(
   field: string,
   type: string,
@@ -593,8 +813,15 @@ export function validateInputShapesWith(
   const errors: RefShapeError[] = [];
   for (const [key, val] of Object.entries(input)) {
     const type = types.get(key);
-    if (!type || !REF_FIELD_TYPES.has(type)) continue;
-    const e = checkRefValue(key, type, val);
+    if (!type) continue;
+    const e =
+      type === LOCATION_FIELD_TYPE
+        ? checkLocationValue(key, val)
+        : REF_FIELD_TYPES.has(type)
+          ? checkRefValue(key, type, val)
+          : type === YESNO_FIELD_TYPE || TEXT_FIELD_TYPES.has(type)
+            ? checkValueType(key, type, val)
+            : null;
     if (e) errors.push(e);
   }
   return errors;
@@ -608,23 +835,52 @@ function fieldKey(name: string): string {
 }
 
 export interface InputKeyResolution {
-  /** Near-miss keys (casing/spacing/underscores) rewritten in place to the exact field name. */
-  remapped: Array<{ from: string; to: string }>;
+  /**
+   * Keys rewritten in place to the exact field name: near-misses (casing/spacing/
+   * underscores), and — `via: "label"` — the name an activity's form shows for a
+   * field it relabels.
+   */
+  remapped: Array<{ from: string; to: string; via?: "label" }>;
   /** Keys matching no field at all — the platform silently drops these, losing the data. */
   unknown: string[];
 }
 
 /**
+ * The labels an activity's form gives the fields it relabels (SS06181), from a
+ * get_form response: `form: [{ "<field>": { type, label? } }]` → label key
+ * (case/space/underscore-insensitive) → field name. A label two fields share
+ * maps to null, so it is never used. Null when the response carries no form.
+ */
+export function activityLabels(formResponse: unknown): Map<string, string | null> | null {
+  const form = (formResponse as { form?: unknown } | null | undefined)?.form;
+  if (!Array.isArray(form)) return null;
+  const labels = new Map<string, string | null>();
+  for (const item of form) {
+    if (!item || typeof item !== "object") continue;
+    for (const [name, def] of Object.entries(item as Record<string, unknown>)) {
+      const label = (def as { label?: unknown } | null)?.label;
+      if (typeof label !== "string" || !label.trim()) continue;
+      const k = fieldKey(label);
+      labels.set(k, labels.has(k) && labels.get(k) !== name ? null : name);
+    }
+  }
+  return labels;
+}
+
+/**
  * Match input keys against the module's field names, in place. Exact names
- * pass; a key that differs only in case/spacing/underscores is rewritten to
- * the exact field name; anything else is reported so the caller can reject
- * it — the platform discards unmatched keys without any signal, which turns
- * a key typo into silent data loss. Fail-open on a null map (schema
- * unavailable): the server makes the final call.
+ * pass; a key that is the activity form's label for a field (`labels`, see
+ * activityLabels) or differs from a field name only in case/spacing/
+ * underscores is rewritten to the exact field name; anything else is reported
+ * so the caller can reject it — the platform discards unmatched keys without
+ * any signal, which turns a key typo into silent data loss. A key that is a
+ * label for one field and a near-miss of another is ambiguous and reported.
+ * Fail-open on a null map (schema unavailable): the server makes the final call.
  */
 export function resolveInputKeys(
   types: Map<string, string> | null,
   input: Record<string, unknown> | undefined | null,
+  labels?: Map<string, string | null> | null,
 ): InputKeyResolution {
   const result: InputKeyResolution = { remapped: [], unknown: [] };
   if (!input || !types) return result;
@@ -636,11 +892,14 @@ export function resolveInputKeys(
   }
   for (const key of Object.keys(input)) {
     if (types.has(key)) continue;
-    const match = byKey.get(fieldKey(key));
+    const labelled = labels?.get(fieldKey(key));
+    const nearMiss = byKey.get(fieldKey(key));
+    const viaLabel = !!labelled && types.has(labelled) && (!nearMiss || nearMiss === labelled);
+    const match = viaLabel ? labelled : labelled && nearMiss ? null : nearMiss;
     if (match && !Object.prototype.hasOwnProperty.call(input, match)) {
       input[match] = input[key];
       delete input[key];
-      result.remapped.push({ from: key, to: match });
+      result.remapped.push(viaLabel ? { from: key, to: match, via: "label" } : { from: key, to: match });
     } else {
       result.unknown.push(key);
     }
@@ -649,8 +908,9 @@ export function resolveInputKeys(
 }
 
 /**
- * Validate that User/Module/Users/Modules fields in `input` carry the
- * correct shape. Convenience wrapper around getModuleFieldTypes +
+ * Validate that User/Module/Users/Modules and Location fields in `input`
+ * carry the correct shape, and YesNo/text fields a value of the right type.
+ * Convenience wrapper around getModuleFieldTypes +
  * validateInputShapesWith — use this for one-shot calls (submit_activity).
  * Bulk callers should fetch the map once and use validateInputShapesWith
  * directly.
@@ -663,6 +923,68 @@ export async function validateInputShapes(
   if (!input) return [];
   const types = await getModuleFieldTypes(moduleName, fetchSchema);
   return validateInputShapesWith(types, input);
+}
+
+/**
+ * Wording for the structured error returned when pre-flight rejects an input
+ * shape. Reference and Location failures need different corrections, so the
+ * envelope adapts to whichever kinds are present rather than naming
+ * "User/Module" for a Location problem.
+ */
+export function describeShapeErrors(errors: RefShapeError[]): {
+  error: string;
+  message: string;
+  agent_action: string;
+} {
+  const isValueType = (e: RefShapeError) =>
+    e.type === YESNO_FIELD_TYPE || TEXT_FIELD_TYPES.has(e.type);
+  const hasValueType = errors.some(isValueType);
+  const hasLocation = errors.some((e) => e.type === LOCATION_FIELD_TYPE);
+  const hasRef = errors.some((e) => e.type !== LOCATION_FIELD_TYPE && !isValueType(e));
+
+  if (hasValueType && !hasLocation && !hasRef) {
+    return {
+      error: "invalid_field_value_type",
+      message:
+        "One or more fields were submitted with a value of the wrong type. A YesNo field takes a boolean (true or false), never a string such as \"yes\"; Text, MultilineText and Email fields take a single string, never an array or object.",
+      agent_action:
+        "Send each YesNo as true or false and each text field as one string (join several lines with \\n), then resubmit.",
+    };
+  }
+  if (hasValueType) {
+    return {
+      error: "invalid_field_shape",
+      message:
+        "One or more fields were submitted with the wrong shape or type. User/Module fields require { id, value } objects (plural variants take arrays of them); Location fields require { lat, lng, placeName }; YesNo fields take a boolean; Text, MultilineText and Email fields take a single string.",
+      agent_action:
+        "Re-read the entry or call get_form and copy reference and Location values back unchanged, send YesNo as true/false and text as one string, then resubmit.",
+    };
+  }
+  if (hasLocation && !hasRef) {
+    return {
+      error: "invalid_location_field_shape",
+      message:
+        'One or more Location fields were submitted with the wrong shape. A Location is an object { lat, lng, placeName } — lat/lng unquoted numbers, placeName the place\'s display name — never a combined "lat,lng" string.',
+      agent_action:
+        "Rebuild each Location as { lat: <number>, lng: <number>, placeName: \"<display name>\" } and resubmit. Values read from an entry or get_form round-trip unchanged.",
+    };
+  }
+  if (hasLocation && hasRef) {
+    return {
+      error: "invalid_field_shape",
+      message:
+        "One or more fields were submitted with the wrong shape. User/Module fields require { id, value } objects (plural variants take arrays of them); Location fields require { lat, lng, placeName }.",
+      agent_action:
+        "Re-read the entry or call get_form and copy those values back unchanged (they round-trip), then resubmit. Do not pass bare ids, display strings, or a combined \"lat,lng\" string.",
+    };
+  }
+  return {
+    error: "invalid_reference_field_shape",
+    message:
+      "One or more User/Module fields were submitted with the wrong shape. They require { id, value } objects (plural variants take arrays of them).",
+    agent_action:
+      "Re-read the entry or call get_form, copy the User/Module values back unchanged (they round-trip), and resubmit. Do not pass bare ids or display strings.",
+  };
 }
 
 /**
