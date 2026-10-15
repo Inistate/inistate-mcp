@@ -85,6 +85,13 @@ describe("runtime tool schemas", () => {
     });
   });
 
+  it("aggregate_entries", () => {
+    expect(shape(tools, "aggregate_entries")).toEqual({
+      props: ["breakdown", "field", "filters", "groupBy", "interval", "listing", "module", "op", "search", "state", "top", "workspaceId"],
+      required: ["module", "op"],
+    });
+  });
+
   it("get_entry", () => {
     expect(shape(tools, "get_entry")).toEqual({
       props: ["entryId", "module", "workspaceId"],

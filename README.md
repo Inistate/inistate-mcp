@@ -90,6 +90,7 @@ Tools marked **(configure)** are only exposed in configure mode — see [Modes](
 | `get_module_schema` | Get the canvas schema (basic or extended tier) — available in every mode |
 | `get_module_canvas` | Get full module definition with stable IDs (round-trippable) **(configure)** |
 | `list_entries` | Query entries with filters, sorting, and pagination |
+| `aggregate_entries` | Count, sum, average, min or max over matching entries, optionally grouped — the platform does the arithmetic |
 | `get_entry` | Read a single entry by ID |
 | `get_form` | Get form fields and defaults for an activity |
 | `submit_activity` | Create, edit, delete, or run custom activities |

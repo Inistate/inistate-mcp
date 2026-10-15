@@ -102,6 +102,7 @@ let lastCreatePayload: Record<string, unknown> | null = null;
 let lastUpdatePayload: Record<string, unknown> | null = null;
 const getFormCalls: Array<Record<string, unknown>> = [];
 let lastListParams: Record<string, unknown> | null = null;
+let lastAggregateParams: Record<string, unknown> | null = null;
 
 class FakeBackend implements Backend {
   readonly kind = "cloud" as const;
@@ -202,6 +203,17 @@ class FakeBackend implements Backend {
       hasMore: false,
       list: totalItems > 0 ? [{ entryId: 1 }] : [],
     };
+  }
+
+  async aggregateEntries(params: Record<string, unknown>): Promise<unknown> {
+    lastAggregateParams = params;
+    // How a server refuses: a build without the route (bare 404), and a real "module not found".
+    const refuse = (error: string, message: string) => {
+      throw Object.assign(new Error(message), { structured: { error, message, details: null } });
+    };
+    if (params.module === "OldServer") refuse("HTTP 404", "No HTTP resource was found that matches the request URI.");
+    if (params.module === "Missing") refuse("Not found", "Module 'Missing' not found");
+    return { module: params.module, op: params.op, total: { count: 3, value: 30 }, complete: true };
   }
 
   async getEntry(): Promise<unknown> { return {}; }
@@ -376,6 +388,58 @@ describe("list_entries — state in every item", () => {
 
     await client.callTool({ name: "list_entries", arguments: { module: "Projects" } });
     expect(lastListParams?.fields).toBeUndefined();
+  });
+});
+
+describe("aggregate_entries", () => {
+  it("passes the metric, the grouping and list_entries' scoping through to the platform", async () => {
+    const result = await client.callTool({
+      name: "aggregate_entries",
+      arguments: {
+        module: "GL Lines",
+        listing: "This Month",
+        search: "INV*",
+        filters: { "Transaction Date": { between: { min: "2026-09-01", max: "2026-09-30" } } },
+        op: "sum",
+        field: "Amount",
+        groupBy: "Account Type",
+        top: 20,
+      },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(parse(result).total).toEqual({ count: 3, value: 30 });
+    expect(lastAggregateParams).toMatchObject({
+      module: "GL Lines",
+      listing: "This Month",
+      op: "sum",
+      field: "Amount",
+      groupBy: "Account Type",
+      top: 20,
+      search: "INV*",
+    });
+    expect(lastAggregateParams?.filters).toEqual({ "Transaction Date": { between: { min: "2026-09-01", max: "2026-09-30" } } });
+  });
+
+  it("refuses an op the platform has no engine for before calling it", async () => {
+    lastAggregateParams = null;
+    const result = await client.callTool({ name: "aggregate_entries", arguments: { module: "Projects", op: "median" } });
+    expect(result.isError).toBe(true);
+    expect(lastAggregateParams).toBeNull();
+  });
+
+  it("says an older server cannot add up yet, and how to fall back", async () => {
+    const result = await client.callTool({ name: "aggregate_entries", arguments: { module: "OldServer", op: "count" } });
+    expect(result.isError).toBe(true);
+    const res = parse(result);
+    expect(res.error).toBe("not_supported");
+    expect(res.agent_action).toContain("list_entries");
+  });
+
+  it("leaves a real refusal as the platform gave it", async () => {
+    const result = await client.callTool({ name: "aggregate_entries", arguments: { module: "Missing", op: "count" } });
+    expect(result.isError).toBe(true);
+    expect(parse(result).error).toBe("Not found");
   });
 });
 

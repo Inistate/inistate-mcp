@@ -86,6 +86,7 @@ class FakeBackend implements Backend {
   async createModule(): Promise<unknown> { return {}; }
   async updateModule(): Promise<unknown> { return {}; }
   async listEntries(): Promise<unknown> { return {}; }
+  async aggregateEntries(): Promise<unknown> { return {}; }
   async getEntry(): Promise<unknown> { return {}; }
   async getForm(): Promise<unknown> { return {}; }
   async submitActivity(): Promise<unknown> { return nextSubmitResult(); }

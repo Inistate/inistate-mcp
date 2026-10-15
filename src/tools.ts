@@ -362,6 +362,22 @@ function normalizeModuleSections(body: Record<string, unknown>): void {
 
 // ---------- Tool registration ----------
 
+// The query half of list_entries — which entries it reads — shared verbatim by aggregate_entries, so the
+// two tools take one set of query parameters and the platform runs one query for both (FETIAS
+// McpReadQuery). list_entries adds its page (sort, paging, fields); aggregate_entries its metric.
+const listQueryParams = {
+  module: z.string().describe("Module name from list_modules"),
+  listing: z
+    .string()
+    .optional()
+    .describe(
+      "Listing (saved view) name to query, case-insensitive; 'archive' targets archived entries. Defaults to the unfiltered 'Everything' view, which is admin-only on modules with listings — non-admins must name an accessible listing (an access-denied response lists them).",
+    ),
+  state: z.string().optional(),
+  search: z.string().optional().describe("Free-text search across document ID, state, and text-like fields; supports * and ? wildcards"),
+  filters: z.record(z.unknown()).optional(),
+};
+
 export function registerTools(server: McpServer, backend: Backend): { configureTools: RegisteredTool[] } {
   const configureTools: RegisteredTool[] = [];
   // Capability gating (MCP spec §1.6). Read once. Platform-only tools below
@@ -724,7 +740,7 @@ Workflow sequences after workspace is set:
 - Design: design_workflow → create_module (validates internally)
 - Execute: list_entries → get_form → submit_activity
 - Modify: get_module_canvas → validate_design → update_module
-- Query: list_entries → get_entry / get_entry_history`,
+- Query: list_entries → get_entry / get_entry_history; aggregate_entries for totals`,
       ),
       inputSchema: {
         workspaceId: z
@@ -875,16 +891,7 @@ Load resource inistate://schema before modifying to know valid field types, colo
       description:
         "Query entries with filters, sorting, pagination. Filter keys are field display names; values are equality (simple) or operator objects (contains/startsWith/endsWith/min/max/above/below/between/after/before/empty/exists/yes/no/is/not/excludes). Use {or:[…]} for OR; multiple keys are AND-ed. Use 'me' for User-field self-match. See FilterOperators in inistate://schema/runtime for the full set.\n\nAccess: non-admin users cannot query the unfiltered default 'Everything' view on modules that have listings — pass `listing` with one of their accessible listings (an access-denied response names them).\n\nToken control: use `fields` to restrict the returned `data` to just the columns you need. For modules with many fields this can shrink the response by an order of magnitude. Every item carries entryId, documentId and state whatever `fields` holds; the other system fields (date, createdBy, createdDate, updatedBy, updatedDate, assignees, due) come with the full row, but when `fields` is given only if it names them.\n\nCheck each item's `state` before totalling, counting or ranking entries: a Cancelled or Draft entry usually must not count. get_module_schema's stateDetails says what each state means.",
       inputSchema: {
-        module: z.string().describe("Module name from list_modules"),
-        listing: z
-          .string()
-          .optional()
-          .describe(
-            "Listing (saved view) name to query, case-insensitive; 'archive' targets archived entries. Defaults to the unfiltered 'Everything' view, which is admin-only on modules with listings — non-admins must name an accessible listing (an access-denied response lists them).",
-          ),
-        state: z.string().optional(),
-        search: z.string().optional().describe("Free-text search across document ID, state, and text-like fields; supports * and ? wildcards"),
-        filters: z.record(z.unknown()).optional(),
+        ...listQueryParams,
         sortBy: z.string().optional(),
         sortDirection: z.enum(["asc", "desc"]).default("asc").optional(),
         currentPage: z.number().int().default(0).optional(),
@@ -967,6 +974,64 @@ Load resource inistate://schema before modifying to know valid field types, colo
         }
         return ok(data);
       } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // ═══════════════════════════════════════════
+  // 6b. aggregate_entries
+  // ═══════════════════════════════════════════
+  server.registerTool(
+    "aggregate_entries",
+    {
+      title: "Aggregate Entries",
+      description:
+        "Totals without paging rows: count, sum, average (ave), min or max of a field over the entries list_entries would list, optionally grouped by a field (a date by day, week or month) and broken down by a second field. Use it for 'how many / how much / total / average / top N / per month' questions instead of adding up list_entries pages.\n\nThe query parameters (module, listing, state, search, filters) ARE list_entries' — same names, same meaning, same access — so pass exactly what you would pass list_entries to read those entries.\n\nThe answer: `groups` [{key, count, value}] (with a breakdown, `values` [{key, value}] per group), `total` {count, value} over EVERY matching entry, `complete` (false: the module's engine read only its first 501 entries, so the figures are partial — narrow the filters, or say they are partial) and `groupsTruncated` (only the largest `top` groups, or the latest periods, are listed; `total` is still whole).\n\nFilter or group by state when Cancelled or Draft entries must not count. What a figure means — signs, which entries belong in it — comes from the module's description and get_module_schema.",
+      inputSchema: {
+        ...listQueryParams,
+        op: z.enum(["count", "sum", "ave", "min", "max"]).describe("The metric"),
+        field: z.string().optional().describe("Field the metric reads (a number for sum/ave; a number or date for min/max). Not needed for count."),
+        groupBy: z.string().optional().describe("Field to group by: a display name, or state, date, createdBy, assignees …"),
+        interval: z.enum(["day", "week", "month"]).optional().describe("Only when groupBy is a date field. Default day."),
+        breakdown: z.string().optional().describe("Second field, splitting each group"),
+        top: z.number().int().min(1).max(500).optional().describe("Most groups returned, 1–500. Default 100."),
+        workspaceId: wsParam,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    },
+    async ({ module: moduleName, listing, state, search, filters, op, field, groupBy, interval, breakdown, top, workspaceId }) => {
+      try {
+        applyWorkspace(workspaceId);
+        const data = await backend.aggregateEntries({
+          module: moduleName,
+          listing,
+          state,
+          search,
+          filters,
+          op,
+          field,
+          groupBy,
+          interval,
+          breakdown,
+          top,
+        });
+        return ok(data);
+      } catch (e) {
+        // A platform build without the route answers a bare 404 (no `error` of its own: a missing
+        // module says "Not found").
+        const structured = e && typeof e === "object" && "structured" in e
+          ? (e as { structured: { error?: string } }).structured
+          : null;
+        if (structured && structured.error === "HTTP 404") {
+          return err({
+            structured: {
+              error: "not_supported",
+              message: "This Inistate server does not offer aggregate_entries yet.",
+              agent_action: "Use list_entries instead, and tell the user any total you give was added up from the rows you read.",
+            },
+          });
+        }
         return err(e);
       }
     },

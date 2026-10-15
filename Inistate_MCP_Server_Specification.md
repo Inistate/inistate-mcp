@@ -174,6 +174,7 @@ The **Surface** column indicates the server mode(s) in which the tool is visible
 | 5 | `get_module_schema` | `GET /api/mcp/{name}?tier=` | configure+ | design, modify | Both | Get module fields, states, activities, flows |
 | 6 | `get_module_canvas` | `GET /api/configure/{name}` | configure+ | modify | Both | Get full module definition with stable IDs |
 | 7 | `list_entries` | `POST /api/mcp/list` | runtime | execute, query | Both | Query entries with filters |
+| 7b | `aggregate_entries` | `POST /api/mcp/aggregate` | runtime | query | Platform | Count, sum, average, min or max over matching entries, optionally grouped |
 | 8 | `get_entry` | `POST /api/mcp/entry` | runtime | execute, query | Both | Read a single entry |
 | 9 | `get_form` | `POST /api/mcp/form` | runtime | execute | Both | Get activity form fields and defaults |
 | 10 | `submit_activity` | `POST /api/mcp/activity` | runtime | execute | Both | Perform create/edit/delete/custom activity |
@@ -3086,6 +3087,7 @@ async function updateModule(args: UpdateModuleArgs) {
 | `get_module_schema` | GET | `/api/mcp/{moduleName}?tier={tier}` | — |
 | `get_module_canvas` | GET | `/api/configure/{moduleName}` | — |
 | `list_entries` | POST | `/api/mcp/list` | `{ module, state?, search?, filters?, sortBy?, sortDirection?, currentPage?, pageSize? }` |
+| `aggregate_entries` | POST | `/api/mcp/aggregate` | `{ module, op, listing?, state?, filters?, field?, groupBy?, interval?, breakdown?, top? }` |
 | `get_entry` | POST | `/api/mcp/entry` | `{ module, entryId }` |
 | `get_form` | POST | `/api/mcp/form` | `{ module, activity?, entryId? }` |
 | `submit_activity` | POST | `/api/mcp/activity` | `{ module, activity, entryId?, entryIds?, input?, state?, comment?, assignees?, due?, ai? }` |
