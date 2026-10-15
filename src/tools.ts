@@ -1018,12 +1018,13 @@ Load resource inistate://schema before modifying to know valid field types, colo
         });
         return ok(data);
       } catch (e) {
-        // A platform build without the route answers a bare 404 (no `error` of its own: a missing
-        // module says "Not found").
+        // A platform build without the route answers with no `error` of its own: 405 where the
+        // GET-only api/mcp/{moduleName} route catches the path (what 132 and production answered
+        // before FETIAS r33760), or a bare 404. A missing module says "Not found" and stays as is.
         const structured = e && typeof e === "object" && "structured" in e
           ? (e as { structured: { error?: string } }).structured
           : null;
-        if (structured && structured.error === "HTTP 404") {
+        if (structured && (structured.error === "HTTP 405" || structured.error === "HTTP 404")) {
           return err({
             structured: {
               error: "not_supported",

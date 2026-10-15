@@ -211,7 +211,8 @@ class FakeBackend implements Backend {
     const refuse = (error: string, message: string) => {
       throw Object.assign(new Error(message), { structured: { error, message, details: null } });
     };
-    if (params.module === "OldServer") refuse("HTTP 404", "No HTTP resource was found that matches the request URI.");
+    if (params.module === "OldServer") refuse("HTTP 405", "The requested resource does not support http method 'POST'.");
+    if (params.module === "OldServer404") refuse("HTTP 404", "No HTTP resource was found that matches the request URI.");
     if (params.module === "Missing") refuse("Not found", "Module 'Missing' not found");
     return { module: params.module, op: params.op, total: { count: 3, value: 30 }, complete: true };
   }
@@ -428,8 +429,8 @@ describe("aggregate_entries", () => {
     expect(lastAggregateParams).toBeNull();
   });
 
-  it("says an older server cannot add up yet, and how to fall back", async () => {
-    const result = await client.callTool({ name: "aggregate_entries", arguments: { module: "OldServer", op: "count" } });
+  it.each(["OldServer", "OldServer404"])("says an older server cannot add up yet, and how to fall back (%s)", async (module) => {
+    const result = await client.callTool({ name: "aggregate_entries", arguments: { module, op: "count" } });
     expect(result.isError).toBe(true);
     const res = parse(result);
     expect(res.error).toBe("not_supported");
