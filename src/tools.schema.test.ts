@@ -85,6 +85,13 @@ describe("runtime tool schemas", () => {
     });
   });
 
+  it("aggregate_entries", () => {
+    expect(shape(tools, "aggregate_entries")).toEqual({
+      props: ["breakdown", "field", "filters", "groupBy", "interval", "listing", "module", "op", "search", "state", "top", "workspaceId"],
+      required: ["module", "op"],
+    });
+  });
+
   it("get_entry", () => {
     expect(shape(tools, "get_entry")).toEqual({
       props: ["entryId", "module", "workspaceId"],
@@ -214,6 +221,10 @@ describe("configure tool schemas", () => {
       props: ["activities", "card", "description", "flows", "icon", "id", "information", "name", "states", "workspaceId"],
       required: ["id"],
     });
+  });
+
+  it("does not advertise local-only source introspection on the hosted backend", () => {
+    expect(tools.find((tool) => tool.name === "scaffold_module")).toBeUndefined();
   });
 
   // SS06151: a Module/User field names the connected field it shows (the designer's "Display

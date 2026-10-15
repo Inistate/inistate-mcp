@@ -98,6 +98,7 @@ class FakeLocalBackend implements Backend {
   async createModule(): Promise<unknown> { return { _fake: true }; }
   async updateModule(): Promise<unknown> { return { _fake: true }; }
   async listEntries(): Promise<unknown> { return { _fake: true }; }
+  async aggregateEntries(): Promise<unknown> { return { _fake: true }; }
   async getEntry(): Promise<unknown> { return { _fake: true }; }
   async getForm(): Promise<unknown> { return { _fake: true }; }
   async submitActivity(): Promise<unknown> { return { _fake: true }; }

@@ -65,6 +65,21 @@ export interface ListEntriesParams {
   fields?: string[];
 }
 
+/** aggregate_entries: one metric over the entries a listing and filters match, optionally grouped. */
+export interface AggregateEntriesParams {
+  module: string;
+  listing?: string;
+  state?: string;
+  search?: string;
+  filters?: Record<string, unknown>;
+  op: "count" | "sum" | "ave" | "min" | "max";
+  field?: string;
+  groupBy?: string;
+  interval?: "day" | "week" | "month";
+  breakdown?: string;
+  top?: number;
+}
+
 export interface GetEntryParams {
   module: string;
   entryId: string | number;
@@ -151,6 +166,7 @@ export interface Backend {
   updateModule(payload: Record<string, unknown>): Promise<unknown>;
 
   listEntries(params: ListEntriesParams): Promise<unknown>;
+  aggregateEntries(params: AggregateEntriesParams): Promise<unknown>;
   getEntry(params: GetEntryParams): Promise<unknown>;
   getForm(params: GetFormParams): Promise<unknown>;
   submitActivity(payload: Record<string, unknown>): Promise<unknown>;
@@ -238,6 +254,20 @@ export class CloudBackend implements Backend {
     if (p.pageSize !== undefined) body.pageSize = p.pageSize;
     if (p.fields && p.fields.length > 0) body.fields = p.fields;
     return api.post("/api/mcp/list", body);
+  }
+
+  aggregateEntries(p: AggregateEntriesParams): Promise<unknown> {
+    const body: Record<string, unknown> = { module: p.module, op: p.op };
+    if (p.listing) body.listing = p.listing;
+    if (p.state) body.state = p.state;
+    if (p.search) body.search = p.search;
+    if (p.filters) body.filters = p.filters;
+    if (p.field) body.field = p.field;
+    if (p.groupBy) body.groupBy = p.groupBy;
+    if (p.interval) body.interval = p.interval;
+    if (p.breakdown) body.breakdown = p.breakdown;
+    if (p.top !== undefined) body.top = p.top;
+    return api.post("/api/mcp/aggregate", body);
   }
 
   getEntry(p: GetEntryParams): Promise<unknown> {

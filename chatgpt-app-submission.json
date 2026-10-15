@@ -57,7 +57,7 @@
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Only retrieves a module schema so the user can inspect fields, states, activities, and flows.",
+        "read_only_justification": "Retrieves exactly one named module's schema so the user can inspect its fields, states, activities, and flows; it never invokes an activity or changes a module.",
         "open_world_justification": "Only reads private module configuration in Inistate and does not affect public internet state.",
         "destructive_justification": "Does not delete, overwrite, or make irreversible changes."
       }
@@ -93,7 +93,7 @@
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Only retrieves a single entry and its current state without modifying it.",
+        "read_only_justification": "Retrieves exactly one entry identified by module and entry ID, including its current values and state; it cannot invoke an activity or modify the entry.",
         "open_world_justification": "Only reads private workspace entry data in Inistate and does not affect public internet state.",
         "destructive_justification": "Does not delete or irreversibly alter data."
       }
@@ -105,7 +105,7 @@
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Only returns form fields, options, and requirements for an activity without submitting anything.",
+        "read_only_justification": "Retrieves the field schema, options, and requirements for one specified activity without invoking or submitting that activity.",
         "open_world_justification": "Only reads private workflow form metadata in Inistate and does not publish or modify public internet state.",
         "destructive_justification": "Does not delete, overwrite, or trigger irreversible actions."
       }
@@ -117,7 +117,7 @@
         "destructiveHint": true
       },
       "justifications": {
-        "read_only_justification": "Creates, updates, comments on, deletes, or changes the state of workflow entries and therefore modifies backend data.",
+        "read_only_justification": "Invokes one explicitly named workflow activity for the supplied entry or new entry. It can create, update, comment on, delete, or change workflow state and therefore modifies backend data.",
         "open_world_justification": "Only updates private workflow records inside Inistate and does not publish or modify public internet state.",
         "destructive_justification": "Can perform high-impact persistent actions such as deleting entries or changing workflow state."
       }
@@ -206,18 +206,6 @@
         "destructive_justification": "Does not delete, overwrite, or perform irreversible actions."
       }
     },
-    "scaffold_module": {
-      "annotations": {
-        "readOnlyHint": true,
-        "openWorldHint": false,
-        "destructiveHint": false
-      },
-      "justifications": {
-        "read_only_justification": "On the submitted hosted backend, returns a structured capability-unavailable response and does not create or modify any data.",
-        "open_world_justification": "Does not publish content, send messages, or change public internet state or external third-party systems.",
-        "destructive_justification": "Only reads source data and produces a draft; it does not delete, overwrite, or irreversibly change the source or any Inistate records."
-      }
-    },
     "create_module": {
       "annotations": {
         "readOnlyHint": false,
@@ -249,9 +237,21 @@
         "destructiveHint": true
       },
       "justifications": {
-        "read_only_justification": "Bulk variant of submit_activity — creates, updates, deletes, or changes state of multiple workflow entries in a single call, modifying backend data.",
+        "read_only_justification": "Invokes one explicitly named workflow activity across the supplied list of entries. It can create, update, delete, or change workflow state for multiple entries and therefore modifies backend data.",
         "open_world_justification": "Only updates private workflow records inside Inistate and does not publish or modify public internet state.",
         "destructive_justification": "Can perform high-impact persistent actions across multiple entries at once, including deletion and workflow state changes."
+      }
+    },
+    "aggregate_entries": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Calculates a requested count or numeric aggregate over matching entries without returning or changing the entries themselves.",
+        "open_world_justification": "Only reads private Inistate workspace records and does not access or modify public internet state.",
+        "destructive_justification": "Does not delete, overwrite, or perform any irreversible action."
       }
     },
     "switch_mode": {

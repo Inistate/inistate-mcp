@@ -1,5 +1,20 @@
 # inistate-mcp
 
+## 1.3.0
+
+### Minor Changes
+
+- 91200d6: New tool `aggregate_entries`: count, sum, average, min or max of a field over the entries `list_entries` would list, optionally grouped (a date by day, week or month) and broken down. The platform does the arithmetic (`POST /api/mcp/aggregate`), so "how much did we spend in September" no longer means paging through `list_entries` and adding up in the model. Its query parameters (`module`, `listing`, `state`, `search`, `filters`) are `list_entries`' own — one shared definition — and the platform builds one query for both, so the entries a total covers are the entries the list shows, with the same access and the same refusals. The answer says whether every matching entry was counted (`complete`) and whether groups were cut (`groupsTruncated`); an external data source such as an AutoCount book adds up in its own database and is always complete. Against a platform build without the route the tool answers `not_supported` and tells the agent to fall back to `list_entries`. The design is FETIAS `docs/analytics-aggregate-entries-proposal.md`.
+
+### Patch Changes
+
+- ba6e89f: `aggregate_entries` recognises a platform build without the route by its 405 as well as a 404: before FETIAS r33760 the GET-only `api/mcp/{moduleName}` route caught `POST /api/mcp/aggregate` and answered 405 (seen on the 132 test server), so the tool showed a raw error instead of `not_supported` with the fall-back to `list_entries`.
+- 5239a73: Clarify the MCP contracts submitted to ChatGPT: the module schema, entry, form,
+  single-activity, and bulk-activity tools now state their bounded operation and
+  side effects explicitly. The local-only `scaffold_module` is no longer
+  advertised by the hosted Platform. Add complete ChatGPT submission annotations
+  for `aggregate_entries`.
+
 ## 1.2.0
 
 ### Minor Changes

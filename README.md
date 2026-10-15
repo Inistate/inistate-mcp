@@ -80,7 +80,7 @@ Then point your MCP client at `node /absolute/path/to/inistate-mcp/build/index.j
 
 ## Tools
 
-Tools marked **(configure)** are only exposed in configure mode — see [Modes](#modes). Tools the active backend cannot serve (e.g. `scaffold_module` on the hosted Platform) stay registered but return a structured capability message instead of failing silently.
+Tools marked **(configure)** are only exposed in configure mode — see [Modes](#modes). Tools that depend on a local-runtime capability, such as `scaffold_module`, are not exposed by the hosted Platform.
 
 | Tool | Description |
 |------|-------------|
@@ -90,6 +90,7 @@ Tools marked **(configure)** are only exposed in configure mode — see [Modes](
 | `get_module_schema` | Get the canvas schema (basic or extended tier) — available in every mode |
 | `get_module_canvas` | Get full module definition with stable IDs (round-trippable) **(configure)** |
 | `list_entries` | Query entries with filters, sorting, and pagination |
+| `aggregate_entries` | Count, sum, average, min or max over matching entries, optionally grouped — the platform does the arithmetic |
 | `get_entry` | Read a single entry by ID |
 | `get_form` | Get form fields and defaults for an activity |
 | `submit_activity` | Create, edit, delete, or run custom activities |
@@ -103,7 +104,7 @@ Tools marked **(configure)** are only exposed in configure mode — see [Modes](
 | `validate_design` | Validate a module schema before creating or updating **(configure)** |
 | `create_module` | Create a new module with schema **(configure)** |
 | `update_module` | Update an existing module's schema **(configure)** |
-| `scaffold_module` | Draft a module schema from existing data (SQLite, Notion, or Airtable table) **(configure)** — served by the local runtime (inistate-core); on the hosted Platform backend it returns a capability message pointing to `design_workflow` |
+| `scaffold_module` | Draft a module schema from existing SQLite, Notion, or Airtable data **(configure)** — local runtime (inistate-core) only; it never creates a module |
 | `switch_mode` | Switch the active mode (runtime / configure / frontend) |
 
 ## Resources
