@@ -2185,12 +2185,12 @@ Load resources inistate://schema and inistate://design-guide before designing fo
   // ═══════════════════════════════════════════
   // The inverse on-ramp: the user already has data in a Notion database, an
   // Airtable table, or a local SQLite table. Capability-gated — only a backend
-  // that declares `scaffold` (the local runtime) serves it; the hosted Platform
-  // returns a capability message. The introspection itself lives behind the
-  // Backend so the closed-source engine owns it.
-  // Param descriptions follow the same gating as the tool description: a
-  // backend that cannot serve the tool registers the same shape (so the
-  // structural contract is stable) without the operating manual attached.
+  // that declares `scaffold` (the local runtime) serves it. It is not
+  // advertised by the hosted Platform: an unavailable tool is not a useful
+  // model-callable operation. The introspection itself lives behind the Backend
+  // so the closed-source engine owns it.
+  // Only a capable local runtime registers the tool, so its detailed input
+  // descriptions are never exposed as an unusable hosted operation.
   const scaffoldInput = caps.scaffold
     ? {
         source: z
@@ -2215,14 +2215,14 @@ Load resources inistate://schema and inistate://design-guide before designing fo
         state: z.string().optional(),
       };
 
-  configureTools.push(server.registerTool(
+  if (caps.scaffold) configureTools.push(server.registerTool(
     "scaffold_module",
     {
       title: "Scaffold Module from Existing Data",
       description: gatedDesc(
         caps.scaffold,
         "Design a module schema together with the user from data they ALREADY have — a Notion database, an Airtable table, or a local SQLite table. This is the inverse on-ramp: instead of designing from scratch, read the existing shape and refine it with the user. One container (a SQLite database, an Airtable base, a Notion workspace) can yield several modules — discover the tables, then model the chosen ones.\n\nFlow (use it conversationally):\n1. DISCOVER — call with just `source` pointed at the container: a SQLite database path, an `airtable://<baseId>` (no table), or a bare `notion://`. Returns { discovery: true, tables: [{ name, id?, columns, rows?, hasState, scaffold_source }] }. Show these to the user and ask which one(s) to model; each becomes its own module.\n2. DRAFT — call again with a chosen table's `scaffold_source` as `source` (or a SQLite `table`). Returns { schema, validation, suggestions } — columns become typed fields, a detected status/state/stage/phase column becomes states.\n3. REFINE together — confirm the inferred field types with the user, then define activities + flows (the governed transitions; design_workflow can scaffold a pattern).\n4. CREATE — validate_design → create_module, then point the runtime at the same data.\n\nTargets: notion://<databaseId> or bare notion:// (needs INISTATE_NOTION_TOKEN), airtable://<baseId>/<tableIdOrName> or airtable://<baseId> (needs INISTATE_AIRTABLE_TOKEN; listing a base's tables needs schema.bases:read), or a local SQLite path. Credentials are read from the environment — never pass tokens as arguments.",
-        "Local-runtime only; use design_workflow to draft a module here.",
+        "Local-runtime only. This inspects an existing data source and returns a module-schema draft; it never creates a module. Use design_workflow to draft a module here.",
       ),
       inputSchema: scaffoldInput,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },

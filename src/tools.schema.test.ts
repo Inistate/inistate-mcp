@@ -223,6 +223,10 @@ describe("configure tool schemas", () => {
     });
   });
 
+  it("does not advertise local-only source introspection on the hosted backend", () => {
+    expect(tools.find((tool) => tool.name === "scaffold_module")).toBeUndefined();
+  });
+
   // SS06151: a Module/User field names the connected field it shows (the designer's "Display
   // Information"). zod strips keys a shape does not declare, so without this the value never
   // reached /api/configure.
