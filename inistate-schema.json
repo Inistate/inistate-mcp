@@ -186,6 +186,16 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Subset of allowed options for Selection/Tag fields in this activity. Options may include emoji prefixes. Omit to allow all options."
+        },
+        "hidden": {
+          "type": "boolean",
+          "readOnly": true,
+          "description": "Read back only (get_module_canvas): this activity's form never shows the field - the designer turned it off and gave it no condition. Same rule get_form reports; submit_activity refuses a value for it. Ignored on input (update_module does not set visibility)."
+        },
+        "visibleWhen": {
+          "type": "string",
+          "readOnly": true,
+          "description": "Read back only (get_module_canvas): the form shows the field only while this condition holds, written in display names, e.g. {{Skip Reason}}=='Other'. A required field with a condition is required only while it is shown. Ignored on input."
         }
       },
       "additionalProperties": false
