@@ -1050,6 +1050,63 @@ describe("submit_activity entryId normalization", () => {
   });
 });
 
+// SS06044: the platform re-checks the person's approval itself for the `comment` standard
+// (hybrid actor) and for an App module's hybrid-tier email recipients (SS05963). The client
+// guard read `confirmed` but the call it posted never carried it, so a comment approved by
+// the user came back hybrid_requires_confirmation however often it was resubmitted.
+describe("submit_activity forwards confirmed", () => {
+  it("passes confirmed: true on to the platform with an approved comment", async () => {
+    lastSubmitPayload = null;
+    const result = await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "comment",
+        entryId: 1025943,
+        comment: "Approved by the user",
+        confirmed: true,
+        ai: { reasoning: "the user approved this exact text", model: "test-model", confidence: 0.9 },
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastSubmitPayload!.activity).toBe("comment");
+    expect(lastSubmitPayload!.confirmed).toBe(true);
+  });
+
+  it("passes it on for any activity the user approved", async () => {
+    lastSubmitPayload = null;
+    await client.callTool({
+      name: "submit_activity",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        input: { Title: "x" },
+        confirmed: true,
+        ai: { reasoning: "test", model: "test-model", confidence: 0.9 },
+      },
+    });
+    expect(lastSubmitPayload!.confirmed).toBe(true);
+  });
+
+  it("does not claim an approval nobody gave", async () => {
+    for (const confirmed of [undefined, false]) {
+      lastSubmitPayload = null;
+      await client.callTool({
+        name: "submit_activity",
+        arguments: {
+          module: "Projects",
+          activity: "create",
+          input: { Title: "x" },
+          ...(confirmed === undefined ? {} : { confirmed }),
+          ai: { reasoning: "test", model: "test-model", confidence: 0.9 },
+        },
+      });
+      expect(lastSubmitPayload).not.toBeNull();
+      expect(lastSubmitPayload!.confirmed).toBeUndefined();
+    }
+  });
+});
+
 describe("update_module unknown-id stripping", () => {
   it("strips ids that match no canvas element and reports them", async () => {
     const result = await client.callTool({

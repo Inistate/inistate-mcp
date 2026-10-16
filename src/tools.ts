@@ -1314,6 +1314,10 @@ Load resource inistate://schema before modifying to know valid field types, colo
         if (assignees) body.assignees = assignees;
         if (due) body.due = due;
         if (ai) body.ai = ai;
+        // SS06044: the platform checks the approval itself where it matters - the `comment`
+        // standard (hybrid) and an App module's hybrid-tier email recipients (SS05963) - so
+        // the guard's `confirmed` has to travel with the call, not stop at the guard.
+        if (confirmed === true) body.confirmed = true;
         if (idempotencyKey) body.idempotencyKey = idempotencyKey;
         if (expectedVersion !== undefined) body.expectedVersion = expectedVersion;
         const target = entryId ?? (entryIds ? `bulk(${entryIds.length})` : "new");
