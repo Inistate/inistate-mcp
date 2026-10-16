@@ -182,6 +182,7 @@ publishes to npm and the MCP registry.
 ```bash
 npm run release              # full release
 npm run release -- --no-push # do everything locally, push nothing
+npm run package:chatgpt      # create the ChatGPT plugin ZIP in artifacts/
 ```
 
 This does:
