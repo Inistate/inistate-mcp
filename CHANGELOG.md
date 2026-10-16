@@ -1,5 +1,18 @@
 # inistate-mcp
 
+## 1.3.1
+
+### Patch Changes
+
+- f70321f: Add `npm run package:chatgpt` to create the ChatGPT plugin upload ZIP: a
+  `.codex-plugin/plugin.json` for the existing plugin ID (major version bumped
+  from the package version), its `.mcp.json` connection, and the app icon from
+  `chatgpt-plugin/assets/`.
+- f70321f: State in the descriptions of `get_module_schema`, `get_entry`, `get_form`,
+  `submit_activity` and `submit_activities` that each is one bounded operation:
+  the first three are read-only lookups, and the submit tools perform exactly one
+  named activity per call (activity names are data, not hidden tools).
+
 ## 1.3.0
 
 ### Minor Changes
