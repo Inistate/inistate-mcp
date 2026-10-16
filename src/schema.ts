@@ -123,6 +123,24 @@ export const SCHEMA_CONFIGURE = buildSchemaView(
 
 export const VALID_FIELD_TYPES: string[] = SCHEMA.definitions.FieldType.enum;
 
+// SS06300 (ruled 2026-10-16) - the types the platform refuses on a NEW field made by AI
+// (McpCanvasTransformer.AiBlockedCreateTypeKeys): Date Range is internal, and a Formula needs an
+// expression no MCP schema carries, so it would never compute. Existing fields of these types (they
+// carry an id) round-trip on update untouched.
+export const AI_BLOCKED_CREATE_TYPES = new Set(["daterange", "formula"]);
+
+/** The field types an AI may create: what design_workflow offers. */
+export const AI_CREATABLE_FIELD_TYPES: string[] = VALID_FIELD_TYPES.filter(
+  (t) => !AI_BLOCKED_CREATE_TYPES.has(t.toLowerCase()),
+);
+
+/** The platform's wording (McpCanvasTransformer.AiBlockedCreateTypeHintFor). */
+function aiBlockedCreateHint(baseType: string): string {
+  return baseType === "formula"
+    ? "'Formula' is an internal field type that cannot be created by AI: a formula field needs an expression, which cannot be given here, so it would never compute. Model the value as a Number or Currency field instead, and set the formula in Studio if it should be calculated."
+    : "'Date Range' is an internal field type that cannot be created by AI. Model a date range as two Date fields instead (e.g. 'Start Date' and 'End Date').";
+}
+
 // SS06168 — Studio's reserved words (webApp src/components/commons/designValidator.js
 // activityReservedKeywords / informationReservedKeywords). Studio refuses a custom activity or
 // information field with one of these names and shows the module as "Configuration incomplete";
@@ -693,6 +711,10 @@ export function validateDesign(
 
     const base = baseTypeOf(ftype);
     const hasConnection = typeof f.connection === "string" && f.connection.trim() !== "";
+    // SS06300: mirrors the platform - new fields only, so validate_design cannot pass what create_module refuses.
+    if (AI_BLOCKED_CREATE_TYPES.has(base) && (mode === "create" || !f.id)) {
+      errors.push(`Information field '${f.name}': ${aiBlockedCreateHint(base)}`);
+    }
 
     if ((base === "selection" || base === "tag")
       && (!f.options || f.options.length === 0)
@@ -734,6 +756,10 @@ export function validateDesign(
             errors.push(
               `Table field '${f.name}' sub-field '${sf.name}' has invalid type '${sf.type}'.`,
             );
+          }
+          if (subType && AI_BLOCKED_CREATE_TYPES.has(baseTypeOf(subType))
+            && (mode === "create" || !(sf as { id?: string }).id)) {
+            errors.push(`Sub-field '${sf.name}' in '${f.name}': ${aiBlockedCreateHint(baseTypeOf(subType))}`);
           }
           if (subType && REFERENCE_TYPES_LOWER.has(baseTypeOf(subType))) {
             errors.push(
@@ -1175,7 +1201,7 @@ export function normalizeIndustry(industry?: string | null): string {
 // Returned with every design_workflow call — the design funnel's first step is
 // where agents form their vocabulary, so the constraints ride along.
 const DESIGN_CONSTRAINTS = {
-  field_types: VALID_FIELD_TYPES,
+  field_types: AI_CREATABLE_FIELD_TYPES,
   state_colors: VALID_COLORS,
   reference_fields:
     "User/Users/Module/Modules fields require 'connection': the name of a module that exists in this workspace. Not supported inside Table sub-fields.",

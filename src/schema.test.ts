@@ -570,6 +570,40 @@ describe("validateDesign — platform parity", () => {
 
 // SS06168: create_module built a "Service Job" module whose custom activity was named "Assign";
 // Studio reserves that name and showed the module as "Configuration incomplete".
+describe("validateDesign — types AI cannot create (SS06300)", () => {
+  const states = [{ name: "Open", color: "#5A6070", initial: true }];
+
+  it("refuses a new Formula field, saying how to model it instead", () => {
+    const r = validateDesign({ name: "Claims", information: [{ name: "Total", type: "Formula" }], states } as any);
+    expect(r.errors.join(" ")).toContain("'Formula' is an internal field type that cannot be created by AI");
+    expect(r.errors.join(" ")).toContain("Number or Currency");
+  });
+
+  it("refuses a new Date Range field as before", () => {
+    const r = validateDesign({ name: "Bookings", information: [{ name: "Period", type: "DateRange" }], states } as any);
+    expect(r.errors.join(" ")).toContain("'Date Range' is an internal field type");
+  });
+
+  it("refuses a new Formula column in a table", () => {
+    const r = validateDesign({
+      name: "Orders",
+      information: [{ name: "Lines", type: "Table", fields: [{ name: "Qty", type: "Number" }, { name: "Amount", type: "Formula" }] }],
+      states,
+    } as any);
+    expect(r.errors.join(" ")).toContain("Amount");
+  });
+
+  it("keeps existing Formula fields and columns on update", () => {
+    const r = validateDesign({
+      information: [
+        { id: "tot1", name: "Total", type: "Formula" },
+        { id: "lines1", name: "Lines", type: "Table", fields: [{ id: "amt1", name: "Amount", type: "Formula" }] },
+      ],
+    } as any, "update");
+    expect(r.errors.filter((e: string) => e.includes("cannot be created by AI"))).toEqual([]);
+  });
+});
+
 describe("validateDesign — Studio's reserved names", () => {
   const serviceJob = (activityName: string, extra: Record<string, any> = {}) => ({
     name: "Service Job",
@@ -1003,6 +1037,16 @@ describe("designWorkflow", () => {
       expect(stateNames.has(flow.from)).toBe(true);
       expect(stateNames.has(flow.to)).toBe(true);
     }
+  });
+
+  // SS06300 (ruled 2026-10-16): Date Range and Formula are not offered to AI - the platform refuses both on a
+  // new field (a Formula needs an expression no MCP schema carries, so it would never compute).
+  it("does not offer the types AI cannot create", () => {
+    const types = designWorkflow("an expense claim with an amount").constraints.field_types;
+    expect(types).not.toContain("DateRange");
+    expect(types).not.toContain("Formula");
+    expect(types).toContain("Number");
+    expect(types).toContain("Currency");
   });
 
   it("ships the design constraints with every response", () => {
