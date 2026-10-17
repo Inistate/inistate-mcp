@@ -1107,6 +1107,47 @@ describe("submit_activity forwards confirmed", () => {
   });
 });
 
+// SS06342: the bulk sibling of SS06044. An App send whose recipients need a person's approval (a
+// Notifications send to more than 10 members, a mail send to a "hybrid" recipient list) is refused
+// by the platform unless the submit says the user approved it. submit_activities checked `confirmed`
+// in its own guard but never posted it, so an approved bulk send came back "Send needs confirmation"
+// however often it was resubmitted.
+describe("submit_activities forwards confirmed", () => {
+  it("passes confirmed: true on to the platform with an approved bulk send", async () => {
+    lastBulkPayload = null;
+    const result = await client.callTool({
+      name: "submit_activities",
+      arguments: {
+        module: "Projects",
+        activity: "create",
+        confirmed: true,
+        ai: { reasoning: "the user approved these sends", model: "test-model", confidence: 0.9 },
+        items: [{ input: { Title: "a" } }, { input: { Title: "b" } }],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(lastBulkPayload!.confirmed).toBe(true);
+  });
+
+  it("does not claim an approval nobody gave", async () => {
+    for (const confirmed of [undefined, false]) {
+      lastBulkPayload = null;
+      await client.callTool({
+        name: "submit_activities",
+        arguments: {
+          module: "Projects",
+          activity: "create",
+          ...(confirmed === undefined ? {} : { confirmed }),
+          ai: { reasoning: "test", model: "test-model", confidence: 0.9 },
+          items: [{ input: { Title: "a" } }],
+        },
+      });
+      expect(lastBulkPayload).not.toBeNull();
+      expect(lastBulkPayload!.confirmed).toBeUndefined();
+    }
+  });
+});
+
 describe("update_module unknown-id stripping", () => {
   it("strips ids that match no canvas element and reports them", async () => {
     const result = await client.callTool({

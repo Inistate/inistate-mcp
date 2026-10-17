@@ -1621,6 +1621,9 @@ Load resource inistate://schema before modifying to know valid field types, colo
           items,
         };
         if (ai) body.ai = ai;
+        // SS06342: as submit_activity (SS06044) - the platform re-checks the approval itself for
+        // an App send whose recipients need one, so the guard's `confirmed` travels with the call.
+        if (confirmed === true) body.confirmed = true;
 
         log(
           "submit_activities",
